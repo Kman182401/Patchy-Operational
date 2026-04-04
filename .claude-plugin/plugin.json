@@ -1,0 +1,8 @@
+{
+  "name": "patchy-bot",
+  "version": "0.1.0",
+  "description": "Development, debugging, and operations skills for the Patchy Telegram Bot — UX design, code quality, service management, database inspection, and diagnostics",
+  "author": {
+    "name": "Karson"
+  }
+}

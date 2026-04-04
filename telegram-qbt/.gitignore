@@ -1,0 +1,8 @@
+.env
+state.sqlite3
+state.sqlite3-wal
+state.sqlite3-shm
+__pycache__/
+.venv/
+.pytest_cache/
+*.pyc

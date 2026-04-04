@@ -1,0 +1,52 @@
+{
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Bash(npm run lint:*)",
+      "Bash(npm run test:*)",
+      "Bash(npm run storybook:*)",
+      "Bash(npx playwright test:*)",
+      "Bash(git diff:*)",
+      "Bash(git status:*)"
+    ],
+    "ask": ["Bash(git push:*)", "Bash(npm publish:*)", "WebFetch"],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./secrets/**)",
+      "Read(./config/credentials/**)"
+    ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "autoAllowBashIfSandboxed": true,
+    "excludedCommands": ["docker"]
+  },
+  "enabledMcpjsonServers": ["figma"],
+  "outputStyle": "Explanatory",
+  "respectGitignore": true,
+  "alwaysThinkingEnabled": true,
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd /home/karson/Patchy_Bot/telegram-qbt && .venv/bin/python -m pytest tests/ -q --tb=short 2>&1 | tail -20"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd /home/karson/Patchy_Bot/telegram-qbt && .venv/bin/python -m pytest tests/ -q --tb=short 2>&1 | tail -20"
+          }
+        ]
+      }
+    ]
+  }
+}

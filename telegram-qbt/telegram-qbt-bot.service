@@ -1,0 +1,17 @@
+[Unit]
+Description=Telegram qBittorrent Operator Bot
+After=network-online.target qbittorrent.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=karson
+Group=karson
+WorkingDirectory=/home/karson/Patchy_Bot/telegram-qbt
+EnvironmentFile=/home/karson/Patchy_Bot/telegram-qbt/.env
+ExecStart=/home/karson/Patchy_Bot/telegram-qbt/.venv/bin/python -m patchy_bot
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

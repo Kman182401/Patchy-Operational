@@ -1,0 +1,25 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd /home/karson/Patchy_Bot/telegram-qbt && .venv/bin/python -m pytest tests/ -q --tb=short 2>&1 | tail -20"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd /home/karson/Patchy_Bot/telegram-qbt && .venv/bin/python -m pytest tests/ -q --tb=short 2>&1 | tail -20"
+          }
+        ]
+      }
+    ]
+  }
+}
