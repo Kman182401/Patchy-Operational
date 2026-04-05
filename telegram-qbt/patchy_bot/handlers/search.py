@@ -21,6 +21,7 @@ Functions
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import re
 from typing import Any
@@ -323,11 +324,24 @@ def render_page(
         if bracket_match:
             site = bracket_match.group(1)
             name = name[: bracket_match.start()].rstrip()
-        qv = quality_tier(name)
-        qlbl = f"{qv}p" if qv else "?"
+        # Build quality label from stored quality_json, or fall back to quality_tier
+        q_raw = row.get("quality_json")
+        if q_raw:
+            try:
+                q_data = json.loads(q_raw) if isinstance(q_raw, str) else q_raw
+                qlbl = q_data.get("label", "?")
+            except (json.JSONDecodeError, TypeError):
+                qlbl = f"{quality_tier(name)}p" if quality_tier(name) else "?"
+        else:
+            qv = quality_tier(name)
+            qlbl = f"{qv}p" if qv else "?"
+
+        q_score = int(row.get("quality_score") or 0)
+        score_display = f" ⭐{q_score}" if q_score > 0 else ""
+
         lines.append(f"<b>{idx}.</b> <code>{_h(name)}</code>")
         lines.append(
-            f"   🌱 <b>{seeds}</b> | 🧲 {leech} | 📦 <code>{size}</code> | 🎞 <code>{qlbl}</code> | 🌐 <i>{_h(site)}</i>"
+            f"   🌱 <b>{seeds}</b> | 🧲 {leech} | 📦 <code>{size}</code> | 🎞 <code>{_h(qlbl)}</code>{score_display} | 🌐 <i>{_h(site)}</i>"
         )
         lines.append("")
 

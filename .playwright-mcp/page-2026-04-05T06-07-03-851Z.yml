@@ -1,0 +1,10 @@
+- generic [ref=e2]:
+  - img [ref=e3]
+  - text: Jackett
+  - separator [ref=e4]
+  - heading "Login" [level=1] [ref=e5]
+  - generic [ref=e6]:
+    - generic [ref=e7]:
+      - generic [ref=e8]: Admin password
+      - textbox [ref=e9]
+    - button "Login" [ref=e11] [cursor=pointer]

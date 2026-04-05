@@ -330,7 +330,7 @@
         "id": "8",
         "title": "Extract the command handlers",
         "description": "Move slash command methods into patchy_bot/handlers/commands.py: cmd_start, cmd_search, cmd_schedule, cmd_remove, cmd_show, cmd_add, cmd_categories, cmd_mkcat, cmd_setminseeds, cmd_setlimit, cmd_profile, cmd_active, cmd_plugins, cmd_help, cmd_health, cmd_speed, cmd_unlock, cmd_logout, _cmd_text_fallback, _health_report, _speed_report, on_error. Register all menu:* and flow:* callback prefixes (12 prefixes). Move display helpers: _send_active, _render_active_ui, _send_categories, _render_categories_ui, _send_plugins, _render_plugins_ui.",
-        "status": "in-progress",
+        "status": "done",
         "dependencies": [
           "2",
           "3",
@@ -343,7 +343,7 @@
         "details": "This is the last major extraction. Command handlers are thin dispatchers — cmd_search sets up a flow and calls the search handler, cmd_schedule calls the schedule handler, etc. The main complexity is that many cmd_* methods reference other domain handlers. After tasks 4-7 extract those domains, the command handlers become simple delegation wrappers. Also includes: _health_report (~95 lines of system health checks), _speed_report (~50 lines), and the menu:* callback group which navigates between Command Center screens. The on_error method handles unhandled exceptions.",
         "testStrategy": "Add at least 3 new tests for _health_report and _speed_report. Deploy and verify every slash command works in Telegram. Test the Command Center menu flow end to end.",
         "subtasks": [],
-        "updatedAt": "2026-04-05T05:43:33.224Z"
+        "updatedAt": "2026-04-05T06:01:00.817Z"
       },
       {
         "id": "9",
@@ -388,7 +388,7 @@
         "id": "12",
         "title": "Test backfill for extracted modules",
         "description": "Add targeted tests for the largest coverage gaps exposed during extraction. Minimum new tests: (1) handlers/search.py — _apply_filters with quality/size/seed filters, _sort_rows with various keys; (2) handlers/download.py — _progress_bar at 0/50/100%, _format_eta edge cases, _is_complete_torrent for various states; (3) handlers/commands.py — _health_report returns valid HTML, _speed_report formats correctly; (4) handlers/chat.py — _chat_needs_qbt_snapshot returns correct boolean. Target: +30 new tests minimum.",
-        "status": "pending",
+        "status": "in-progress",
         "dependencies": [
           "4",
           "5",
@@ -400,13 +400,14 @@
         "priority": "medium",
         "details": "Current test coverage has major gaps: download tracking (0 tests), search execution (0 tests), LLM chat (0 tests), command handlers (0 tests), QBClient (0 tests), TVMetadataClient (0 tests). This task focuses on the extracted handler modules. Each handler module should have at least 3-5 focused unit tests. Tests should use the existing DummyBot/DummyStore mock patterns from the current test files. New tests go in tests/test_handlers.py or domain-specific files like tests/test_search.py, tests/test_download.py.",
         "testStrategy": "Run full test suite. Coverage for each new handler module should have at least 3 focused unit tests. No existing tests should regress. Total test count should be 192+.",
-        "subtasks": []
+        "subtasks": [],
+        "updatedAt": "2026-04-05T06:03:04.638Z"
       },
       {
         "id": "13",
         "title": "Final cleanup — remove dead code from bot.py",
         "description": "After all extractions are complete: (1) Remove all delegation stubs from bot.py that now just call handler methods — replace with direct handler references in build_application. (2) Remove orphaned imports. (3) Verify bot.py is under 1,000 lines. (4) Update the backward-compat shim in qbt_telegram_bot.py to re-export from new module locations if needed. (5) Update patchy_bot/__init__.py re-exports.",
-        "status": "pending",
+        "status": "done",
         "dependencies": [
           "4",
           "5",
@@ -419,14 +420,15 @@
         "priority": "low",
         "details": "This is the final task. After all domain extractions, bot.py should contain only: BotApp.__init__ (create clients, state, handler instances), build_application (register handlers via dispatcher), on_text (thin router delegating to handlers based on flow mode), shared state declarations, and _post_init/_post_stop lifecycle. Target: bot.py under 1,000 lines (down from 6,671). The backward-compat shim qbt_telegram_bot.py must continue to re-export all public names. Run the full test suite one final time to confirm zero regressions.",
         "testStrategy": "Run full test suite — all 192+ tests must pass. Import from qbt_telegram_bot in a test script and verify all documented public names are still accessible. Deploy and verify complete end-to-end flow: /start -> search movie -> add -> monitor progress -> complete -> /schedule show -> /remove item. Verify wc -l patchy_bot/bot.py < 1000.",
-        "subtasks": []
+        "subtasks": [],
+        "updatedAt": "2026-04-05T06:06:02.070Z"
       }
     ],
     "metadata": {
       "version": "1.0.0",
-      "lastModified": "2026-04-05T05:43:33.225Z",
+      "lastModified": "2026-04-05T06:06:02.070Z",
       "taskCount": 13,
-      "completedCount": 10,
+      "completedCount": 12,
       "tags": [
         "master"
       ]

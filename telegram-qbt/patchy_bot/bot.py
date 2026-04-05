@@ -36,20 +36,19 @@ from .clients.tv_metadata import TVMetadataClient
 from .config import Config
 from .dispatch import CallbackDispatcher
 from .handlers import chat as chat_handler
-from .handlers import commands as commands_handler  # noqa: F401
+from .handlers import commands as commands_handler
 from .handlers import download as download_handler
 from .handlers import remove as remove_handler
-from .handlers import schedule as schedule_handler  # noqa: F401
+from .handlers import schedule as schedule_handler
 from .handlers import search as search_handler
 from .plex_organizer import organize_download as _organize_download
 from .quality import score_torrent
 from .rate_limiter import RateLimiter
 from .store import Store
-from .types import HandlerContext  # noqa: F401
-from .ui import flow as flow_mod  # noqa: F401
-from .ui import keyboards as kb_mod  # noqa: F401
-from .ui import rendering as render_mod  # noqa: F401
-from .ui import text as text_mod  # noqa: F401
+from .types import HandlerContext
+from .ui import flow as flow_mod
+from .ui import keyboards as kb_mod
+from .ui import text as text_mod
 from .utils import (
     _ACTIVE_DL_STATES,
     _PM,
