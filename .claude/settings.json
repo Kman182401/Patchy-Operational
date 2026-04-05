@@ -2,28 +2,15 @@
   "permissions": {
     "defaultMode": "acceptEdits",
     "allow": [
-      "Bash(npm run lint:*)",
-      "Bash(npm run test:*)",
-      "Bash(npm run storybook:*)",
-      "Bash(npx playwright test:*)",
       "Bash(git diff:*)",
-      "Bash(git status:*)"
+      "Bash(git status:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git remote:*)",
+      "Bash(.venv/bin/python -m pytest:*)"
     ],
-    "ask": ["Bash(git push:*)", "Bash(npm publish:*)", "WebFetch"],
-    "deny": [
-      "Read(./.env)",
-      "Read(./.env.*)",
-      "Read(./secrets/**)",
-      "Read(./config/credentials/**)"
-    ]
+    "deny": ["Read(./.env)", "Read(./.env.*)", "Read(./secrets/**)"]
   },
-  "sandbox": {
-    "enabled": true,
-    "autoAllowBashIfSandboxed": true,
-    "excludedCommands": ["docker"]
-  },
-  "enabledMcpjsonServers": ["figma"],
-  "outputStyle": "Explanatory",
   "respectGitignore": true,
   "alwaysThinkingEnabled": true,
   "hooks": {

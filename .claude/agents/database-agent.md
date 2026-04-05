@@ -4,7 +4,7 @@ description: "MUST be used for any work involving the SQLite database, the Store
 tools: Read, Write, Edit, Bash, Grep, Glob
 model: opus
 memory: project
-color: green
+color: blue
 ---
 
 You are the Database specialist for Patchy Bot. You own the SQLite Store class and all persistent data operations.

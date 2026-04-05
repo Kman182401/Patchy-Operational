@@ -15,14 +15,11 @@ And correctly allows:
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 
 from qbt_telegram_bot import BotApp, Config
-
 
 # ---------------------------------------------------------------------------
 # Helpers to build a minimal BotApp that doesn't touch real services
@@ -63,6 +60,7 @@ def _make_config(tmp_path: Any) -> Config:
         default_sort="seeders",
         default_order="desc",
         default_min_quality=0,
+        default_min_seeds=5,
         movies_category="movies",
         tv_category="tv",
         spam_category="spam",
@@ -110,12 +108,14 @@ class TestMovieDeletion:
         movie_dir.mkdir()
         (movie_dir / "movie.mkv").write_text("data")
 
-        result = bot._delete_remove_candidate({
-            "root_path": str(tmp_path / "movies"),
-            "path": str(movie_dir),
-            "root_key": "movies",
-            "remove_kind": "movie",
-        })
+        result = bot._delete_remove_candidate(
+            {
+                "root_path": str(tmp_path / "movies"),
+                "path": str(movie_dir),
+                "root_key": "movies",
+                "remove_kind": "movie",
+            }
+        )
         assert result["disk_status"] == "deleted"
         assert not movie_dir.exists()
 
@@ -127,12 +127,14 @@ class TestMovieDeletion:
         traversal_path = str(tmp_path / "movies" / ".." / "private_data")
 
         with pytest.raises(RuntimeError, match="outside configured media roots"):
-            bot._delete_remove_candidate({
-                "root_path": str(tmp_path / "movies"),
-                "path": traversal_path,
-                "root_key": "movies",
-                "remove_kind": "movie",
-            })
+            bot._delete_remove_candidate(
+                {
+                    "root_path": str(tmp_path / "movies"),
+                    "path": traversal_path,
+                    "root_key": "movies",
+                    "remove_kind": "movie",
+                }
+            )
         # Verify the directory was NOT deleted
         assert escape_dir.exists()
 
@@ -144,12 +146,14 @@ class TestMovieDeletion:
         link_path.symlink_to(real_dir)
 
         with pytest.raises(RuntimeError, match="symbolic links"):
-            bot._delete_remove_candidate({
-                "root_path": str(tmp_path / "movies"),
-                "path": str(link_path),
-                "root_key": "movies",
-                "remove_kind": "movie",
-            })
+            bot._delete_remove_candidate(
+                {
+                    "root_path": str(tmp_path / "movies"),
+                    "path": str(link_path),
+                    "root_key": "movies",
+                    "remove_kind": "movie",
+                }
+            )
         assert real_dir.exists()
 
     def test_nested_movie_path_is_rejected(self, tmp_path: Any) -> None:
@@ -159,12 +163,14 @@ class TestMovieDeletion:
         nested.mkdir(parents=True)
 
         with pytest.raises(RuntimeError, match="nested paths"):
-            bot._delete_remove_candidate({
-                "root_path": str(tmp_path / "movies"),
-                "path": str(nested),
-                "root_key": "movies",
-                "remove_kind": "movie",
-            })
+            bot._delete_remove_candidate(
+                {
+                    "root_path": str(tmp_path / "movies"),
+                    "path": str(nested),
+                    "root_key": "movies",
+                    "remove_kind": "movie",
+                }
+            )
 
     def test_root_path_itself_is_rejected(self, tmp_path: Any) -> None:
         """Trying to delete the media root itself must fail."""
@@ -172,12 +178,14 @@ class TestMovieDeletion:
         movies_root = str(tmp_path / "movies")
 
         with pytest.raises(RuntimeError, match="nested paths"):
-            bot._delete_remove_candidate({
-                "root_path": movies_root,
-                "path": movies_root,
-                "root_key": "movies",
-                "remove_kind": "movie",
-            })
+            bot._delete_remove_candidate(
+                {
+                    "root_path": movies_root,
+                    "path": movies_root,
+                    "root_key": "movies",
+                    "remove_kind": "movie",
+                }
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -192,12 +200,14 @@ class TestSpamDeletion:
         spam_dir.mkdir()
         (spam_dir / "file.bin").write_text("data")
 
-        result = bot._delete_remove_candidate({
-            "root_path": str(tmp_path / "spam"),
-            "path": str(spam_dir),
-            "root_key": "spam",
-            "remove_kind": "spam",
-        })
+        result = bot._delete_remove_candidate(
+            {
+                "root_path": str(tmp_path / "spam"),
+                "path": str(spam_dir),
+                "root_key": "spam",
+                "remove_kind": "spam",
+            }
+        )
         assert result["disk_status"] == "deleted"
         assert not spam_dir.exists()
 
@@ -216,12 +226,14 @@ class TestTVShowDeletion:
         show_dir.mkdir()
         (show_dir / "s01e01.mkv").write_text("data")
 
-        result = bot._delete_remove_candidate({
-            "root_path": str(tmp_path / "tv"),
-            "path": str(show_dir),
-            "root_key": "tv",
-            "remove_kind": "show",
-        })
+        result = bot._delete_remove_candidate(
+            {
+                "root_path": str(tmp_path / "tv"),
+                "path": str(show_dir),
+                "root_key": "tv",
+                "remove_kind": "show",
+            }
+        )
         assert result["disk_status"] == "deleted"
         assert not show_dir.exists()
 
@@ -231,12 +243,14 @@ class TestTVShowDeletion:
         nested.mkdir(parents=True)
 
         with pytest.raises(RuntimeError, match="outside a top-level TV series"):
-            bot._delete_remove_candidate({
-                "root_path": str(tmp_path / "tv"),
-                "path": str(nested),
-                "root_key": "tv",
-                "remove_kind": "show",
-            })
+            bot._delete_remove_candidate(
+                {
+                    "root_path": str(tmp_path / "tv"),
+                    "path": str(nested),
+                    "root_key": "tv",
+                    "remove_kind": "show",
+                }
+            )
 
 
 class TestTVSeasonDeletion:
@@ -248,12 +262,14 @@ class TestTVSeasonDeletion:
         season_dir.mkdir(parents=True)
         (season_dir / "s01e01.mkv").write_text("data")
 
-        result = bot._delete_remove_candidate({
-            "root_path": str(tmp_path / "tv"),
-            "path": str(season_dir),
-            "root_key": "tv",
-            "remove_kind": "season",
-        })
+        result = bot._delete_remove_candidate(
+            {
+                "root_path": str(tmp_path / "tv"),
+                "path": str(season_dir),
+                "root_key": "tv",
+                "remove_kind": "season",
+            }
+        )
         assert result["disk_status"] == "deleted"
         assert not season_dir.exists()
 
@@ -264,12 +280,14 @@ class TestTVSeasonDeletion:
         show_dir.mkdir()
 
         with pytest.raises(RuntimeError, match="outside a direct season path"):
-            bot._delete_remove_candidate({
-                "root_path": str(tmp_path / "tv"),
-                "path": str(show_dir),
-                "root_key": "tv",
-                "remove_kind": "season",
-            })
+            bot._delete_remove_candidate(
+                {
+                    "root_path": str(tmp_path / "tv"),
+                    "path": str(show_dir),
+                    "root_key": "tv",
+                    "remove_kind": "season",
+                }
+            )
 
     def test_episode_path_as_season_is_rejected(self, tmp_path: Any) -> None:
         """Depth 3 path with remove_kind='season' must be rejected."""
@@ -279,12 +297,14 @@ class TestTVSeasonDeletion:
         ep.write_text("data")
 
         with pytest.raises(RuntimeError, match="outside a direct season path"):
-            bot._delete_remove_candidate({
-                "root_path": str(tmp_path / "tv"),
-                "path": str(ep),
-                "root_key": "tv",
-                "remove_kind": "season",
-            })
+            bot._delete_remove_candidate(
+                {
+                    "root_path": str(tmp_path / "tv"),
+                    "path": str(ep),
+                    "root_key": "tv",
+                    "remove_kind": "season",
+                }
+            )
 
 
 class TestTVEpisodeDeletion:
@@ -296,12 +316,14 @@ class TestTVEpisodeDeletion:
         ep.parent.mkdir(parents=True)
         ep.write_text("data")
 
-        result = bot._delete_remove_candidate({
-            "root_path": str(tmp_path / "tv"),
-            "path": str(ep),
-            "root_key": "tv",
-            "remove_kind": "episode",
-        })
+        result = bot._delete_remove_candidate(
+            {
+                "root_path": str(tmp_path / "tv"),
+                "path": str(ep),
+                "root_key": "tv",
+                "remove_kind": "episode",
+            }
+        )
         assert result["disk_status"] == "deleted"
         assert not ep.exists()
 
@@ -311,12 +333,14 @@ class TestTVEpisodeDeletion:
         ep.parent.mkdir(parents=True)
         ep.write_text("data")
 
-        result = bot._delete_remove_candidate({
-            "root_path": str(tmp_path / "tv"),
-            "path": str(ep),
-            "root_key": "tv",
-            "remove_kind": "episode",
-        })
+        result = bot._delete_remove_candidate(
+            {
+                "root_path": str(tmp_path / "tv"),
+                "path": str(ep),
+                "root_key": "tv",
+                "remove_kind": "episode",
+            }
+        )
         assert result["disk_status"] == "deleted"
         assert not ep.exists()
 
@@ -327,12 +351,14 @@ class TestTVEpisodeDeletion:
         ep_dir.mkdir(parents=True)
 
         with pytest.raises(RuntimeError, match="outside a direct episode path"):
-            bot._delete_remove_candidate({
-                "root_path": str(tmp_path / "tv"),
-                "path": str(ep_dir),
-                "root_key": "tv",
-                "remove_kind": "episode",
-            })
+            bot._delete_remove_candidate(
+                {
+                    "root_path": str(tmp_path / "tv"),
+                    "path": str(ep_dir),
+                    "root_key": "tv",
+                    "remove_kind": "episode",
+                }
+            )
 
     def test_too_deep_episode_is_rejected(self, tmp_path: Any) -> None:
         """Depth 4+ must be rejected."""
@@ -342,12 +368,14 @@ class TestTVEpisodeDeletion:
         deep.write_text("data")
 
         with pytest.raises(RuntimeError, match="outside a direct episode path"):
-            bot._delete_remove_candidate({
-                "root_path": str(tmp_path / "tv"),
-                "path": str(deep),
-                "root_key": "tv",
-                "remove_kind": "episode",
-            })
+            bot._delete_remove_candidate(
+                {
+                    "root_path": str(tmp_path / "tv"),
+                    "path": str(deep),
+                    "root_key": "tv",
+                    "remove_kind": "episode",
+                }
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -362,12 +390,14 @@ class TestUnsupportedRootKey:
         target.mkdir()
 
         with pytest.raises(RuntimeError, match="Unsupported library root"):
-            bot._delete_remove_candidate({
-                "root_path": str(tmp_path / "movies"),
-                "path": str(target),
-                "root_key": "audiobooks",
-                "remove_kind": "audiobook",
-            })
+            bot._delete_remove_candidate(
+                {
+                    "root_path": str(tmp_path / "movies"),
+                    "path": str(target),
+                    "root_key": "audiobooks",
+                    "remove_kind": "audiobook",
+                }
+            )
 
     def test_unsupported_tv_remove_kind_is_rejected(self, tmp_path: Any) -> None:
         bot = _make_bot(tmp_path)
@@ -375,12 +405,14 @@ class TestUnsupportedRootKey:
         target.mkdir()
 
         with pytest.raises(RuntimeError, match="Unsupported TV removal type"):
-            bot._delete_remove_candidate({
-                "root_path": str(tmp_path / "tv"),
-                "path": str(target),
-                "root_key": "tv",
-                "remove_kind": "clip",
-            })
+            bot._delete_remove_candidate(
+                {
+                    "root_path": str(tmp_path / "tv"),
+                    "path": str(target),
+                    "root_key": "tv",
+                    "remove_kind": "clip",
+                }
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -394,23 +426,27 @@ class TestEdgeCases:
         ghost = str(tmp_path / "movies" / "Ghost Movie")
 
         with pytest.raises(RuntimeError, match="no longer exists"):
-            bot._delete_remove_candidate({
-                "root_path": str(tmp_path / "movies"),
-                "path": ghost,
-                "root_key": "movies",
-                "remove_kind": "movie",
-            })
+            bot._delete_remove_candidate(
+                {
+                    "root_path": str(tmp_path / "movies"),
+                    "path": ghost,
+                    "root_key": "movies",
+                    "remove_kind": "movie",
+                }
+            )
 
     def test_empty_path_is_rejected(self, tmp_path: Any) -> None:
         bot = _make_bot(tmp_path)
 
         with pytest.raises(RuntimeError, match="Invalid removal target"):
-            bot._delete_remove_candidate({
-                "root_path": str(tmp_path / "movies"),
-                "path": "",
-                "root_key": "movies",
-                "remove_kind": "movie",
-            })
+            bot._delete_remove_candidate(
+                {
+                    "root_path": str(tmp_path / "movies"),
+                    "path": "",
+                    "root_key": "movies",
+                    "remove_kind": "movie",
+                }
+            )
 
     def test_symlink_inside_movie_dir_still_allows_dir_delete(self, tmp_path: Any) -> None:
         """The symlink check is on the target path itself, not contents inside it.
@@ -422,10 +458,12 @@ class TestEdgeCases:
         # symlink inside the directory — this is fine, only top-level symlink is blocked
         (movie_dir / "link.txt").symlink_to(movie_dir / "movie.mkv")
 
-        result = bot._delete_remove_candidate({
-            "root_path": str(tmp_path / "movies"),
-            "path": str(movie_dir),
-            "root_key": "movies",
-            "remove_kind": "movie",
-        })
+        result = bot._delete_remove_candidate(
+            {
+                "root_path": str(tmp_path / "movies"),
+                "path": str(movie_dir),
+                "root_key": "movies",
+                "remove_kind": "movie",
+            }
+        )
         assert result["disk_status"] == "deleted"

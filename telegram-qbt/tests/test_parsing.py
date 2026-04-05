@@ -585,7 +585,15 @@ def test_plex_refresh_for_path_uses_post_with_path_parameter(tmp_path) -> None:
         def __init__(self) -> None:
             self.calls: list[tuple[str, str, dict[str, object] | None, dict[str, str] | None]] = []
 
-        def request(self, method: str, url: str, *, params: dict[str, object] | None = None, headers: dict[str, str] | None = None, timeout: int | None = None) -> FakeResponse:
+        def request(
+            self,
+            method: str,
+            url: str,
+            *,
+            params: dict[str, object] | None = None,
+            headers: dict[str, str] | None = None,
+            timeout: int | None = None,
+        ) -> FakeResponse:
             self.calls.append((method, url, dict(params or {}), dict(headers or {})))
             return FakeResponse()
 
@@ -627,7 +635,15 @@ def test_plex_purge_deleted_path_refreshes_parent_then_empties_trash(tmp_path, m
         def __init__(self) -> None:
             self.calls: list[tuple[str, str, dict[str, object] | None, dict[str, str] | None]] = []
 
-        def request(self, method: str, url: str, *, params: dict[str, object] | None = None, headers: dict[str, str] | None = None, timeout: int | None = None) -> FakeResponse:
+        def request(
+            self,
+            method: str,
+            url: str,
+            *,
+            params: dict[str, object] | None = None,
+            headers: dict[str, str] | None = None,
+            timeout: int | None = None,
+        ) -> FakeResponse:
             self.calls.append((method, url, dict(params or {}), dict(headers or {})))
             return FakeResponse()
 
@@ -776,38 +792,38 @@ def test_store_remove_job_round_trip(tmp_path) -> None:
     assert fetched["status"] == "plex_pending"
 
 
-def test_delete_remove_candidates_surfaces_pending_plex_cleanup() -> None:
+def test_delete_remove_candidates_surfaces_pending_plex_cleanup(monkeypatch) -> None:
+    import patchy_bot.handlers.remove as _rm
+
+    def fake_delete(ctx, candidate, *, user_id=None, chat_id=None):
+        return {
+            "name": str(candidate["name"]),
+            "root_label": str(candidate["root_label"]),
+            "size_bytes": int(candidate["size_bytes"]),
+            "path": str(candidate["path"]),
+            "disk_status": "deleted",
+            "plex_status": "plex_pending",
+            "plex_note": "Plex cleanup still pending for Example Show",
+            "remove_kind": str(candidate["remove_kind"]),
+        }
+
+    monkeypatch.setattr(_rm, "delete_remove_candidate", fake_delete)
+
     class DummyBot:
         _delete_remove_candidates = BotApp._delete_remove_candidates
-
-        @staticmethod
-        def _remove_effective_candidates(candidates: list[dict[str, object]]) -> list[dict[str, object]]:
-            return candidates
-
-        @staticmethod
-        def _remove_enrich_candidate(candidate: dict[str, object]) -> dict[str, object]:
-            return candidate
-
-        @staticmethod
-        def _delete_remove_candidate(candidate: dict[str, object], *, user_id=None, chat_id=None) -> dict[str, object]:
-            return {
-                "name": str(candidate["name"]),
-                "root_label": str(candidate["root_label"]),
-                "size_bytes": int(candidate["size_bytes"]),
-                "path": str(candidate["path"]),
-                "disk_status": "deleted",
-                "plex_status": "plex_pending",
-                "plex_note": "Plex cleanup still pending for Example Show",
-                "remove_kind": str(candidate["remove_kind"]),
-            }
-
-        @staticmethod
-        def _remove_candidate_text(candidate: dict[str, object]) -> str:
-            return f"{candidate['name']} ({candidate['root_label']})"
+        _ctx = SimpleNamespace()
 
     text = BotApp._delete_remove_candidates(
         DummyBot(),
-        [{"name": "Example Show", "root_label": "TV", "size_bytes": 123, "path": "/srv/tv/Example Show", "remove_kind": "show"}],
+        [
+            {
+                "name": "Example Show",
+                "root_label": "TV",
+                "size_bytes": 123,
+                "path": "/srv/tv/Example Show",
+                "remove_kind": "show",
+            }
+        ],
     )
 
     assert text.startswith("⚠️ Batch delete completed with follow-up")
@@ -852,20 +868,21 @@ def test_remove_library_and_search_candidates_skip_non_media_files(tmp_path) -> 
     (tv_dir / "Show.Name.S01E02.1080p.mkv").write_text("x")
     (tv_dir / "Show.Name.readme.txt").write_text("junk")
 
+    cfg = SimpleNamespace(
+        movies_path=str(movies_dir),
+        tv_path=str(tv_dir),
+        spam_path="",
+    )
+
     class DummyBot:
-        @staticmethod
-        def _remove_roots() -> list[dict[str, str]]:
-            return [
-                {"key": "movies", "label": "Movies", "path": str(movies_dir)},
-                {"key": "tv", "label": "TV", "path": str(tv_dir)},
-            ]
+        _remove_library_items = BotApp._remove_library_items
+        _find_remove_candidates = BotApp._find_remove_candidates
+        _ctx = SimpleNamespace(cfg=cfg)
 
-        _remove_match_score = staticmethod(BotApp._remove_match_score)
-        _path_size_bytes = staticmethod(BotApp._path_size_bytes)
-
-    movie_items = BotApp._remove_library_items(DummyBot(), "movies")
-    tv_items = BotApp._remove_library_items(DummyBot(), "tv")
-    search_items = BotApp._find_remove_candidates(DummyBot(), "Show Name")
+    bot = DummyBot()
+    movie_items = BotApp._remove_library_items(bot, "movies")
+    tv_items = BotApp._remove_library_items(bot, "tv")
+    search_items = BotApp._find_remove_candidates(bot, "Show Name")
 
     assert [item["name"] for item in movie_items] == ["Movie.One.2024.mkv"]
     assert [item["name"] for item in tv_items] == ["Show.Name.S01E02.1080p.mkv"]
@@ -929,15 +946,23 @@ def test_render_remove_ui_edits_existing_remove_message() -> None:
     class DummyApp:
         def __init__(self) -> None:
             self.user_flow: dict[int, dict[str, object]] = {}
+            self._ctx = SimpleNamespace(user_flow=self.user_flow)
 
         _set_flow = BotApp._set_flow
         _remember_flow_ui_message = BotApp._remember_flow_ui_message
         _render_flow_ui = BotApp._render_flow_ui
+        _strip_old_keyboard = BotApp._strip_old_keyboard
 
     app = DummyApp()
     bot_api = DummyBotApi()
     anchor = DummyMessage(bot_api, 100, 200)
-    flow = {"mode": "remove", "stage": "choose_item", "selected_items": [], "remove_ui_chat_id": 100, "remove_ui_message_id": 321}
+    flow = {
+        "mode": "remove",
+        "stage": "choose_item",
+        "selected_items": [],
+        "remove_ui_chat_id": 100,
+        "remove_ui_message_id": 321,
+    }
 
     rendered = asyncio.run(BotApp._render_remove_ui(app, 77, anchor, flow, "Updated remove UI"))
 
@@ -974,15 +999,23 @@ def test_render_remove_ui_falls_back_to_new_message_when_edit_fails() -> None:
     class DummyApp:
         def __init__(self) -> None:
             self.user_flow: dict[int, dict[str, object]] = {}
+            self._ctx = SimpleNamespace(user_flow=self.user_flow)
 
         _set_flow = BotApp._set_flow
         _remember_flow_ui_message = BotApp._remember_flow_ui_message
         _render_flow_ui = BotApp._render_flow_ui
+        _strip_old_keyboard = BotApp._strip_old_keyboard
 
     app = DummyApp()
     bot_api = DummyBotApi()
     anchor = DummyMessage(bot_api, 100, 200)
-    flow = {"mode": "remove", "stage": "choose_item", "selected_items": [], "remove_ui_chat_id": 100, "remove_ui_message_id": 321}
+    flow = {
+        "mode": "remove",
+        "stage": "choose_item",
+        "selected_items": [],
+        "remove_ui_chat_id": 100,
+        "remove_ui_message_id": 321,
+    }
 
     rendered = asyncio.run(BotApp._render_remove_ui(app, 77, anchor, flow, "Updated remove UI"))
 
@@ -1034,6 +1067,7 @@ def test_promote_stale_inline_ui_reposts_keyboard_and_disables_old_message() -> 
     """Inline UI promotion was removed — the nav-UI system replaced it.
     This test validates that _render_nav_ui can re-send a message when the
     prior nav-UI location is stale (edit fails, so it falls back to reply)."""
+
     class DummyBotApi:
         def __init__(self) -> None:
             self.edit_calls: list[dict[str, object]] = []
@@ -1059,6 +1093,7 @@ def test_promote_stale_inline_ui_reposts_keyboard_and_disables_old_message() -> 
     class DummyApp:
         _remember_nav_ui_message = BotApp._remember_nav_ui_message
         _render_nav_ui = BotApp._render_nav_ui
+        _strip_old_keyboard = BotApp._strip_old_keyboard
 
         def __init__(self) -> None:
             self.user_nav_ui: dict[int, dict[str, int]] = {77: {"chat_id": 100, "message_id": 200}}
@@ -1082,6 +1117,7 @@ def test_promote_stale_inline_ui_reposts_keyboard_and_disables_old_message() -> 
 
 def test_promote_stale_inline_ui_noops_for_latest_message() -> None:
     """When the nav-UI message is still reachable, _render_nav_ui edits it in-place."""
+
     class DummyBotApi:
         def __init__(self) -> None:
             self.edit_calls: list[dict[str, object]] = []
@@ -1107,6 +1143,7 @@ def test_promote_stale_inline_ui_noops_for_latest_message() -> None:
     class DummyApp:
         _remember_nav_ui_message = BotApp._remember_nav_ui_message
         _render_nav_ui = BotApp._render_nav_ui
+        _strip_old_keyboard = BotApp._strip_old_keyboard
 
         def __init__(self) -> None:
             self.user_nav_ui: dict[int, dict[str, int]] = {77: {"chat_id": 100, "message_id": 500}}
@@ -1120,7 +1157,9 @@ def test_promote_stale_inline_ui_noops_for_latest_message() -> None:
     bot_api = DummyBotApi()
     current_message = DummyMessage(bot_api, 100, 300)
 
-    result = asyncio.run(BotApp._render_nav_ui(app, 77, current_message, "Current command center", reply_markup="keyboard"))
+    result = asyncio.run(
+        BotApp._render_nav_ui(app, 77, current_message, "Current command center", reply_markup="keyboard")
+    )
 
     assert result.message_id == 500
     assert len(bot_api.edit_calls) == 1
@@ -1137,6 +1176,7 @@ def test_open_remove_browse_root_skips_search_or_browse_landing_screen() -> None
 
         def __init__(self) -> None:
             self.user_flow: dict[int, dict[str, object]] = {}
+            self._ctx = SimpleNamespace(user_flow=self.user_flow)
             self.render_calls: list[dict[str, object]] = []
 
         def _remove_library_items(self, root_key: str) -> list[dict[str, object]]:
@@ -1149,7 +1189,9 @@ def test_open_remove_browse_root_skips_search_or_browse_landing_screen() -> None
         def _remove_browse_root_keyboard(self, movie_count: int, show_count: int, selected_count: int = 0):
             return {"movie_count": movie_count, "show_count": show_count, "selected_count": selected_count}
 
-        async def _render_remove_ui(self, user_id: int, msg, flow, text: str, reply_markup=None, current_ui_message=None):
+        async def _render_remove_ui(
+            self, user_id: int, msg, flow, text: str, reply_markup=None, current_ui_message=None
+        ):
             self.render_calls.append(
                 {
                     "user_id": user_id,
@@ -1216,10 +1258,24 @@ def test_on_callback_remove_cancel_returns_to_command_center() -> None:
     class DummyBot:
         on_callback = BotApp.on_callback
         _render_command_center = BotApp._render_command_center
+        _on_cb_nav_home = BotApp._on_cb_nav_home
+        _on_cb_add = BotApp._on_cb_add
+        _on_cb_download = BotApp._on_cb_download
+        _on_cb_page = BotApp._on_cb_page
+        _on_cb_remove = BotApp._on_cb_remove
+        _on_cb_schedule = BotApp._on_cb_schedule
+        _on_cb_menu = BotApp._on_cb_menu
+        _on_cb_flow = BotApp._on_cb_flow
+        _on_cb_stop = BotApp._on_cb_stop
+        _register_callbacks = BotApp._register_callbacks
 
         def __init__(self) -> None:
+            from patchy_bot.dispatch import CallbackDispatcher
+
             self.cleared: list[int] = []
             self.user_ephemeral_messages: dict[int, list] = {}
+            self._dispatcher = CallbackDispatcher()
+            self._register_callbacks()
 
         @staticmethod
         def is_allowed(_update) -> bool:
@@ -1262,7 +1318,9 @@ def test_on_callback_remove_cancel_returns_to_command_center() -> None:
     assert bot.cleared == [77]
     assert query.answer_calls == [{"text": None, "show_alert": False}]
     assert message.reply_calls == []
-    assert message.edit_calls == [{"text": "center ok=True reason=ready", "reply_markup": "keyboard", "parse_mode": "HTML"}]
+    assert message.edit_calls == [
+        {"text": "center ok=True reason=ready", "reply_markup": "keyboard", "parse_mode": "HTML"}
+    ]
 
 
 def test_on_callback_schedule_cancel_returns_to_command_center() -> None:
@@ -1302,10 +1360,24 @@ def test_on_callback_schedule_cancel_returns_to_command_center() -> None:
     class DummyBot:
         on_callback = BotApp.on_callback
         _render_command_center = BotApp._render_command_center
+        _on_cb_nav_home = BotApp._on_cb_nav_home
+        _on_cb_add = BotApp._on_cb_add
+        _on_cb_download = BotApp._on_cb_download
+        _on_cb_page = BotApp._on_cb_page
+        _on_cb_remove = BotApp._on_cb_remove
+        _on_cb_schedule = BotApp._on_cb_schedule
+        _on_cb_menu = BotApp._on_cb_menu
+        _on_cb_flow = BotApp._on_cb_flow
+        _on_cb_stop = BotApp._on_cb_stop
+        _register_callbacks = BotApp._register_callbacks
 
         def __init__(self) -> None:
+            from patchy_bot.dispatch import CallbackDispatcher
+
             self.cleared: list[int] = []
             self.user_ephemeral_messages: dict[int, list] = {}
+            self._dispatcher = CallbackDispatcher()
+            self._register_callbacks()
 
         @staticmethod
         def is_allowed(_update) -> bool:
@@ -1348,7 +1420,9 @@ def test_on_callback_schedule_cancel_returns_to_command_center() -> None:
     assert bot.cleared == [77]
     assert query.answer_calls == [{"text": None, "show_alert": False}]
     assert message.reply_calls == []
-    assert message.edit_calls == [{"text": "center ok=True reason=ready", "reply_markup": "keyboard", "parse_mode": "HTML"}]
+    assert message.edit_calls == [
+        {"text": "center ok=True reason=ready", "reply_markup": "keyboard", "parse_mode": "HTML"}
+    ]
 
 
 def test_on_text_schedule_cancel_returns_to_command_center() -> None:
@@ -1427,8 +1501,20 @@ def test_on_callback_remove_clear_returns_to_library_browser() -> None:
 
     class DummyBot:
         on_callback = BotApp.on_callback
+        _on_cb_nav_home = BotApp._on_cb_nav_home
+        _on_cb_add = BotApp._on_cb_add
+        _on_cb_download = BotApp._on_cb_download
+        _on_cb_page = BotApp._on_cb_page
+        _on_cb_remove = BotApp._on_cb_remove
+        _on_cb_schedule = BotApp._on_cb_schedule
+        _on_cb_menu = BotApp._on_cb_menu
+        _on_cb_flow = BotApp._on_cb_flow
+        _on_cb_stop = BotApp._on_cb_stop
+        _register_callbacks = BotApp._register_callbacks
 
         def __init__(self) -> None:
+            from patchy_bot.dispatch import CallbackDispatcher
+
             self.flow = {
                 "mode": "remove",
                 "stage": "show_actions",
@@ -1440,6 +1526,8 @@ def test_on_callback_remove_clear_returns_to_library_browser() -> None:
             }
             self.open_calls: list[dict[str, object]] = []
             self.user_ephemeral_messages: dict[int, list] = {}
+            self._dispatcher = CallbackDispatcher()
+            self._register_callbacks()
 
         @staticmethod
         def is_allowed(_update) -> bool:
@@ -1604,12 +1692,26 @@ def test_on_callback_schedule_pickeps_uses_anchor_renderer() -> None:
         _schedule_picker_all_missing = BotApp._schedule_picker_all_missing
         _schedule_picker_text = BotApp._schedule_picker_text
         _schedule_picker_keyboard = BotApp._schedule_picker_keyboard
+        _on_cb_nav_home = BotApp._on_cb_nav_home
+        _on_cb_add = BotApp._on_cb_add
+        _on_cb_download = BotApp._on_cb_download
+        _on_cb_page = BotApp._on_cb_page
+        _on_cb_remove = BotApp._on_cb_remove
+        _on_cb_schedule = BotApp._on_cb_schedule
+        _on_cb_menu = BotApp._on_cb_menu
+        _on_cb_flow = BotApp._on_cb_flow
+        _on_cb_stop = BotApp._on_cb_stop
+        _register_callbacks = BotApp._register_callbacks
 
         def __init__(self) -> None:
+            from patchy_bot.dispatch import CallbackDispatcher
+
             self.store = DummyStore()
             self.flow: dict[str, object] = {}
             self.render_calls: list[dict[str, object]] = []
             self.user_ephemeral_messages: dict[int, list] = {}
+            self._dispatcher = CallbackDispatcher()
+            self._register_callbacks()
 
         @staticmethod
         def is_allowed(_update) -> bool:
@@ -1692,11 +1794,25 @@ def test_on_callback_schedule_skip_uses_anchor_renderer() -> None:
 
     class DummyBot:
         on_callback = BotApp.on_callback
+        _on_cb_nav_home = BotApp._on_cb_nav_home
+        _on_cb_add = BotApp._on_cb_add
+        _on_cb_download = BotApp._on_cb_download
+        _on_cb_page = BotApp._on_cb_page
+        _on_cb_remove = BotApp._on_cb_remove
+        _on_cb_schedule = BotApp._on_cb_schedule
+        _on_cb_menu = BotApp._on_cb_menu
+        _on_cb_flow = BotApp._on_cb_flow
+        _on_cb_stop = BotApp._on_cb_stop
+        _register_callbacks = BotApp._register_callbacks
 
         def __init__(self) -> None:
+            from patchy_bot.dispatch import CallbackDispatcher
+
             self.store = DummyStore()
             self.render_calls: list[dict[str, object]] = []
             self.user_ephemeral_messages: dict[int, list] = {}
+            self._dispatcher = CallbackDispatcher()
+            self._register_callbacks()
 
         @staticmethod
         def is_allowed(_update) -> bool:
@@ -1760,10 +1876,12 @@ def test_render_schedule_ui_edits_existing_schedule_message() -> None:
     class DummyApp:
         def __init__(self) -> None:
             self.user_flow: dict[int, dict[str, object]] = {}
+            self._ctx = SimpleNamespace(user_flow=self.user_flow)
 
         _set_flow = BotApp._set_flow
         _remember_flow_ui_message = BotApp._remember_flow_ui_message
         _render_flow_ui = BotApp._render_flow_ui
+        _strip_old_keyboard = BotApp._strip_old_keyboard
 
     app = DummyApp()
     bot_api = DummyBotApi()
@@ -1849,6 +1967,7 @@ def test_render_nav_ui_falls_back_to_new_message_when_edit_fails() -> None:
             self.user_nav_ui = {77: {"chat_id": 100, "message_id": 321}}
 
         _remember_nav_ui_message = BotApp._remember_nav_ui_message
+        _strip_old_keyboard = BotApp._strip_old_keyboard
 
     app = DummyApp()
     bot_api = DummyBotApi()
@@ -1889,10 +2008,12 @@ def test_render_schedule_ui_falls_back_to_new_message_when_edit_fails() -> None:
     class DummyApp:
         def __init__(self) -> None:
             self.user_flow: dict[int, dict[str, object]] = {}
+            self._ctx = SimpleNamespace(user_flow=self.user_flow)
 
         _set_flow = BotApp._set_flow
         _remember_flow_ui_message = BotApp._remember_flow_ui_message
         _render_flow_ui = BotApp._render_flow_ui
+        _strip_old_keyboard = BotApp._strip_old_keyboard
 
     app = DummyApp()
     bot_api = DummyBotApi()
@@ -1934,10 +2055,12 @@ def test_render_tv_ui_edits_existing_tv_message() -> None:
     class DummyApp:
         def __init__(self) -> None:
             self.user_flow: dict[int, dict[str, object]] = {}
+            self._ctx = SimpleNamespace(user_flow=self.user_flow)
 
         _set_flow = BotApp._set_flow
         _remember_flow_ui_message = BotApp._remember_flow_ui_message
         _render_flow_ui = BotApp._render_flow_ui
+        _strip_old_keyboard = BotApp._strip_old_keyboard
 
     app = DummyApp()
     bot_api = DummyBotApi()
@@ -1979,10 +2102,12 @@ def test_render_tv_ui_falls_back_to_new_message_when_edit_fails() -> None:
     class DummyApp:
         def __init__(self) -> None:
             self.user_flow: dict[int, dict[str, object]] = {}
+            self._ctx = SimpleNamespace(user_flow=self.user_flow)
 
         _set_flow = BotApp._set_flow
         _remember_flow_ui_message = BotApp._remember_flow_ui_message
         _render_flow_ui = BotApp._render_flow_ui
+        _strip_old_keyboard = BotApp._strip_old_keyboard
 
     app = DummyApp()
     bot_api = DummyBotApi()
@@ -2090,7 +2215,9 @@ def test_relative_time_beyond_7_days_falls_back_to_absolute() -> None:
 
 def test_episode_status_icon_priority_present_wins() -> None:
     from unittest.mock import MagicMock
+
     from qbt_telegram_bot import BotApp
+
     bot = MagicMock(spec=[])
     probe = {
         "present_codes": ["S01E01"],
@@ -2104,7 +2231,9 @@ def test_episode_status_icon_priority_present_wins() -> None:
 
 def test_episode_status_icon_priority_unreleased_before_actionable() -> None:
     from unittest.mock import MagicMock
+
     from qbt_telegram_bot import BotApp
+
     bot = MagicMock(spec=[])
     probe = {
         "present_codes": [],
@@ -2118,7 +2247,9 @@ def test_episode_status_icon_priority_unreleased_before_actionable() -> None:
 
 def test_episode_status_icon_queued() -> None:
     from unittest.mock import MagicMock
+
     from qbt_telegram_bot import BotApp
+
     bot = MagicMock(spec=[])
     probe = {
         "present_codes": [],
@@ -2131,7 +2262,9 @@ def test_episode_status_icon_queued() -> None:
 
 def test_episode_status_icon_actionable_missing() -> None:
     from unittest.mock import MagicMock
+
     from qbt_telegram_bot import BotApp
+
     bot = MagicMock(spec=[])
     probe = {
         "present_codes": [],
@@ -2144,7 +2277,9 @@ def test_episode_status_icon_actionable_missing() -> None:
 
 def test_episode_status_icon_default() -> None:
     from unittest.mock import MagicMock
+
     from qbt_telegram_bot import BotApp
+
     bot = MagicMock(spec=[])
     probe = {
         "present_codes": [],
@@ -2157,7 +2292,9 @@ def test_episode_status_icon_default() -> None:
 
 def test_episode_status_icon_pending_arg_merges_with_probe_pending() -> None:
     from unittest.mock import MagicMock
+
     from qbt_telegram_bot import BotApp
+
     bot = MagicMock(spec=[])
     probe = {
         "present_codes": [],
@@ -2170,12 +2307,16 @@ def test_episode_status_icon_pending_arg_merges_with_probe_pending() -> None:
 
 
 def test_schedule_episode_label_format_includes_icon_and_relative_time() -> None:
-    from unittest.mock import MagicMock
-    from qbt_telegram_bot import BotApp, _relative_time, now_ts
     import re
+    from unittest.mock import MagicMock
+
+    from qbt_telegram_bot import BotApp, now_ts
+
     bot = MagicMock(spec=BotApp)
     # Wire real _episode_status_icon and _relative_time into the mock
-    bot._episode_status_icon = lambda probe, code, pending=None: BotApp._episode_status_icon(bot, probe, code, pending=pending)
+    bot._episode_status_icon = lambda probe, code, pending=None: BotApp._episode_status_icon(
+        bot, probe, code, pending=pending
+    )
     # Use a timestamp 2 hours in the future
     future_ts = now_ts() + 7200
     probe = {
@@ -2199,9 +2340,13 @@ def test_schedule_episode_label_format_includes_icon_and_relative_time() -> None
 
 def test_schedule_episode_label_no_air_ts_shows_released() -> None:
     from unittest.mock import MagicMock
+
     from qbt_telegram_bot import BotApp
+
     bot = MagicMock(spec=BotApp)
-    bot._episode_status_icon = lambda probe, code, pending=None: BotApp._episode_status_icon(bot, probe, code, pending=pending)
+    bot._episode_status_icon = lambda probe, code, pending=None: BotApp._episode_status_icon(
+        bot, probe, code, pending=pending
+    )
     probe = {
         "episode_map": {"S01E01": "Pilot"},
         "episode_air": {},
@@ -2217,7 +2362,9 @@ def test_schedule_episode_label_no_air_ts_shows_released() -> None:
 
 def test_schedule_active_line_missing_shows_search_icon() -> None:
     from unittest.mock import MagicMock
+
     from qbt_telegram_bot import BotApp
+
     bot = MagicMock(spec=BotApp)
     track = {
         "show_json": {"name": "The Bear"},
@@ -2234,12 +2381,14 @@ def test_schedule_active_line_missing_shows_search_icon() -> None:
     line = BotApp._schedule_active_line(bot, track)
     assert "🔍" in line
     assert "The Bear" in line
-    assert "S02" in line
+    assert "Season 2" in line
 
 
 def test_schedule_active_line_up_to_date_shows_checkmark() -> None:
     from unittest.mock import MagicMock
+
     from qbt_telegram_bot import BotApp
+
     bot = MagicMock(spec=BotApp)
     track = {
         "show_json": {"name": "Succession"},
@@ -2260,7 +2409,9 @@ def test_schedule_active_line_up_to_date_shows_checkmark() -> None:
 
 def test_schedule_active_line_uses_dot_separator_not_pipe() -> None:
     from unittest.mock import MagicMock
+
     from qbt_telegram_bot import BotApp
+
     bot = MagicMock(spec=BotApp)
     track = {
         "show_json": {"name": "Test Show"},
@@ -2281,7 +2432,9 @@ def test_schedule_active_line_uses_dot_separator_not_pipe() -> None:
 
 def test_schedule_preview_text_inventory_uses_status_icons() -> None:
     from unittest.mock import MagicMock
+
     from qbt_telegram_bot import BotApp
+
     bot = MagicMock(spec=BotApp)
     bot._relative_time = None  # not needed — method uses module-level _relative_time
     probe = {
@@ -2317,10 +2470,11 @@ def test_schedule_preview_text_inventory_uses_status_icons() -> None:
 
 
 def test_schedule_preview_text_next_air_ts_uses_relative_time() -> None:
-    from unittest.mock import MagicMock
-    from qbt_telegram_bot import BotApp
-    import re
     import time
+    from unittest.mock import MagicMock
+
+    from qbt_telegram_bot import BotApp
+
     bot = MagicMock(spec=BotApp)
     probe = {
         "show": {"name": "Test Show", "year": 2024, "status": "Returning"},
@@ -2346,7 +2500,9 @@ def test_schedule_preview_text_next_air_ts_uses_relative_time() -> None:
 
 def test_schedule_track_ready_text_contains_divider_and_icons() -> None:
     from unittest.mock import MagicMock
+
     from qbt_telegram_bot import BotApp
+
     bot = MagicMock(spec=BotApp)
     track = {
         "show_json": {"name": "White Lotus"},
@@ -2369,10 +2525,11 @@ def test_schedule_track_ready_text_contains_divider_and_icons() -> None:
 
 
 def test_schedule_track_ready_text_next_air_ts_uses_relative_time() -> None:
-    from unittest.mock import MagicMock
-    from qbt_telegram_bot import BotApp
-    import re
     import time
+    from unittest.mock import MagicMock
+
+    from qbt_telegram_bot import BotApp
+
     bot = MagicMock(spec=BotApp)
     track = {"show_json": {"name": "Test"}, "season": 1}
     probe = {
@@ -2392,7 +2549,9 @@ def test_schedule_track_ready_text_next_air_ts_uses_relative_time() -> None:
 
 def test_schedule_track_ready_text_duplicate_flag_changes_header() -> None:
     from unittest.mock import MagicMock
+
     from qbt_telegram_bot import BotApp
+
     bot = MagicMock(spec=BotApp)
     track = {"show_json": {"name": "Test"}, "season": 1}
     probe = {
@@ -2411,8 +2570,10 @@ def test_schedule_track_ready_text_duplicate_flag_changes_header() -> None:
 
 
 def test_schedule_missing_text_first_two_episodes_inline() -> None:
-    from unittest.mock import MagicMock, patch
+    from unittest.mock import MagicMock
+
     from qbt_telegram_bot import BotApp
+
     bot = MagicMock(spec=BotApp)
     # Wire real _schedule_episode_label and _schedule_episode_auto_state
     bot._schedule_episode_auto_state = lambda track: {}
@@ -2442,7 +2603,9 @@ def test_schedule_missing_text_first_two_episodes_inline() -> None:
 
 def test_schedule_missing_text_footer_shows_next_retry_time() -> None:
     from unittest.mock import MagicMock
+
     from qbt_telegram_bot import BotApp
+
     bot = MagicMock(spec=BotApp)
     bot._schedule_episode_auto_state = lambda track: {"next_auto_retry_at": 1000000 + 3600}
     bot._schedule_episode_label = lambda probe, code, **kw: f"🔍 {code} — Episode"
@@ -2462,7 +2625,9 @@ def test_schedule_missing_text_footer_shows_next_retry_time() -> None:
 
 def test_schedule_missing_text_singular_episode_label() -> None:
     from unittest.mock import MagicMock
+
     from qbt_telegram_bot import BotApp
+
     bot = MagicMock(spec=BotApp)
     bot._schedule_episode_auto_state = lambda track: {}
     bot._schedule_episode_label = lambda probe, code, **kw: f"🔍 {code} — Episode"
@@ -2480,6 +2645,7 @@ def test_schedule_missing_text_singular_episode_label() -> None:
 
 def test_schedule_notify_auto_queued_includes_category_and_path() -> None:
     from unittest.mock import AsyncMock, MagicMock
+
     from qbt_telegram_bot import BotApp
 
     sent_texts = []
@@ -2516,6 +2682,7 @@ def test_schedule_notify_auto_queued_includes_category_and_path() -> None:
 
 def test_schedule_notify_auto_queued_attaches_live_monitor_when_hash_available() -> None:
     from unittest.mock import AsyncMock, MagicMock
+
     from qbt_telegram_bot import BotApp
 
     call_count = [0]
@@ -2542,9 +2709,11 @@ def test_schedule_notify_auto_queued_attaches_live_monitor_when_hash_available()
     bot._start_progress_tracker.assert_called_once()
     bot._start_pending_progress_tracker.assert_not_called()
 
+
 def test_schedule_download_requested_edits_status_card_not_new_message() -> None:
     import asyncio
-    from unittest.mock import AsyncMock, MagicMock, patch
+    from unittest.mock import AsyncMock, MagicMock
+
     from qbt_telegram_bot import BotApp
 
     bot = MagicMock(spec=BotApp)
@@ -2558,17 +2727,20 @@ def test_schedule_download_requested_edits_status_card_not_new_message() -> None
     bot._schedule_refresh_track = AsyncMock()
 
     # Simulate a successful download
-    bot._schedule_download_episode = AsyncMock(return_value={
-        "name": "The.Bear.S03E01.1080p",
-        "category": "tv",
-        "hash": "abc123",
-        "path": "/media/tv",
-    })
+    bot._schedule_download_episode = AsyncMock(
+        return_value={
+            "name": "The.Bear.S03E01.1080p",
+            "category": "tv",
+            "hash": "abc123",
+            "path": "/media/tv",
+        }
+    )
 
     status_mock = MagicMock()
     status_mock.edit_text = AsyncMock()
 
     reply_texts = []
+
     async def fake_reply_text(text, **kwargs):
         reply_texts.append(text)
         return status_mock
@@ -2599,6 +2771,7 @@ def test_schedule_download_requested_edits_status_card_not_new_message() -> None
 
 # ── RateLimiter ──────────────────────────────────────────────────────────────
 
+
 def test_rate_limiter_allows_requests_under_limit():
     rl = RateLimiter(limit=5, window_s=60.0)
     for _ in range(5):
@@ -2616,17 +2789,17 @@ def test_rate_limiter_tracks_users_independently():
     rl = RateLimiter(limit=2, window_s=60.0)
     rl.is_allowed(user_id=1)
     rl.is_allowed(user_id=1)
-    assert rl.is_allowed(user_id=1) is False   # user 1 is blocked
-    assert rl.is_allowed(user_id=2) is True    # user 2 is unaffected
+    assert rl.is_allowed(user_id=1) is False  # user 1 is blocked
+    assert rl.is_allowed(user_id=2) is True  # user 2 is unaffected
 
 
 def test_rate_limiter_reset_clears_counter():
     rl = RateLimiter(limit=2, window_s=60.0)
     rl.is_allowed(user_id=1)
     rl.is_allowed(user_id=1)
-    assert rl.is_allowed(user_id=1) is False   # blocked
+    assert rl.is_allowed(user_id=1) is False  # blocked
     rl.reset(user_id=1)
-    assert rl.is_allowed(user_id=1) is True    # allowed after reset
+    assert rl.is_allowed(user_id=1) is True  # allowed after reset
 
 
 def test_rate_limiter_check_within_limit_does_not_advance_counter():
@@ -2643,8 +2816,10 @@ def test_rate_limiter_check_within_limit_does_not_advance_counter():
 
 # ── Store security ────────────────────────────────────────────────────────────
 
+
 def test_store_creates_db_with_owner_only_permissions(tmp_path):
     import stat
+
     db_path = str(tmp_path / "test_state.sqlite3")
     s = Store(db_path)
     mode = stat.S_IMODE(os.stat(db_path).st_mode)
@@ -2653,6 +2828,7 @@ def test_store_creates_db_with_owner_only_permissions(tmp_path):
 
 def test_store_uses_wal_journal_mode(tmp_path):
     import sqlite3
+
     db_path = str(tmp_path / "test_wal.sqlite3")
     s = Store(db_path)
     conn = sqlite3.connect(db_path)
@@ -2680,6 +2856,7 @@ def test_store_clear_auth_failures_removes_record(tmp_path):
 def test_schedule_download_requested_no_waiting_for_hash_message() -> None:
     import asyncio
     from unittest.mock import AsyncMock, MagicMock
+
     from qbt_telegram_bot import BotApp
 
     bot = MagicMock(spec=BotApp)
@@ -2691,16 +2868,19 @@ def test_schedule_download_requested_no_waiting_for_hash_message() -> None:
     bot._schedule_refresh_track = AsyncMock()
 
     # No hash — should silently start pending tracker, no "waiting for hash" message
-    bot._schedule_download_episode = AsyncMock(return_value={
-        "name": "Test.S01E01",
-        "category": "tv",
-        "hash": None,
-        "path": "/media/tv",
-    })
+    bot._schedule_download_episode = AsyncMock(
+        return_value={
+            "name": "Test.S01E01",
+            "category": "tv",
+            "hash": None,
+            "path": "/media/tv",
+        }
+    )
 
     status_mock = MagicMock()
     status_mock.edit_text = AsyncMock()
     reply_texts = []
+
     async def fake_reply_text(text, **kwargs):
         reply_texts.append(text)
         return status_mock
@@ -2727,9 +2907,11 @@ def test_schedule_download_requested_no_waiting_for_hash_message() -> None:
 def test_skip_reply_text_explains_re_notification_conditions() -> None:
     # Verify the skip confirmation text content by searching for it in the source
     import inspect
+
     from qbt_telegram_bot import BotApp
+
     # Get the source of the callback handler that handles sch:skip
-    source = inspect.getsource(BotApp.on_callback)
+    source = inspect.getsource(BotApp._on_cb_schedule)
     # The new text must be present
     assert "I'll alert you again if new episodes air or the missing count changes" in source
     # The old vague text must NOT be present
@@ -2748,7 +2930,15 @@ def test_plex_refresh_all_by_type_calls_refresh_and_empty_trash_for_matching_sec
         def __init__(self) -> None:
             self.calls: list[tuple[str, str, dict]] = []
 
-        def request(self, method: str, url: str, *, params: dict | None = None, headers: dict | None = None, timeout: int | None = None) -> FakeResponse:
+        def request(
+            self,
+            method: str,
+            url: str,
+            *,
+            params: dict | None = None,
+            headers: dict | None = None,
+            timeout: int | None = None,
+        ) -> FakeResponse:
             self.calls.append((method, url, dict(params or {})))
             return FakeResponse()
 
@@ -2788,7 +2978,15 @@ def test_plex_refresh_all_by_type_skips_empty_trash_on_section_idle_timeout(monk
         def __init__(self) -> None:
             self.calls: list[tuple[str, str, dict]] = []
 
-        def request(self, method: str, url: str, *, params: dict | None = None, headers: dict | None = None, timeout: int | None = None) -> FakeResponse:
+        def request(
+            self,
+            method: str,
+            url: str,
+            *,
+            params: dict | None = None,
+            headers: dict | None = None,
+            timeout: int | None = None,
+        ) -> FakeResponse:
             self.calls.append((method, url, dict(params or {})))
             return FakeResponse()
 
@@ -2925,6 +3123,7 @@ def test_remove_attempt_plex_cleanup_falls_back_to_refresh_all_when_section_key_
     bot = MagicMock(spec=BotApp)
     bot.plex = plex
     bot.store = store
+    bot._ctx = SimpleNamespace(store=store, plex=plex)
 
     job = {
         "job_id": "test-job-1",
@@ -2966,6 +3165,7 @@ def test_remove_attempt_plex_cleanup_falls_back_to_show_type_for_episode_remove_
     bot = MagicMock(spec=BotApp)
     bot.plex = plex
     bot.store = store
+    bot._ctx = SimpleNamespace(store=store, plex=plex)
 
     job = {
         "job_id": "test-job-2",
@@ -3007,6 +3207,7 @@ def test_remove_attempt_plex_cleanup_falls_back_to_both_types_for_unknown_remove
     bot = MagicMock(spec=BotApp)
     bot.plex = plex
     bot.store = store
+    bot._ctx = SimpleNamespace(store=store, plex=plex)
 
     job = {
         "job_id": "test-job-3",
@@ -3027,6 +3228,7 @@ def test_remove_attempt_plex_cleanup_falls_back_to_both_types_for_unknown_remove
 
 
 # ── Auth system tests ─────────────────────────────────────────────────────────
+
 
 def test_store_unlock_and_is_unlocked(tmp_path):
     """Correct password flow: user unlocks and is immediately recognised as unlocked."""
@@ -3146,9 +3348,11 @@ def test_render_movie_ui_edits_existing_movie_message() -> None:
     class DummyApp:
         def __init__(self) -> None:
             self.user_flow: dict[int, dict[str, object]] = {}
+            self._ctx = SimpleNamespace(user_flow=self.user_flow)
 
         _set_flow = BotApp._set_flow
         _remember_flow_ui_message = BotApp._remember_flow_ui_message
+        _strip_old_keyboard = BotApp._strip_old_keyboard
 
     app = DummyApp()
     bot_api = DummyBotApi()
@@ -3190,9 +3394,11 @@ def test_render_movie_ui_falls_back_to_new_message_when_edit_fails() -> None:
     class DummyApp:
         def __init__(self) -> None:
             self.user_flow: dict[int, dict[str, object]] = {}
+            self._ctx = SimpleNamespace(user_flow=self.user_flow)
 
         _set_flow = BotApp._set_flow
         _remember_flow_ui_message = BotApp._remember_flow_ui_message
+        _strip_old_keyboard = BotApp._strip_old_keyboard
 
     app = DummyApp()
     bot_api = DummyBotApi()
@@ -3226,6 +3432,7 @@ def test_movie_cancel_renders_movie_specific_screen() -> None:
     class DummyApp:
         def __init__(self) -> None:
             self.user_flow: dict[int, dict[str, object]] = {}
+            self._ctx = SimpleNamespace(user_flow=self.user_flow)
 
         _set_flow = BotApp._set_flow
         _get_flow = BotApp._get_flow
@@ -3246,6 +3453,7 @@ def test_movie_cancel_renders_movie_specific_screen() -> None:
         flow_snapshot = dict(flow)
         app._clear_flow(42)
         from telegram import InlineKeyboardMarkup
+
         await app._render_flow_ui(
             42,
             msg,
@@ -3282,6 +3490,7 @@ def test_movie_title_submission_calls_cleanup_private() -> None:
     class DummyApp:
         def __init__(self) -> None:
             self.user_flow: dict[int, dict[str, object]] = {}
+            self._ctx = SimpleNamespace(user_flow=self.user_flow)
 
         _set_flow = BotApp._set_flow
         _get_flow = BotApp._get_flow
@@ -3305,11 +3514,12 @@ def test_movie_title_submission_calls_cleanup_private() -> None:
 
 
 def test_movie_noresult_footer_uses_menu_movie_back_data() -> None:
-    from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
     class DummyApp:
         def __init__(self) -> None:
             self.user_flow: dict[int, dict[str, object]] = {}
+            self._ctx = SimpleNamespace(user_flow=self.user_flow)
 
         _nav_footer = BotApp._nav_footer
 

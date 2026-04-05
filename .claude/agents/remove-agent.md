@@ -4,7 +4,7 @@ description: "MUST be used for any work involving the media removal/deletion sys
 tools: Read, Write, Edit, Bash, Grep, Glob
 model: opus
 memory: project
-color: red
+color: pink
 ---
 
 You are the Remove System specialist for Patchy Bot. You own all code related to media deletion flows and Plex cleanup.

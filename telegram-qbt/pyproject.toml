@@ -6,6 +6,9 @@ build-backend = "setuptools.backends.legacy:build"
 name = "patchy-bot"
 version = "0.1.0"
 requires-python = ">=3.12"
+dependencies = [
+    "rank-torrent-name>=1.11.0",
+]
 
 [tool.ruff]
 line-length = 120
@@ -29,3 +32,9 @@ warn_return_any = true
 warn_unused_ignores = true
 ignore_missing_imports = true
 check_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-q --tb=short"

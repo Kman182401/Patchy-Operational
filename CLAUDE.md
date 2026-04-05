@@ -113,13 +113,66 @@ Claude Code has 9 custom subagents in `.claude/agents/`. Use them proactively:
 - **test-agent** — Writing/running tests, mocking patterns, coverage
 - **security-agent** — Auth system, rate limiting, path safety, input validation, secrets
 
-## Planning rules
+## Subagent-Driven Development (Mandatory)
 
+ALL work in this project MUST use the subagent-driven-development workflow. No exceptions — not even "simple" changes.
+
+### The Process
+1. **Break work into tasks** — Use TodoWrite to create a task list from the user's request
+2. **Dispatch one implementer subagent per task** — Use the matching project subagent (schedule-agent, database-agent, ui-agent, etc.). Provide full task spec, file paths, and context. Never let the subagent inherit session context — construct exactly what it needs.
+3. **Two-stage review after EACH task:**
+   - **Stage 1 — Spec compliance:** Dispatch a code-reviewer subagent to verify the implementation matches what was asked. If issues found → implementer fixes → re-review.
+   - **Stage 2 — Code quality:** Dispatch a second code-reviewer subagent to check quality, bugs, style. If issues found → implementer fixes → re-review.
+4. **Mark task complete** only after both reviews pass
+5. **Move to next task** — repeat steps 2-4
+6. **After all tasks** — run test-agent for the full test suite, then restart the service
+
+### Rules
+- NEVER implement code inline in the main session — always dispatch a subagent
+- NEVER skip either review stage
+- NEVER proceed to the next task with open review issues
+- One implementer subagent at a time (no parallel implementation — conflicts)
+- If a subagent asks questions, answer them before letting it proceed
+- If a subagent reports BLOCKED, assess and re-dispatch with more context or break the task smaller
+
+### Model Selection for Subagents
+- Mechanical tasks (1-2 files, clear spec): use `haiku` model
+- Integration tasks (multi-file, judgment needed): use `sonnet` model
+- Architecture/design/review tasks: use default (opus) model
+
+## Task Master Workflow (Enforced)
+
+Task Master is the project's task tracker. Use it automatically — don't wait to be asked.
+
+### Session Start
+- Run `task-master list` at the start of every session to see what's in flight.
+- If the user gives a direction without referencing a specific task, check if an existing task already covers it before creating a new one.
+
+### Before Starting Work
+1. Check `task-master next` to find the highest-priority unblocked task.
+2. If the user's request maps to an existing task or subtask, work on that — don't create a duplicate.
+3. If the user's request is new work not covered by any task, create one: `task-master add-task --prompt="<description>"`.
+4. Set the task to in-progress: `task-master set-status --id=<id> --status=in-progress`.
+
+### During Implementation
+- Log meaningful progress to the task: `task-master update-subtask --id=<id> --prompt="<what you did, what worked, what didn't>"`.
+- If you discover a subtask is more complex than expected, expand it: `task-master expand --id=<id>`.
+- If blocked, update the task with why and set status to `blocked`.
+
+### After Completing Work
+1. Run tests to confirm nothing broke.
+2. Mark the task done: `task-master set-status --id=<id> --status=done`.
+3. Check `task-master next` and tell the user what's up next.
+
+### Planning
 - Do not save plans to files. Keep all plans in the chat only.
+- For multi-step work, use Task Master to break it into tasks/subtasks rather than maintaining a separate plan.
+- Use `task-master analyze-complexity --research` before expanding large tasks.
 
-## Implementation rules
-
+### Rules
 - Never read secrets or env files unless explicitly needed.
+- Prefer `task-master` CLI commands over direct MCP tool calls when both are available — CLI output is easier for the user to follow.
+- Don't create tasks for trivial one-line fixes. Use judgment — if it takes <2 minutes and needs no tracking, just do it.
 
 ## Git Policy — ~/Patchy_Bot
 MUST NOT run any git-write commands (add, commit, push, reset, rebase, merge, branch create/delete, tag, stash) in ~/Patchy_Bot unless the user explicitly requests it in the current message. Read-only git commands (status, log, diff, show, remote -v) are always allowed. Editing files is allowed — committing them is not.

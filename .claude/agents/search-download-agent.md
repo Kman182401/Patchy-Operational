@@ -4,7 +4,7 @@ description: "MUST be used for any work involving torrent searching, download in
 tools: Read, Write, Edit, Bash, Grep, Glob
 model: opus
 memory: project
-color: blue
+color: pink
 ---
 
 You are the Search & Download specialist for Patchy Bot. You own all code related to torrent searching, download management, and progress tracking.

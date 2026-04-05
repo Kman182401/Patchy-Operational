@@ -1,0 +1,95 @@
+"""Shared keyboard builders used across multiple flows."""
+
+from __future__ import annotations
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+# ---------------------------------------------------------------------------
+# Navigation footer
+# ---------------------------------------------------------------------------
+
+
+def nav_footer(*, back_data: str = "", include_home: bool = True) -> list[list[InlineKeyboardButton]]:
+    """Return a navigation footer row: optional Back + optional Home button."""
+    nav: list[InlineKeyboardButton] = []
+    if back_data:
+        nav.append(InlineKeyboardButton("⬅️ Back", callback_data=back_data))
+    if include_home:
+        nav.append(InlineKeyboardButton("🏠 Home", callback_data="nav:home"))
+    return [nav] if nav else []
+
+
+def home_only_keyboard() -> InlineKeyboardMarkup:
+    """Single-row keyboard containing only the Home button."""
+    return InlineKeyboardMarkup(nav_footer(include_home=True))
+
+
+# ---------------------------------------------------------------------------
+# Layout helpers
+# ---------------------------------------------------------------------------
+
+
+def compact_action_rows(
+    rows: list[list[InlineKeyboardButton]], *, max_buttons: int = 5, columns: int = 2
+) -> list[list[InlineKeyboardButton]]:
+    """Re-flow ``rows`` into a compact grid when there are few buttons.
+
+    If the total button count exceeds ``max_buttons``, the original ``rows``
+    are returned unchanged.  Otherwise buttons are re-arranged into a grid of
+    ``columns`` per row.
+    """
+    buttons = [button for row in rows for button in row]
+    if not buttons or len(buttons) > max_buttons:
+        return rows
+    return [buttons[idx : idx + max(1, columns)] for idx in range(0, len(buttons), max(1, columns))]
+
+
+# ---------------------------------------------------------------------------
+# Top-level keyboards
+# ---------------------------------------------------------------------------
+
+
+def command_center_keyboard() -> InlineKeyboardMarkup:
+    """Main command-center keyboard shown on /start."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("🎬 Movie Search", callback_data="menu:movie"),
+                InlineKeyboardButton("📺 TV Search", callback_data="menu:tv"),
+            ],
+            [
+                InlineKeyboardButton("🗓️ Schedule", callback_data="menu:schedule"),
+                InlineKeyboardButton("🗑️ Remove", callback_data="menu:remove"),
+            ],
+            [
+                InlineKeyboardButton("ℹ️ Help", callback_data="menu:help"),
+            ],
+        ]
+    )
+
+
+def tv_filter_choice_keyboard() -> InlineKeyboardMarkup:
+    """Keyboard presented when the user starts a TV search."""
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton("➕ Set Season/Episode", callback_data="flow:tv_filter_set"),
+            InlineKeyboardButton("⏭ Skip Filters", callback_data="flow:tv_filter_skip"),
+        ],
+        [
+            InlineKeyboardButton("📦 Full Series", callback_data="flow:tv_full_series"),
+        ],
+    ]
+    rows.extend(nav_footer(back_data="nav:home", include_home=False))
+    return InlineKeyboardMarkup(rows)
+
+
+def media_picker_keyboard(sid: str, idx: int, *, back_data: str = "") -> InlineKeyboardMarkup:
+    """Keyboard that asks the user to pick Movies or TV for a search result."""
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton("🎬 Movies", callback_data=f"d:{sid}:{idx}:movies"),
+            InlineKeyboardButton("📺 TV", callback_data=f"d:{sid}:{idx}:tv"),
+        ]
+    ]
+    rows.extend(nav_footer(back_data=back_data))
+    return InlineKeyboardMarkup(rows)

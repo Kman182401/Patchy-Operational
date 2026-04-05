@@ -36,6 +36,7 @@ class Config:
     default_sort: str
     default_order: str
     default_min_quality: int
+    default_min_seeds: int
     movies_category: str
     tv_category: str
     spam_category: str
@@ -60,11 +61,28 @@ class Config:
     progress_track_timeout_s: int
     backup_dir: str | None
 
-    _DANGEROUS_ROOTS: frozenset[str] = frozenset({
-        "/", "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib64",
-        "/opt", "/proc", "/root", "/run", "/sbin", "/srv", "/sys",
-        "/tmp", "/usr", "/var",
-    })
+    _DANGEROUS_ROOTS: frozenset[str] = frozenset(
+        {
+            "/",
+            "/bin",
+            "/boot",
+            "/dev",
+            "/etc",
+            "/home",
+            "/lib",
+            "/lib64",
+            "/opt",
+            "/proc",
+            "/root",
+            "/run",
+            "/sbin",
+            "/srv",
+            "/sys",
+            "/tmp",
+            "/usr",
+            "/var",
+        }
+    )
 
     _SAFE_IFACE_RE: re.Pattern[str] = re.compile(r"^[a-zA-Z0-9_-]+$")
 
@@ -84,7 +102,7 @@ class Config:
                 )
 
     @staticmethod
-    def from_env() -> "Config":
+    def from_env() -> Config:
         token = parse_env_text(os.getenv("TELEGRAM_BOT_TOKEN"), "")
         if not token:
             raise RuntimeError("Missing TELEGRAM_BOT_TOKEN")
@@ -132,9 +150,10 @@ class Config:
             search_early_exit_idle_s=max(1.0, float(os.getenv("SEARCH_EARLY_EXIT_IDLE_SECONDS", "2.5"))),
             search_early_exit_max_wait_s=max(2.0, float(os.getenv("SEARCH_EARLY_EXIT_MAX_WAIT_SECONDS", "12.0"))),
             default_limit=max(1, min(50, int(os.getenv("DEFAULT_RESULT_LIMIT", "10")))),
-            default_sort=parse_env_text(os.getenv("DEFAULT_SORT"), "seeds").lower(),
+            default_sort=parse_env_text(os.getenv("DEFAULT_SORT"), "quality").lower(),
             default_order=parse_env_text(os.getenv("DEFAULT_ORDER"), "desc").lower(),
             default_min_quality=min_q,
+            default_min_seeds=max(0, int(os.getenv("DEFAULT_MIN_SEEDS", "5"))),
             movies_category=parse_env_text(os.getenv("MOVIES_CATEGORY"), "Movies"),
             tv_category=parse_env_text(os.getenv("TV_CATEGORY"), "TV"),
             spam_category=parse_env_text(os.getenv("SPAM_CATEGORY"), "Spam"),
@@ -159,4 +178,3 @@ class Config:
             progress_track_timeout_s=max(60, int(os.getenv("PROGRESS_TRACK_TIMEOUT_SECONDS", "1800"))),
             backup_dir=parse_env_optional(os.getenv("BACKUP_DIR")),
         )
-

@@ -10,18 +10,16 @@ import math
 import os
 import re
 import secrets
-import shlex
-import shutil
 import subprocess
 import threading
 import time
 import urllib.parse
-from datetime import datetime, time as dt_time, timedelta, timezone
+from datetime import time as dt_time
 from typing import Any
 
 import requests
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.error import Conflict, NetworkError, TelegramError
+from telegram.error import TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -31,15 +29,27 @@ from telegram.ext import (
     filters,
 )
 
-from plex_organizer import organize_download as _organize_download
-
 from .clients.llm import PatchyLLMClient
 from .clients.plex import PlexInventoryClient
 from .clients.qbittorrent import QBClient
 from .clients.tv_metadata import TVMetadataClient
 from .config import Config
+from .dispatch import CallbackDispatcher
+from .handlers import chat as chat_handler
+from .handlers import commands as commands_handler  # noqa: F401
+from .handlers import download as download_handler
+from .handlers import remove as remove_handler
+from .handlers import schedule as schedule_handler  # noqa: F401
+from .handlers import search as search_handler
+from .plex_organizer import organize_download as _organize_download
+from .quality import score_torrent
 from .rate_limiter import RateLimiter
 from .store import Store
+from .types import HandlerContext  # noqa: F401
+from .ui import flow as flow_mod  # noqa: F401
+from .ui import keyboards as kb_mod  # noqa: F401
+from .ui import rendering as render_mod  # noqa: F401
+from .ui import text as text_mod  # noqa: F401
 from .utils import (
     _ACTIVE_DL_STATES,
     _PM,
@@ -47,19 +57,11 @@ from .utils import (
     _relative_time,
     episode_code,
     episode_number_from_code,
-    exception_tuple,
     extract_episode_codes,
-    extract_season_number,
     format_local_ts,
-    format_remove_episode_label,
-    format_remove_season_label,
     human_size,
-    is_remove_media_file,
     normalize_title,
     now_ts,
-    parse_size_to_bytes,
-    quality_tier,
-    remove_tv_item_sort_key,
 )
 
 LOG = logging.getLogger("qbtg")
@@ -82,7 +84,9 @@ class BotApp:
         self.user_ephemeral_messages: dict[int, list[dict[str, int]]] = {}
         self.command_center_refresh_tasks: dict[int, asyncio.Task] = {}
         if cfg.patchy_chat_enabled:
-            self.patchy_llm = PatchyLLMClient(cfg.patchy_llm_base_url, cfg.patchy_llm_api_key, timeout_s=cfg.patchy_chat_timeout_s)
+            self.patchy_llm = PatchyLLMClient(
+                cfg.patchy_llm_base_url, cfg.patchy_llm_api_key, timeout_s=cfg.patchy_chat_timeout_s
+            )
         else:
             self.patchy_llm = PatchyLLMClient(None, None, timeout_s=cfg.patchy_chat_timeout_s)
         self.tvmeta = TVMetadataClient(cfg.tmdb_api_key)
@@ -114,6 +118,44 @@ class BotApp:
         self.rate_limiter = RateLimiter(limit=_rl_limit, window_s=_rl_window)
         # Protects shared mutable dicts under concurrent_updates=True
         self._state_lock = asyncio.Lock()
+        self._dispatcher = CallbackDispatcher()
+        self._register_callbacks()
+        self._ctx = HandlerContext(
+            cfg=self.cfg,
+            store=self.store,
+            qbt=self.qbt,
+            plex=self.plex,
+            tvmeta=self.tvmeta,
+            patchy_llm=self.patchy_llm,
+            rate_limiter=self.rate_limiter,
+            user_flow=self.user_flow,
+            user_nav_ui=self.user_nav_ui,
+            progress_tasks=self.progress_tasks,
+            pending_tracker_tasks=self.pending_tracker_tasks,
+            user_ephemeral_messages=self.user_ephemeral_messages,
+            command_center_refresh_tasks=self.command_center_refresh_tasks,
+            chat_history=self.chat_history,
+            chat_history_max_users=self._chat_history_max_users,
+            schedule_source_state=self.schedule_source_state,
+            schedule_source_state_lock=self.schedule_source_state_lock,
+            schedule_runner_lock=self.schedule_runner_lock,
+            remove_runner_lock=self.remove_runner_lock,
+            state_lock=self._state_lock,
+        )
+
+    # ---------- Callback dispatcher registration ----------
+
+    def _register_callbacks(self) -> None:
+        d = self._dispatcher
+        d.register_exact("nav:home", self._on_cb_nav_home)
+        d.register_prefix("a:", self._on_cb_add)
+        d.register_prefix("d:", self._on_cb_download)
+        d.register_prefix("p:", self._on_cb_page)
+        d.register_prefix("rm:", self._on_cb_remove)
+        d.register_prefix("sch:", self._on_cb_schedule)
+        d.register_prefix("menu:", self._on_cb_menu)
+        d.register_prefix("flow:", self._on_cb_flow)
+        d.register_prefix("stop:", self._on_cb_stop)
 
     # ---------- Telegram command discovery ----------
 
@@ -193,7 +235,12 @@ class BotApp:
 
     def _targets(self) -> dict[str, dict[str, str]]:
         return {
-            "movies": {"category": self.cfg.movies_category, "path": self.cfg.movies_path, "label": "Movies", "emoji": "🎬"},
+            "movies": {
+                "category": self.cfg.movies_category,
+                "path": self.cfg.movies_path,
+                "label": "Movies",
+                "emoji": "🎬",
+            },
             "tv": {"category": self.cfg.tv_category, "path": self.cfg.tv_path, "label": "TV", "emoji": "📺"},
         }
 
@@ -243,14 +290,19 @@ class BotApp:
         return True, "ready"
 
     @staticmethod
-    def _check_free_space(target_path: str, warn_bytes: int = 10 * 1024**3, block_bytes: int = 5 * 1024**3) -> tuple[bool, str]:
+    def _check_free_space(
+        target_path: str, warn_bytes: int = 10 * 1024**3, block_bytes: int = 5 * 1024**3
+    ) -> tuple[bool, str]:
         try:
             st = os.statvfs(target_path)
             free = int(st.f_frsize * st.f_bfree)
         except OSError as e:
             return True, f"disk check skipped ({e})"
         if free < block_bytes:
-            return False, f"Not enough disk space ({human_size(free)} free). Need at least {human_size(block_bytes)} to start a download."
+            return (
+                False,
+                f"Not enough disk space ({human_size(free)} free). Need at least {human_size(block_bytes)} to start a download.",
+            )
         if free < warn_bytes:
             LOG.warning("Low disk space on %s: %s free", target_path, human_size(free))
         return True, "ok"
@@ -270,7 +322,7 @@ class BotApp:
             if not os.path.exists(iface_dir):
                 return False, f"bound interface missing: {iface}"
             try:
-                with open(f"{iface_dir}/operstate", "r", encoding="utf-8") as f:
+                with open(f"{iface_dir}/operstate", encoding="utf-8") as f:
                     iface_state = f.read().strip().lower()
             except OSError:
                 iface_state = "unknown"
@@ -337,10 +389,7 @@ class BotApp:
             html_msg = "<b>⏱ Slow down</b>\n<i>Too many requests. Wait a moment before trying again.</i>"
             plain_msg = "Too many requests. Please wait."
         elif self._requires_password():
-            html_msg = (
-                "<b>🔒 Access Locked</b>\n"
-                "Send the password directly, or use /unlock &lt;password&gt;."
-            )
+            html_msg = "<b>🔒 Access Locked</b>\nSend the password directly, or use /unlock &lt;password&gt;."
             plain_msg = "🔒 Access locked. Send the password or use /unlock."
         else:
             html_msg = "⛔ Access denied."
@@ -352,13 +401,13 @@ class BotApp:
             await update.callback_query.answer(plain_msg[:200], show_alert=True)
 
     def _set_flow(self, user_id: int, payload: dict[str, Any]) -> None:
-        self.user_flow[user_id] = payload
+        flow_mod.set_flow(self._ctx, user_id, payload)
 
     def _get_flow(self, user_id: int) -> dict[str, Any] | None:
-        return self.user_flow.get(user_id)
+        return flow_mod.get_flow(self._ctx, user_id)
 
     def _clear_flow(self, user_id: int) -> None:
-        self.user_flow.pop(user_id, None)
+        flow_mod.clear_flow(self._ctx, user_id)
 
     def _remember_nav_ui_message(self, user_id: int, message: Any) -> None:
         chat_id = getattr(message, "chat_id", None)
@@ -410,6 +459,15 @@ class BotApp:
             except TelegramError:
                 pass
 
+    async def _strip_old_keyboard(self, bot: Any, chat_id: int, message_id: int) -> None:
+        """Remove the inline keyboard from an old message so only one interactive bubble exists."""
+        if not chat_id or not message_id:
+            return
+        try:
+            await bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id, reply_markup=None)
+        except Exception:
+            pass  # Message may be deleted, too old, etc.
+
     async def _render_nav_ui(
         self,
         user_id: int,
@@ -447,6 +505,7 @@ class BotApp:
                     if target_message is not None:
                         self._remember_nav_ui_message(user_id, target_message)
                         return target_message
+        await self._strip_old_keyboard(bot, target_chat_id, target_message_id)
         rendered = await anchor_message.reply_text(
             text,
             reply_markup=reply_markup,
@@ -507,6 +566,7 @@ class BotApp:
                     if target_message is not None:
                         self._remember_flow_ui_message(user_id, flow, target_message, flow_key)
                         return target_message
+        await self._strip_old_keyboard(bot, target_chat_id, target_message_id)
         rendered = await anchor_message.reply_text(
             text,
             reply_markup=reply_markup,
@@ -517,35 +577,68 @@ class BotApp:
         return rendered
 
     async def _render_remove_ui(
-        self, user_id: int, anchor_message: Any, flow: dict[str, Any] | None, text: str, *,
-        reply_markup: InlineKeyboardMarkup | None = None, disable_web_page_preview: bool = True,
+        self,
+        user_id: int,
+        anchor_message: Any,
+        flow: dict[str, Any] | None,
+        text: str,
+        *,
+        reply_markup: InlineKeyboardMarkup | None = None,
+        disable_web_page_preview: bool = True,
         current_ui_message: Any | None = None,
     ) -> Any:
         return await self._render_flow_ui(
-            user_id, anchor_message, flow, text, flow_key="remove",
-            reply_markup=reply_markup, disable_web_page_preview=disable_web_page_preview,
+            user_id,
+            anchor_message,
+            flow,
+            text,
+            flow_key="remove",
+            reply_markup=reply_markup,
+            disable_web_page_preview=disable_web_page_preview,
             current_ui_message=current_ui_message,
         )
 
     async def _render_schedule_ui(
-        self, user_id: int, anchor_message: Any, flow: dict[str, Any] | None, text: str, *,
-        reply_markup: InlineKeyboardMarkup | None = None, disable_web_page_preview: bool = True,
+        self,
+        user_id: int,
+        anchor_message: Any,
+        flow: dict[str, Any] | None,
+        text: str,
+        *,
+        reply_markup: InlineKeyboardMarkup | None = None,
+        disable_web_page_preview: bool = True,
         current_ui_message: Any | None = None,
     ) -> Any:
         return await self._render_flow_ui(
-            user_id, anchor_message, flow, text, flow_key="schedule",
-            reply_markup=reply_markup, disable_web_page_preview=disable_web_page_preview,
+            user_id,
+            anchor_message,
+            flow,
+            text,
+            flow_key="schedule",
+            reply_markup=reply_markup,
+            disable_web_page_preview=disable_web_page_preview,
             current_ui_message=current_ui_message,
         )
 
     async def _render_tv_ui(
-        self, user_id: int, anchor_message: Any, flow: dict[str, Any] | None, text: str, *,
-        reply_markup: InlineKeyboardMarkup | None = None, disable_web_page_preview: bool = True,
+        self,
+        user_id: int,
+        anchor_message: Any,
+        flow: dict[str, Any] | None,
+        text: str,
+        *,
+        reply_markup: InlineKeyboardMarkup | None = None,
+        disable_web_page_preview: bool = True,
         current_ui_message: Any | None = None,
     ) -> Any:
         return await self._render_flow_ui(
-            user_id, anchor_message, flow, text, flow_key="tv",
-            reply_markup=reply_markup, disable_web_page_preview=disable_web_page_preview,
+            user_id,
+            anchor_message,
+            flow,
+            text,
+            flow_key="tv",
+            reply_markup=reply_markup,
+            disable_web_page_preview=disable_web_page_preview,
             current_ui_message=current_ui_message,
         )
 
@@ -561,104 +654,31 @@ class BotApp:
         except Exception:
             return
 
-    # ---------- Live progress ----------
+    # ---------- Live progress (delegated to handlers.download) ----------
 
     @staticmethod
     def _progress_bar(progress_pct: float, width: int = 18) -> str:
-        # Sub-block characters give 8× finer resolution at the leading edge.
-        EIGHTHS = ["▏", "▎", "▍", "▌", "▋", "▊", "▉"]
-        pct = max(0.0, min(100.0, progress_pct))
-        total_eighths = int((pct / 100.0) * width * 8)
-        full_blocks = total_eighths // 8
-        remainder = total_eighths % 8
-        bar = "█" * full_blocks
-        if full_blocks < width:
-            if remainder > 0:
-                bar += EIGHTHS[remainder - 1]
-                bar += "░" * (width - full_blocks - 1)
-            else:
-                bar += "░" * (width - full_blocks)
-        return bar
+        return download_handler.progress_bar(progress_pct, width)
 
     @staticmethod
     def _completed_bytes(info: dict[str, Any]) -> int:
-        total_bytes = int(info.get("size", 0) or info.get("total_size", 0) or 0)
-        completed = int(info.get("completed", 0) or 0)
-        downloaded = int(info.get("downloaded", 0) or 0)
-
-        done = completed if completed > 0 else downloaded
-        done = max(0, done)
-        if total_bytes > 0:
-            done = min(done, total_bytes)
-        return done
+        return download_handler.completed_bytes(info)
 
     @staticmethod
     def _is_complete_torrent(info: dict[str, Any]) -> bool:
-        state = str(info.get("state") or "").strip()
-        try:
-            progress = float(info.get("progress", 0.0) or 0.0)
-        except Exception:
-            progress = 0.0
-
-        total_bytes = int(info.get("size", 0) or info.get("total_size", 0) or 0)
-        amount_left = int(info.get("amount_left", -1) or -1)
-        completed_bytes = BotApp._completed_bytes(info)
-
-        if progress >= 0.999:
-            return True
-
-        if total_bytes > 0 and completed_bytes >= total_bytes:
-            return True
-
-        if amount_left == 0 and total_bytes > 0:
-            return True
-
-        return state in {"uploading", "stalledUP", "queuedUP", "forcedUP", "pausedUP", "checkingUP"}
+        return download_handler.is_complete_torrent(info)
 
     @staticmethod
     def _format_eta(eta_seconds: int) -> str:
-        # qBittorrent uses large sentinel values (e.g. 8640000) for unknown ETA.
-        if eta_seconds < 0 or eta_seconds >= 8640000:
-            return "∞"
-        days, rem = divmod(eta_seconds, 86400)
-        h, rem = divmod(rem, 3600)
-        m, s = divmod(rem, 60)
-        if days > 0:
-            return f"{days}d {h:02d}:{m:02d}:{s:02d}"
-        return f"{h:02d}:{m:02d}:{s:02d}"
+        return download_handler.format_eta(eta_seconds)
 
     @staticmethod
     def _state_label(info: dict[str, Any]) -> str:
-        state = str(info.get("state") or "unknown").strip()
-        if BotApp._is_complete_torrent(info):
-            return "seeding"
-        labels = {
-            "metaDL": "getting metadata",
-            "forcedMetaDL": "getting metadata",
-            "downloading": "downloading",
-            "forcedDL": "downloading",
-            "stalledDL": "waiting for seeders",
-            "queuedDL": "queued",
-            "pausedDL": "paused",
-            "checkingDL": "checking",
-            "checkingResumeData": "checking",
-            "moving": "moving",
-            "missingFiles": "missing files",
-            "error": "error",
-        }
-        return labels.get(state, state or "unknown")
+        return download_handler.state_label(info)
 
     @classmethod
     def _eta_label(cls, info: dict[str, Any]) -> str:
-        state = str(info.get("state") or "").strip()
-        if cls._is_complete_torrent(info):
-            return "done"
-        if state in {"metaDL", "forcedMetaDL"}:
-            return "metadata"
-        if state in {"checkingDL", "checkingResumeData", "moving"}:
-            return state.replace("DL", "").replace("ResumeData", " resume data").lower()
-        eta = int(info.get("eta", -1) or -1)
-        return cls._format_eta(eta)
+        return download_handler.eta_label(info)
 
     def _render_progress_text(
         self,
@@ -670,33 +690,8 @@ class BotApp:
         dls_bps: int | None = None,
         uls_bps: int | None = None,
     ) -> str:
-        spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-        spin = spinner[tick % len(spinner)]
-
-        raw_progress = float(info.get("progress", 0.0) or 0.0) * 100.0
-        progress = max(0.0, min(100.0, raw_progress if progress_pct is None else progress_pct))
-        bar = self._progress_bar(progress)
-        state = str(info.get("state") or "unknown")
-
-        dls_val = int(info.get("dlspeed", 0) or 0) if dls_bps is None else max(0, int(dls_bps))
-        uls_val = int(info.get("upspeed", 0) or 0) if uls_bps is None else max(0, int(uls_bps))
-        dls = human_size(dls_val) + "/s"
-        uls = human_size(uls_val) + "/s"
-
-        total_bytes = int(info.get("size", 0) or info.get("total_size", 0) or 0)
-        done_bytes = self._completed_bytes(info)
-        done = human_size(done_bytes)
-        total = human_size(total_bytes) if total_bytes > 0 else "?"
-        eta_txt = self._eta_label(info)
-        state_txt = self._state_label(info)
-
-        return (
-            f"<b>Live Download Monitor</b>\n"
-            f"<code>{_h(name)}</code>\n"
-            f"<code>[{bar}] {progress:.1f}%</code>\n"
-            f"State: <b>{state_txt}</b>\n"
-            f"↓ <code>{dls}</code> • ETA <code>{eta_txt}</code>\n"
-            f"Done: <code>{done}</code> / <code>{total}</code>"
+        return download_handler.render_progress_text(
+            name, info, tick, progress_pct=progress_pct, dls_bps=dls_bps, uls_bps=uls_bps
         )
 
     def _start_progress_tracker(self, user_id: int, torrent_hash: str, tracker_msg: Any, title: str) -> None:
@@ -725,7 +720,11 @@ class BotApp:
             if not torrent_hash:
                 return
 
-            tracker_msg = await base_msg.reply_text("<b>📡 Live Monitor Attached</b>\n<i>Tracking download progress…</i>", reply_markup=self._stop_download_keyboard(torrent_hash), parse_mode=_PM)
+            tracker_msg = await base_msg.reply_text(
+                "<b>📡 Live Monitor Attached</b>\n<i>Tracking download progress…</i>",
+                reply_markup=self._stop_download_keyboard(torrent_hash),
+                parse_mode=_PM,
+            )
             self._start_progress_tracker(user_id, torrent_hash, tracker_msg, title)
         except Exception:
             LOG.warning("Deferred live monitor attach failed", exc_info=True)
@@ -733,10 +732,14 @@ class BotApp:
             self.pending_tracker_tasks.pop(key, None)
 
     def _stop_download_keyboard(self, torrent_hash: str) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup([[
-            InlineKeyboardButton("🏠 Home", callback_data="nav:home"),
-            InlineKeyboardButton("🛑 Stop & Delete Download", callback_data=f"stop:{torrent_hash}"),
-        ]])
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("🏠 Home", callback_data="nav:home"),
+                    InlineKeyboardButton("🛑 Stop & Delete Download", callback_data=f"stop:{torrent_hash}"),
+                ]
+            ]
+        )
 
     async def _tracker_send_fallback(self, tracker_msg: Any, text: str) -> None:
         """Send a message directly to the chat when tracker_msg was deleted."""
@@ -784,13 +787,17 @@ class BotApp:
             while True:
                 elapsed = time.time() - start
                 if elapsed > self.cfg.progress_track_timeout_s:
-                    timeout_text = ((last_text + "\n") if last_text else "") + "<b>⏱ Monitor Timed Out</b>\nUse <code>/active</code> for current status."
+                    timeout_text = (
+                        (last_text + "\n") if last_text else ""
+                    ) + "<b>⏱ Monitor Timed Out</b>\nUse <code>/active</code> for current status."
                     if timeout_text != last_text:
                         edited = await self._safe_tracker_edit(tracker_msg, timeout_text, reply_markup=None)
                         if edited:
                             last_text = timeout_text
                         else:
-                            await self._tracker_send_fallback(tracker_msg, "<b>⏱ Monitor Timed Out</b>\nUse <code>/active</code> for current status.")
+                            await self._tracker_send_fallback(
+                                tracker_msg, "<b>⏱ Monitor Timed Out</b>\nUse <code>/active</code> for current status."
+                            )
                     break
 
                 try:
@@ -800,7 +807,10 @@ class BotApp:
                     qbt_error_streak += 1
                     LOG.warning("Live monitor qBittorrent poll failed (%d/5)", qbt_error_streak, exc_info=True)
                     if qbt_error_streak >= 5:
-                        await self._tracker_send_fallback(tracker_msg, "<b>⚠️ Monitor Paused</b>\n<i>Repeated qBittorrent errors.</i> Use <code>/active</code> for status.")
+                        await self._tracker_send_fallback(
+                            tracker_msg,
+                            "<b>⚠️ Monitor Paused</b>\n<i>Repeated qBittorrent errors.</i> Use <code>/active</code> for status.",
+                        )
                         break
                     await asyncio.sleep(self.cfg.progress_refresh_s)
                     tick += 1
@@ -853,18 +863,24 @@ class BotApp:
                     else:
                         edit_error_streak += 1
                         if edit_error_streak >= 5:
-                            await self._tracker_send_fallback(tracker_msg, "<b>⚠️ Monitor Paused</b>\n<i>Repeated Telegram timeouts.</i> Use <code>/active</code> for status.")
+                            await self._tracker_send_fallback(
+                                tracker_msg,
+                                "<b>⚠️ Monitor Paused</b>\n<i>Repeated Telegram timeouts.</i> Use <code>/active</code> for status.",
+                            )
                             break
 
                 if self._is_complete_torrent(info):
-                    done_text = self._render_progress_text(
-                        title,
-                        info,
-                        edit_count,
-                        progress_pct=100.0,
-                        dls_bps=int(raw_dls),
-                        uls_bps=int(raw_uls),
-                    ) + "\n<b>✅ Download Complete</b>"
+                    done_text = (
+                        self._render_progress_text(
+                            title,
+                            info,
+                            edit_count,
+                            progress_pct=100.0,
+                            dls_bps=int(raw_dls),
+                            uls_bps=int(raw_uls),
+                        )
+                        + "\n<b>✅ Download Complete</b>"
+                    )
                     await self._safe_tracker_edit(tracker_msg, done_text, reply_markup=None)
                     # Mark as notified so the background poller won't double-notify.
                     await asyncio.to_thread(self.store.mark_completion_notified, torrent_hash, title)
@@ -872,7 +888,11 @@ class BotApp:
                     media_path = str(info.get("content_path") or info.get("save_path") or "").strip()
                     category = str(info.get("category") or "")
                     org_result = await asyncio.to_thread(
-                        _organize_download, media_path, category, self.cfg.tv_path, self.cfg.movies_path,
+                        _organize_download,
+                        media_path,
+                        category,
+                        self.cfg.tv_path,
+                        self.cfg.movies_path,
                     )
                     if org_result.moved:
                         media_path = org_result.new_path
@@ -900,7 +920,9 @@ class BotApp:
             return
         except Exception:
             LOG.warning("Live progress tracker failed", exc_info=True)
-            await self._tracker_send_fallback(tracker_msg, "<b>⚠️ Monitor Error</b>\n<i>Unexpected error.</i> Use <code>/active</code> for status.")
+            await self._tracker_send_fallback(
+                tracker_msg, "<b>⚠️ Monitor Error</b>\n<i>Unexpected error.</i> Use <code>/active</code> for status."
+            )
         finally:
             self.progress_tasks.pop(key, None)
 
@@ -938,7 +960,11 @@ class BotApp:
             # Organize download into Plex-standard structure.
             media_path = str(info.get("content_path") or info.get("save_path") or "").strip()
             org_result = await asyncio.to_thread(
-                _organize_download, media_path, category, self.cfg.tv_path, self.cfg.movies_path,
+                _organize_download,
+                media_path,
+                category,
+                self.cfg.tv_path,
+                self.cfg.movies_path,
             )
             if org_result.moved:
                 media_path = org_result.new_path
@@ -954,7 +980,7 @@ class BotApp:
                     LOG.warning("Completion poller Plex refresh failed for %s", media_path, exc_info=True)
 
             # Build notification.
-            lines = [f"<b>✅ Download Complete</b>", f"<code>{_h(name)}</code>"]
+            lines = ["<b>✅ Download Complete</b>", f"<code>{_h(name)}</code>"]
             if category:
                 lines.append(f"Category: <b>{_h(category)}</b>")
             if size > 0:
@@ -985,89 +1011,34 @@ class BotApp:
     # ---------- UI ----------
 
     def _nav_footer(self, *, back_data: str = "", include_home: bool = True) -> list[list[InlineKeyboardButton]]:
-        """Standard navigation footer: optional Back + optional Home."""
-        nav: list[InlineKeyboardButton] = []
-        if back_data:
-            nav.append(InlineKeyboardButton("⬅️ Back", callback_data=back_data))
-        if include_home:
-            nav.append(InlineKeyboardButton("🏠 Home", callback_data="nav:home"))
-        return [nav] if nav else []
+        return kb_mod.nav_footer(back_data=back_data, include_home=include_home)
 
     def _home_only_keyboard(self) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup(self._nav_footer(include_home=True))
+        return kb_mod.home_only_keyboard()
 
     @staticmethod
-    def _compact_action_rows(rows: list[list[InlineKeyboardButton]], *, max_buttons: int = 5, columns: int = 2) -> list[list[InlineKeyboardButton]]:
-        buttons = [button for row in rows for button in row]
-        if not buttons or len(buttons) > max_buttons:
-            return rows
-        return [buttons[idx : idx + max(1, columns)] for idx in range(0, len(buttons), max(1, columns))]
+    def _compact_action_rows(
+        rows: list[list[InlineKeyboardButton]], *, max_buttons: int = 5, columns: int = 2
+    ) -> list[list[InlineKeyboardButton]]:
+        return kb_mod.compact_action_rows(rows, max_buttons=max_buttons, columns=columns)
 
     def _command_center_keyboard(self) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton("🎬 Movie Search", callback_data="menu:movie"),
-                    InlineKeyboardButton("📺 TV Search", callback_data="menu:tv"),
-                ],
-                [
-                    InlineKeyboardButton("🗓️ Schedule", callback_data="menu:schedule"),
-                    InlineKeyboardButton("🗑️ Remove", callback_data="menu:remove"),
-                ],
-                [
-                    InlineKeyboardButton("ℹ️ Help", callback_data="menu:help"),
-                ],
-            ]
-        )
+        return kb_mod.command_center_keyboard()
 
     def _tv_filter_choice_keyboard(self) -> InlineKeyboardMarkup:
-        rows = [
-            [
-                InlineKeyboardButton("➕ Set Season/Episode", callback_data="flow:tv_filter_set"),
-                InlineKeyboardButton("⏭ Skip Filters", callback_data="flow:tv_filter_skip"),
-            ],
-            [
-                InlineKeyboardButton("📦 Full Series", callback_data="flow:tv_full_series"),
-            ],
-        ]
-        rows.extend(self._nav_footer(back_data="nav:home", include_home=False))
-        return InlineKeyboardMarkup(rows)
-
-    def _tv_filter_choice_text(self) -> str:
-        return (
-            "<b>📺 TV Search</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n\n"
-            "Send the show title to search.\n"
-            "You can optionally lock the search to a season or episode first.\n\n"
-            "<i>Example: Severance</i>"
-        )
-
-    def _tv_filter_prompt_text(self, error: str | None = None) -> str:
-        lines = ["<b>📺 TV Filter</b>", "", "Send the season/episode filter.", "<i>Examples: S1E2 · season 1 episode 2 · season 2 · episode 5</i>"]
-        if error:
-            lines.extend(["", error])
-        return "\n".join(lines)
-
-    def _tv_title_prompt_text(self, season: int | None = None, episode: int | None = None) -> str:
-        lines = ["<b>📺 TV Search</b>", ""]
-        if season is not None or episode is not None:
-            season_txt = f"S{season:02d}" if season is not None else "Any season"
-            episode_txt = f"E{episode:02d}" if episode is not None else "Any episode"
-            lines.append(f"Filter locked: <code>{season_txt} {episode_txt}</code>")
-            lines.append("")
-        lines.append("Send the show title to search.")
-        lines.append("<i>Example: Severance</i>")
-        return "\n".join(lines)
+        return kb_mod.tv_filter_choice_keyboard()
 
     def _media_picker_keyboard(self, sid: str, idx: int, *, back_data: str = "") -> InlineKeyboardMarkup:
-        rows = [
-            [
-                InlineKeyboardButton("🎬 Movies", callback_data=f"d:{sid}:{idx}:movies"),
-                InlineKeyboardButton("📺 TV", callback_data=f"d:{sid}:{idx}:tv"),
-            ]
-        ]
-        rows.extend(self._nav_footer(back_data=back_data))
-        return InlineKeyboardMarkup(rows)
+        return kb_mod.media_picker_keyboard(sid, idx, back_data=back_data)
+
+    def _tv_filter_choice_text(self) -> str:
+        return text_mod.tv_filter_choice_text()
+
+    def _tv_filter_prompt_text(self, error: str | None = None) -> str:
+        return text_mod.tv_filter_prompt_text(error)
+
+    def _tv_title_prompt_text(self, season: int | None = None, episode: int | None = None) -> str:
+        return text_mod.tv_title_prompt_text(season, episode)
 
     def _storage_probe_paths(self) -> list[str]:
         seen: set[str] = set()
@@ -1138,76 +1109,18 @@ class BotApp:
         return "\n".join(lines) + "\n"
 
     def _start_text(self, storage_ok: bool, storage_reason: str) -> str:
-        storage_line = "✅ Storage: ready" if storage_ok else f"⚠️ Storage: {storage_reason}"
-        storage_usage = self._plex_storage_display()
         vpn_ok, vpn_reason = self._vpn_ready_for_download()
-        vpn_line = "✅ VPN gate: ready" if vpn_ok else f"⚠️ VPN gate: {vpn_reason}"
-        downloads = self._active_downloads_section()
-
-        return (
-            "<b>🛡️ Plex Download Command Center</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            f"{storage_line}\n"
-            f"{storage_usage}\n"
-            f"{vpn_line}\n"
-            f"{downloads}\n"
-            "<b>Tips</b>\n"
-            "  • 🗓️ <b>Schedule</b> — track shows and alert on missing episodes\n"
-            "  • 🗑️ <b>Remove</b> — browse and delete from Plex library\n"
+        return text_mod.start_text(
+            storage_ok,
+            storage_reason,
+            storage_usage=self._plex_storage_display(),
+            vpn_ok=vpn_ok,
+            vpn_reason=vpn_reason,
+            downloads=self._active_downloads_section(),
         )
 
     def _help_text(self) -> str:
-        return (
-            "<b>ℹ️ Help &amp; Quick Start</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "\n"
-            "<b>1) First-time setup</b>\n"
-            "• If locked, send your password once in chat (or use <code>/unlock &lt;password&gt;</code>).\n"
-            "• Open <code>/start</code> to launch the command center.\n"
-            "\n"
-            "<b>2) Daily workflow</b>\n"
-            "• Tap Movie Search or TV Search.\n"
-            "• Enter a title.\n"
-            "• Select a result and choose Movies or TV.\n"
-            "• The bot enforces VPN + storage checks before adding downloads.\n"
-            "\n"
-            "<b>3) Natural language (Patchy chat)</b>\n"
-            "• Chat normally (example: \"Hey Patchy!\", \"How's qBittorrent doing?\").\n"
-            "• Ask search explicitly (example: \"find dune part two\", \"search movie interstellar\", \"tv severance s1e2\").\n"
-            "• While the bot is waiting for a title/filter, your message is treated as input for that step.\n"
-            "\n"
-            "<b>4) Slash commands</b>\n"
-            "• <code>/start</code> — open command center\n"
-            "• <code>/search &lt;query&gt; [options]</code> — advanced search\n"
-            "• <code>/schedule</code> — track a show and auto-acquire new aired episodes\n"
-            "• <code>/remove</code> — search or browse Plex/library items, then delete after confirmation\n"
-            "• <code>/show &lt;search_id&gt; [page]</code> — reopen search results\n"
-            "• <code>/add &lt;search_id&gt; &lt;index&gt; &lt;movies|tv&gt;</code> — add specific result\n"
-            "• <code>/active [n]</code> — current active transfers + scheduled tracking\n"
-            "• <code>/profile</code> — policy + routing + VPN gate status\n"
-            "• <code>/categories</code> — category/path mapping\n"
-            "• <code>/plugins</code> — installed qB search plugins\n"
-            "• <code>/unlock &lt;password&gt;</code> / <code>/logout</code> — access control\n"
-            "\n"
-            "<b>5) Schedule mode</b>\n"
-            "• Use <code>/schedule</code> or tap 🗓️ Schedule in command center.\n"
-            "• Enter a show name, confirm the right title, and let the bot inspect Plex/library inventory automatically.\n"
-            "• The bot stores the show ids, tracks the current season, and checks for newly aired missing episodes in the background.\n"
-            "• <i>Automation: after release + grace, the bot retries qBittorrent hourly and auto-queues valid episode matches.</i>\n"
-            "\n"
-            "<b>6) Search options (advanced)</b>\n"
-            "<i>Use with <code>/search</code>:</i>\n"
-            "• <code>--min-seeds N</code>\n"
-            "• <code>--min-size 700MB</code>\n"
-            "• <code>--max-size 8GB</code>\n"
-            "• <code>--min-quality 1080</code>\n"
-            "• <code>--sort seeds|size|name|leechers</code>\n"
-            "• <code>--order asc|desc</code>\n"
-            "• <code>--limit 1-50</code>\n"
-            "\n"
-            "<i>Example:</i>\n"
-            "<code>/search dune part two --min-seeds 25 --min-quality 1080 --sort seeds --order desc --limit 10</code>"
-        )
+        return text_mod.help_text()
 
     async def _send_command_center(self, msg: Any) -> None:
         ok, reason = await asyncio.to_thread(self._ensure_media_categories)
@@ -1218,7 +1131,9 @@ class BotApp:
             self._remember_nav_ui_message(int(user_id), rendered)
             self._start_command_center_refresh(int(user_id))
 
-    async def _render_command_center(self, msg: Any, user_id: int | None = None, *, use_remembered_ui: bool = False) -> Any:
+    async def _render_command_center(
+        self, msg: Any, user_id: int | None = None, *, use_remembered_ui: bool = False
+    ) -> Any:
         ok, reason = await asyncio.to_thread(self._ensure_media_categories)
         text = await asyncio.to_thread(self._start_text, ok, reason)
         kb = self._command_center_keyboard()
@@ -1298,55 +1213,31 @@ class BotApp:
             self.command_center_refresh_tasks.pop(user_id, None)
 
     def _schedule_runner_interval_s(self) -> int:
-        return 60
+        return schedule_handler.schedule_runner_interval_s()
 
     def _schedule_release_grace_s(self) -> int:
-        return 90 * 60
+        return schedule_handler.schedule_release_grace_s()
 
     def _schedule_retry_interval_s(self) -> int:
-        return 3600
+        return schedule_handler.schedule_retry_interval_s()
 
     def _schedule_metadata_retry_s(self) -> int:
-        return 15 * 60
+        return schedule_handler.schedule_metadata_retry_s()
 
     def _schedule_pending_stale_s(self) -> int:
-        return 3 * 3600
+        return schedule_handler.schedule_pending_stale_s()
 
     def _schedule_metadata_cache_ttl_s(self, bundle: dict[str, Any]) -> int:
-        now_value = now_ts()
-        status = str(bundle.get("status") or "").strip().lower()
-        if status in {"ended", "canceled", "cancelled"}:
-            return 24 * 3600
-        next_air_ts = 0
-        for episode in list(bundle.get("episodes") or []):
-            air_ts = int(episode.get("air_ts") or 0)
-            if air_ts > now_value and (next_air_ts <= 0 or air_ts < next_air_ts):
-                next_air_ts = air_ts
-        if next_air_ts and next_air_ts - now_value <= 24 * 3600:
-            return 3600
-        return 6 * 3600
+        return schedule_handler.schedule_metadata_cache_ttl_s(bundle)
 
     def _schedule_metadata_retry_backoff_s(self, failures: int) -> int:
-        if failures <= 1:
-            return 15 * 60
-        if failures == 2:
-            return 30 * 60
-        if failures == 3:
-            return 60 * 60
-        return 6 * 3600
+        return schedule_handler.schedule_metadata_retry_backoff_s(failures)
 
     def _schedule_inventory_backoff_s(self, failures: int) -> int:
-        if failures <= 1:
-            return 5 * 60
-        if failures == 2:
-            return 15 * 60
-        if failures == 3:
-            return 30 * 60
-        return 60 * 60
+        return schedule_handler.schedule_inventory_backoff_s(failures)
 
     def _schedule_source_snapshot(self, key: str) -> dict[str, Any]:
-        with self.schedule_source_state_lock:
-            return dict(self.schedule_source_state.get(key) or {})
+        return schedule_handler.schedule_source_snapshot(self._ctx, key)
 
     def _schedule_mark_source_health(
         self,
@@ -1357,45 +1248,18 @@ class BotApp:
         backoff_until: int = 0,
         effective_source: str | None = None,
     ) -> dict[str, Any]:
-        now_value = now_ts()
-        with self.schedule_source_state_lock:
-            state = dict(self.schedule_source_state.get(key) or {})
-            prior_status = str(state.get("status") or "unknown")
-            failures = int(state.get("consecutive_failures") or 0)
-            if ok:
-                state["status"] = "healthy"
-                state["consecutive_failures"] = 0
-                state["backoff_until"] = 0
-                state["last_error"] = None
-                state["last_success_at"] = now_value
-            else:
-                failures += 1
-                state["status"] = "degraded"
-                state["consecutive_failures"] = failures
-                state["backoff_until"] = int(backoff_until or 0)
-                state["last_error"] = str(detail or "").strip() or None
-            if effective_source is not None:
-                state["effective_source"] = effective_source
-            self.schedule_source_state[key] = state
-        if ok and prior_status != "healthy":
-            LOG.info("Schedule %s source recovered", key)
-        elif not ok and prior_status != "degraded":
-            LOG.warning("Schedule %s source degraded: %s", key, detail)
-        return dict(state)
+        return schedule_handler.schedule_mark_source_health(
+            self._ctx, key, ok=ok, detail=detail, backoff_until=backoff_until, effective_source=effective_source
+        )
 
     def _schedule_should_use_plex_inventory(self) -> bool:
-        if not self.plex.ready():
-            return False
-        state = self._schedule_source_snapshot("inventory")
-        return int(state.get("backoff_until") or 0) <= now_ts()
+        return schedule_handler.schedule_should_use_plex_inventory(self._ctx)
 
     def _remove_runner_interval_s(self) -> int:
-        return 60
+        return remove_handler.remove_runner_interval_s()
 
     def _remove_retry_backoff_s(self, retry_count: int) -> int:
-        steps = [30, 60, 120, 300, 600]
-        idx = max(0, min(int(retry_count or 0), len(steps) - 1))
-        return steps[idx]
+        return remove_handler.remove_retry_backoff_s(retry_count)
 
     async def _schedule_bootstrap(self, app: Application) -> None:
         if app.job_queue is None:
@@ -1530,7 +1394,9 @@ class BotApp:
                 return stale_bundle
             raise
 
-    def _schedule_sanitize_auto_state(self, auto_state: dict[str, Any] | None, *, probe: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _schedule_sanitize_auto_state(
+        self, auto_state: dict[str, Any] | None, *, probe: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         clean = dict(auto_state or {})
         clean.setdefault("enabled", True)
         clean.setdefault("last_auto_code", None)
@@ -1578,9 +1444,13 @@ class BotApp:
     def _schedule_start_flow(self, user_id: int) -> None:
         self._set_flow(user_id, {"mode": "schedule", "stage": "await_show", "tracking_mode": "upcoming"})
 
-    def _schedule_next_check_at(self, next_air_ts: int | None, *, has_actionable_missing: bool, auto_state: dict[str, Any] | None = None) -> int:
+    def _schedule_next_check_at(
+        self, next_air_ts: int | None, *, has_actionable_missing: bool, auto_state: dict[str, Any] | None = None
+    ) -> int:
         now_value = now_ts()
-        auto_state = self._schedule_sanitize_auto_state(auto_state or {}, probe={"actionable_missing_codes": [1]} if has_actionable_missing else {})
+        auto_state = self._schedule_sanitize_auto_state(
+            auto_state or {}, probe={"actionable_missing_codes": [1]} if has_actionable_missing else {}
+        )
         next_retry = int(auto_state.get("next_auto_retry_at") or 0)
         if has_actionable_missing:
             if next_retry > now_value:
@@ -1623,10 +1493,24 @@ class BotApp:
             return 1
         episodes = list(bundle.get("episodes") or [])
         now_value = now_ts()
-        future = [int(ep.get("season") or 0) for ep in episodes if int(ep.get("season") or 0) > 0 and ep.get("number") is not None and ep.get("air_ts") and int(ep.get("air_ts") or 0) > now_value]
+        future = [
+            int(ep.get("season") or 0)
+            for ep in episodes
+            if int(ep.get("season") or 0) > 0
+            and ep.get("number") is not None
+            and ep.get("air_ts")
+            and int(ep.get("air_ts") or 0) > now_value
+        ]
         if future:
             return max(future)
-        aired = [int(ep.get("season") or 0) for ep in episodes if int(ep.get("season") or 0) > 0 and ep.get("number") is not None and ep.get("air_ts") and int(ep.get("air_ts") or 0) <= now_value]
+        aired = [
+            int(ep.get("season") or 0)
+            for ep in episodes
+            if int(ep.get("season") or 0) > 0
+            and ep.get("number") is not None
+            and ep.get("air_ts")
+            and int(ep.get("air_ts") or 0) <= now_value
+        ]
         if aired:
             return max(aired)
         return max(available)
@@ -1688,11 +1572,15 @@ class BotApp:
             self._schedule_mark_source_health("inventory", ok=True, effective_source=effective_source)
         return codes, source, inventory_degraded
 
-    def _schedule_probe_bundle(self, bundle: dict[str, Any], track: dict[str, Any] | None = None, season: int | None = None) -> dict[str, Any]:
+    def _schedule_probe_bundle(
+        self, bundle: dict[str, Any], track: dict[str, Any] | None = None, season: int | None = None
+    ) -> dict[str, Any]:
         show_info = self._schedule_show_info(bundle)
         available = [int(x) for x in list(bundle.get("available_seasons") or []) if int(x) > 0]
         chosen_season = int(season) if season and int(season) in available else self._schedule_select_season(bundle)
-        present_all, inventory_source, inventory_degraded = self._schedule_existing_codes(show_info["name"], show_info.get("year"))
+        present_all, inventory_source, inventory_degraded = self._schedule_existing_codes(
+            show_info["name"], show_info.get("year")
+        )
         pending_all = set(track.get("pending_json") or []) if track else set()
         pending_all -= present_all
         now_value = now_ts()
@@ -1747,9 +1635,11 @@ class BotApp:
         # Cross-season missing: released episodes not in library, across ALL seasons of this show.
         # Computed here while present_all, pending_all, and grace_cutoff are in scope.
         series_missing_by_season: dict[int, list[str]] = {}  # season_number -> [codes]
-        series_actionable_all: list[str] = []               # flat list of actionable across all seasons
+        series_actionable_all: list[str] = []  # flat list of actionable across all seasons
         _seen_series: set[str] = set()
-        for _ep in sorted(list(bundle.get("episodes") or []), key=lambda e: (int(e.get("season") or 0), int(e.get("number") or 0))):
+        for _ep in sorted(
+            list(bundle.get("episodes") or []), key=lambda e: (int(e.get("season") or 0), int(e.get("number") or 0))
+        ):
             _ep_season = int(_ep.get("season") or 0)
             _ep_code = str(_ep.get("code") or "")
             if not _ep_code or _ep_season <= 0 or _ep_code in _seen_series:
@@ -1911,7 +1801,12 @@ class BotApp:
         return InlineKeyboardMarkup(rows)
 
     def _schedule_preview_keyboard(self, probe: dict[str, Any]) -> InlineKeyboardMarkup:
-        rows: list[list[InlineKeyboardButton]] = [[InlineKeyboardButton("✅ Confirm & Track", callback_data="sch:confirm"), InlineKeyboardButton("🔄 Different Show", callback_data="sch:change")]]
+        rows: list[list[InlineKeyboardButton]] = [
+            [
+                InlineKeyboardButton("✅ Confirm & Track", callback_data="sch:confirm"),
+                InlineKeyboardButton("🔄 Different Show", callback_data="sch:change"),
+            ]
+        ]
         actionable = list(probe.get("actionable_missing_codes") or [])
         missing_current = list(probe.get("missing_codes") or [])
         series_actionable = list(probe.get("series_actionable_all") or [])
@@ -1933,7 +1828,10 @@ class BotApp:
 
     def _schedule_missing_keyboard(self, track_id: str) -> InlineKeyboardMarkup:
         rows: list[list[InlineKeyboardButton]] = [
-            [InlineKeyboardButton("⬇️ Download all missing", callback_data=f"sch:all:{track_id}"), InlineKeyboardButton("🎯 Pick specific episodes", callback_data=f"sch:pickeps:{track_id}")],
+            [
+                InlineKeyboardButton("⬇️ Download all missing", callback_data=f"sch:all:{track_id}"),
+                InlineKeyboardButton("🎯 Pick specific episodes", callback_data=f"sch:pickeps:{track_id}"),
+            ],
             [InlineKeyboardButton("⏭ Skip — notify me later", callback_data=f"sch:skip:{track_id}")],
         ]
         rows.extend(self._nav_footer())
@@ -1954,7 +1852,9 @@ class BotApp:
         rows.extend(self._nav_footer())
         return InlineKeyboardMarkup(rows)
 
-    def _schedule_picker_all_missing(self, probe: dict, current_season: int, current_missing: list[str]) -> dict[str, list[str]]:
+    def _schedule_picker_all_missing(
+        self, probe: dict, current_season: int, current_missing: list[str]
+    ) -> dict[str, list[str]]:
         """Normalize series_missing_by_season to string-keyed dict and ensure current season is present."""
         series_raw: dict = probe.get("series_missing_by_season") or {}
         result: dict[str, list[str]] = {}
@@ -2001,7 +1901,9 @@ class BotApp:
         # Season switcher tabs
         other_seasons = sorted(int(s) for s in all_missing if int(s) != season and all_missing[s])
         if other_seasons:
-            rows.append([InlineKeyboardButton(f"Season {s}", callback_data=f"sch:pkseason:{s}") for s in other_seasons[:4]])
+            rows.append(
+                [InlineKeyboardButton(f"Season {s}", callback_data=f"sch:pkseason:{s}") for s in other_seasons[:4]]
+            )
         # Confirm button — always present so keyboard size stays stable
         n = len(selected)
         label = f"⬇️ Download {n} episode{'s' if n != 1 else ''}" if n > 0 else "Select episodes above to download"
@@ -2035,9 +1937,14 @@ class BotApp:
         return "\n".join(lines)
 
     def _schedule_dl_confirm_keyboard(self) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Yes, download", callback_data="sch:dlgo"), InlineKeyboardButton("↩️ Back", callback_data="sch:dlback")],
-        ])
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("✅ Yes, download", callback_data="sch:dlgo"),
+                    InlineKeyboardButton("↩️ Back", callback_data="sch:dlback"),
+                ],
+            ]
+        )
 
     def _schedule_preview_text(self, probe: dict[str, Any]) -> str:
         show = probe.get("show") or {}
@@ -2106,7 +2013,9 @@ class BotApp:
         lines.extend(["", "<i>Confirm to start background checks for this show/season.</i>"])
         return "\n".join(lines)
 
-    def _schedule_track_ready_text(self, track: dict[str, Any], probe: dict[str, Any], *, duplicate: bool = False) -> str:
+    def _schedule_track_ready_text(
+        self, track: dict[str, Any], probe: dict[str, Any], *, duplicate: bool = False
+    ) -> str:
         show = track.get("show_json") or probe.get("show") or {}
         missing = list(probe.get("tracked_missing_codes") or [])
         header = "<b>📺 Already Tracking</b>" if duplicate else "<b>✅ Schedule Tracking Enabled</b>"
@@ -2134,7 +2043,9 @@ class BotApp:
             if not probe.get("metadata_stale"):
                 lines.append("")
             lines.append("<i>⚠️ Inventory source degraded: using filesystem fallback instead of Plex</i>")
-        lines.extend(["", "<i>I'll automatically search and queue missing aired episodes after the release grace window.</i>"])
+        lines.extend(
+            ["", "<i>I'll automatically search and queue missing aired episodes after the release grace window.</i>"]
+        )
         return "\n".join(lines)
 
     def _episode_status_icon(self, probe: dict[str, Any], code: str, *, pending: set[str] | None = None) -> str:
@@ -2186,7 +2097,9 @@ class BotApp:
             LOG.warning("Failed to list qBittorrent torrents for schedule reconcile", exc_info=True)
         return codes
 
-    def _schedule_reconcile_pending(self, track: dict[str, Any], probe: dict[str, Any]) -> tuple[set[str], set[str], set[str]]:
+    def _schedule_reconcile_pending(
+        self, track: dict[str, Any], probe: dict[str, Any]
+    ) -> tuple[set[str], set[str], set[str]]:
         show = track.get("show_json") or probe.get("show") or {}
         season = int(track.get("season") or 1)
         pending = set(track.get("pending_json") or [])
@@ -2314,96 +2227,15 @@ class BotApp:
             LOG.error("Database backup failed: %s", e, exc_info=True)
 
     def _remove_build_job_verification(
-        self,
-        candidate: dict[str, Any],
-        target_path: str,
-        identity: dict[str, Any] | None,
+        self, candidate: dict[str, Any], target_path: str, identity: dict[str, Any] | None
     ) -> dict[str, Any]:
-        data = dict(identity or {})
-        data.setdefault("target_path", target_path)
-        data.setdefault("remove_kind", str(candidate.get("remove_kind") or ""))
-        return data
+        return remove_handler.remove_build_job_verification(candidate, target_path, identity)
 
-    def _remove_attempt_plex_cleanup(
-        self,
-        job: dict[str, Any],
-        *,
-        inline_timeout_s: int = 90,
-    ) -> dict[str, Any]:
-        job_id = str(job.get("job_id") or "")
-        verification = dict(job.get("verification_json") or {})
-        target_path = str(job.get("target_path") or "")
-        remove_kind = str(job.get("remove_kind") or "")
-        section_key = str(job.get("plex_section_key") or verification.get("section_key") or "").strip()
-        scan_path = str(job.get("scan_path") or verification.get("scan_path") or "").strip() or target_path
-        title = str(job.get("plex_title") or verification.get("title") or job.get("item_name") or "item")
-        deadline = time.monotonic() + max(5.0, float(inline_timeout_s))
-        attempts = 0
-        last_error = ""
-        while True:
-            attempts += 1
-            try:
-                self.store.update_remove_job(job_id, plex_cleanup_started_at=now_ts(), status="plex_pending")
-                if section_key:
-                    self.plex._request("POST", f"/library/sections/{section_key}/refresh", params={"path": scan_path})
-                    self.plex._wait_for_section_idle(section_key, timeout_s=min(30, inline_timeout_s), min_wait_s=3.0)
-                    self.plex._request("PUT", f"/library/sections/{section_key}/emptyTrash")
-                else:
-                    # Path didn't match a known Plex section — refresh all sections of the
-                    # matching content type so the deletion always surfaces in Plex.
-                    if remove_kind == "movie":
-                        fallback_types = ["movie"]
-                    elif remove_kind in {"show", "season", "episode"}:
-                        fallback_types = ["show"]
-                    else:
-                        fallback_types = ["movie", "show"]
-                    self.plex.refresh_all_by_type(fallback_types)
-                verified, detail = self.plex.verify_remove_identity_absent(target_path, remove_kind, verification)
-                if verified:
-                    self.store.update_remove_job(
-                        job_id,
-                        status="verified",
-                        verified_at=now_ts(),
-                        next_retry_at=None,
-                        retry_count=int(job.get("retry_count") or 0) + attempts - 1,
-                        last_error_text=None,
-                    )
-                    return {"status": "verified", "detail": detail, "attempts": attempts}
-                last_error = detail
-            except Exception as e:
-                last_error = str(e)
-                LOG.warning("Remove Plex cleanup attempt failed for %s: %s", job_id, e, exc_info=True)
-            if time.monotonic() >= deadline:
-                next_retry = now_ts() + self._remove_retry_backoff_s(int(job.get("retry_count") or 0) + attempts)
-                self.store.update_remove_job(
-                    job_id,
-                    status="plex_pending",
-                    next_retry_at=next_retry,
-                    retry_count=int(job.get("retry_count") or 0) + attempts,
-                    last_error_text=last_error or f"Plex cleanup still pending for {title}",
-                )
-                return {
-                    "status": "plex_pending",
-                    "detail": last_error or f"Plex cleanup still pending for {title}",
-                    "attempts": attempts,
-                    "next_retry_at": next_retry,
-                }
-            time.sleep(min(15.0, float(self._remove_retry_backoff_s(attempts - 1))))
+    def _remove_attempt_plex_cleanup(self, job: dict[str, Any], *, inline_timeout_s: int = 90) -> dict[str, Any]:
+        return remove_handler.remove_attempt_plex_cleanup(self._ctx, job, inline_timeout_s=inline_timeout_s)
 
     async def _remove_runner_job(self, context: ContextTypes.DEFAULT_TYPE) -> None:
-        async with self.remove_runner_lock:
-            due_jobs = await asyncio.to_thread(self.store.list_due_remove_jobs, now_ts(), 5)
-            for job in due_jobs:
-                try:
-                    result = await asyncio.to_thread(self._remove_attempt_plex_cleanup, job, inline_timeout_s=45)
-                    LOG.info(
-                        "Remove job %s processed: status=%s detail=%s",
-                        job.get("job_id"),
-                        result.get("status"),
-                        result.get("detail"),
-                    )
-                except Exception:
-                    LOG.warning("Remove job processing failed for %s", job.get("job_id"), exc_info=True)
+        await remove_handler.remove_runner_job(self._ctx, context)
 
     async def _schedule_runner_job(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         async with self.schedule_runner_lock:
@@ -2443,7 +2275,9 @@ class BotApp:
                     inventory_source_health_json=self._schedule_source_snapshot("inventory"),
                 )
 
-    async def _schedule_refresh_track(self, track: dict[str, Any], *, allow_notify: bool = False) -> tuple[dict[str, Any], dict[str, Any]]:
+    async def _schedule_refresh_track(
+        self, track: dict[str, Any], *, allow_notify: bool = False
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         track_id = str(track.get("track_id") or "")
         try:
             probe = await asyncio.to_thread(self._schedule_probe_track, track)
@@ -2476,7 +2310,9 @@ class BotApp:
         cleared, stale, qbt_codes = self._schedule_reconcile_pending(track, probe)
         if cleared:
             pending -= cleared
-            LOG.info("Schedule cleared %d pending episodes now present locally: %s", len(cleared), ", ".join(sorted(cleared)))
+            LOG.info(
+                "Schedule cleared %d pending episodes now present locally: %s", len(cleared), ", ".join(sorted(cleared))
+            )
         if stale:
             pending -= stale
             retry_codes = dict(auto_state.get("retry_codes") or {})
@@ -2529,7 +2365,13 @@ class BotApp:
         updated = await asyncio.to_thread(self.store.get_schedule_track_any, track_id)
         if updated is None:
             raise RuntimeError(f"Schedule track {track_id} disappeared after refresh update")
-        if allow_notify and not auto_acquired and probe.get("signature") and probe.get("signature") != updated.get("skipped_signature") and probe.get("signature") != updated.get("last_missing_signature"):
+        if (
+            allow_notify
+            and not auto_acquired
+            and probe.get("signature")
+            and probe.get("signature") != updated.get("skipped_signature")
+            and probe.get("signature") != updated.get("last_missing_signature")
+        ):
             await self._schedule_notify_missing(updated, probe)
         return updated, probe
 
@@ -2542,7 +2384,12 @@ class BotApp:
             return
         text = self._schedule_missing_text(track, probe)
         try:
-            sent = await self.app.bot.send_message(chat_id=chat_id, text=text, reply_markup=self._schedule_missing_keyboard(str(track.get("track_id") or "")), parse_mode=_PM)
+            sent = await self.app.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=self._schedule_missing_keyboard(str(track.get("track_id") or "")),
+                parse_mode=_PM,
+            )
             user_id = int(track.get("user_id") or chat_id)
             self._track_ephemeral_message(user_id, sent)
         except TelegramError as e:
@@ -2561,19 +2408,16 @@ class BotApp:
     def _schedule_row_matches_episode(self, name: str, season: int, episode: int) -> bool:
         return episode_code(season, episode) in extract_episode_codes(name)
 
-    def _schedule_episode_rank_key(self, row: dict[str, Any], show_name: str, season: int, episode: int) -> tuple[int, ...]:
+    def _schedule_episode_rank_key(
+        self, row: dict[str, Any], show_name: str, season: int, episode: int
+    ) -> tuple[int, ...]:
         name = str(row.get("fileName") or row.get("name") or "")
-        low = name.lower()
-        exact_episode = 1 if self._schedule_row_matches_episode(name, season, episode) else 0
-        exact_show = 1 if normalize_title(show_name) in normalize_title(name) else 0
-        quality = quality_tier(name)
-        hevc = 1 if any(token in low for token in ("x265", "h265", "hevc")) else 0
-        web = 1 if any(token in low for token in ("web-dl", "webdl", "webrip", "amzn", "nf", "dsnp", "hmax")) else 0
-        proper = 1 if any(token in low for token in ("proper", "repack")) else 0
         seeds = int(row.get("nbSeeders") or row.get("seeders") or 0)
         size = int(row.get("fileSize") or row.get("size") or 0)
-        size_ok = 1 if size >= 200 * 1024 * 1024 else 0
-        return (exact_episode, exact_show, quality, hevc, web, proper, seeds, size_ok)
+        exact_episode = 1 if self._schedule_row_matches_episode(name, season, episode) else 0
+        exact_show = 1 if normalize_title(show_name) in normalize_title(name) else 0
+        ts = score_torrent(name, size, seeds, media_type="episode")
+        return (exact_episode, exact_show, ts.resolution_tier, ts.format_score)
 
     async def _schedule_download_episode(self, track: dict[str, Any], code: str) -> dict[str, Any]:
         m = re.fullmatch(r"S(\d{2})E(\d{2})", code)
@@ -2584,18 +2428,60 @@ class BotApp:
         show = track.get("show_json") or {}
         query = f"{show.get('name')} {code}"
         defaults = self.store.get_defaults(int(track.get("user_id") or 0), self.cfg)
-        raw_rows = await asyncio.to_thread(self.qbt.search, query, plugin="enabled", search_cat="tv", timeout_s=self.cfg.search_timeout_s, poll_interval_s=self.cfg.poll_interval_s, early_exit_min_results=max(self.cfg.search_early_exit_min_results, 12), early_exit_idle_s=self.cfg.search_early_exit_idle_s, early_exit_max_wait_s=self.cfg.search_early_exit_max_wait_s)
-        filtered = self._apply_filters(raw_rows, min_seeds=int(defaults.get("default_min_seeds") or 0), min_size=None, max_size=None, min_quality=self.cfg.default_min_quality)
-        raw_exact = [row for row in raw_rows if self._schedule_row_matches_episode(str(row.get("fileName") or row.get("name") or ""), season, episode)]
-        exact = [row for row in filtered if self._schedule_row_matches_episode(str(row.get("fileName") or row.get("name") or ""), season, episode)]
+        raw_rows = await asyncio.to_thread(
+            self.qbt.search,
+            query,
+            plugin="enabled",
+            search_cat="tv",
+            timeout_s=self.cfg.search_timeout_s,
+            poll_interval_s=self.cfg.poll_interval_s,
+            early_exit_min_results=max(self.cfg.search_early_exit_min_results, 12),
+            early_exit_idle_s=self.cfg.search_early_exit_idle_s,
+            early_exit_max_wait_s=self.cfg.search_early_exit_max_wait_s,
+        )
+        filtered = self._apply_filters(
+            raw_rows,
+            min_seeds=int(defaults.get("default_min_seeds") or 0),
+            min_size=None,
+            max_size=None,
+            min_quality=self.cfg.default_min_quality,
+        )
+        filtered = self._deduplicate_results(filtered)
+        raw_exact = [
+            row
+            for row in raw_rows
+            if self._schedule_row_matches_episode(str(row.get("fileName") or row.get("name") or ""), season, episode)
+        ]
+        exact = [
+            row
+            for row in filtered
+            if self._schedule_row_matches_episode(str(row.get("fileName") or row.get("name") or ""), season, episode)
+        ]
         if not exact:
             if raw_exact:
                 raise RuntimeError(
                     f"Exact episode {code} was found, but every exact match failed the current TV filters"
                 )
             raise RuntimeError(f"No exact qBittorrent result matched episode {code}")
-        ranked = sorted(exact, key=lambda row: self._schedule_episode_rank_key(row, str(show.get("name") or ""), season, episode), reverse=True)
-        search_id = self.store.save_search(int(track.get("user_id") or 0), query, {"query": query, "plugin": "enabled", "search_cat": "tv", "media_hint": "tv", "sort": "schedule-rank", "order": "desc", "limit": 10}, ranked[:10])
+        ranked = sorted(
+            exact,
+            key=lambda row: self._schedule_episode_rank_key(row, str(show.get("name") or ""), season, episode),
+            reverse=True,
+        )
+        search_id = self.store.save_search(
+            int(track.get("user_id") or 0),
+            query,
+            {
+                "query": query,
+                "plugin": "enabled",
+                "search_cat": "tv",
+                "media_hint": "tv",
+                "sort": "schedule-rank",
+                "order": "desc",
+                "limit": 10,
+            },
+            ranked[:10],
+        )
         return await self._do_add(int(track.get("user_id") or 0), search_id, 1, "tv")
 
     async def _schedule_download_requested(self, msg: Any, track: dict[str, Any], codes: list[str]) -> None:
@@ -2607,12 +2493,21 @@ class BotApp:
         can_edit = callable(edit_text) and asyncio.iscoroutinefunction(edit_text)
         if not wanted:
             if can_edit:
-                await msg.edit_text("Those episodes are no longer pending for this schedule.", reply_markup=self._home_only_keyboard(), parse_mode=_PM)
+                await msg.edit_text(
+                    "Those episodes are no longer pending for this schedule.",
+                    reply_markup=self._home_only_keyboard(),
+                    parse_mode=_PM,
+                )
             else:
                 await msg.reply_text("Those episodes are no longer pending for this schedule.", parse_mode=_PM)
             return
         updated_pending = sorted(pending | set(wanted))
-        await asyncio.to_thread(self.store.update_schedule_track, str(track.get("track_id") or ""), pending_json=updated_pending, skipped_signature=None)
+        await asyncio.to_thread(
+            self.store.update_schedule_track,
+            str(track.get("track_id") or ""),
+            pending_json=updated_pending,
+            skipped_signature=None,
+        )
         show = track.get("show_json") or {}
         show_name = show.get("name") or "Show"
         ep_word = "episode" if len(wanted) == 1 else "episodes"
@@ -2641,12 +2536,16 @@ class BotApp:
                     )
                     self._start_progress_tracker(int(track.get("user_id") or 0), out["hash"], tracker_msg, out["name"])
                 else:
-                    self._start_pending_progress_tracker(int(track.get("user_id") or 0), out["name"], out["category"], msg)
+                    self._start_pending_progress_tracker(
+                        int(track.get("user_id") or 0), out["name"], out["category"], msg
+                    )
             except Exception as e:
                 failures.append((code, str(e)))
         if failures:
             remaining_pending = sorted(set(updated_pending) - {code for code, _detail in failures})
-            await asyncio.to_thread(self.store.update_schedule_track, str(track.get("track_id") or ""), pending_json=remaining_pending)
+            await asyncio.to_thread(
+                self.store.update_schedule_track, str(track.get("track_id") or ""), pending_json=remaining_pending
+            )
         result_lines = [
             "<b>⬇️ Queue Results</b>",
             f"<b>{_h(show_name)}</b>",
@@ -2656,21 +2555,43 @@ class BotApp:
         for code, detail in failures:
             result_lines.append(f"❌ <code>{_h(code)}</code>: <i>{_h(detail)}</i>")
         result_lines.extend(["", "<i>Background monitoring is now active for queued episodes.</i>"])
-        await status_msg.edit_text("\n".join(result_lines), reply_markup=self._command_center_keyboard(), parse_mode=_PM)
-        refreshed = await asyncio.to_thread(self.store.get_schedule_track, int(track.get("user_id") or 0), str(track.get("track_id") or ""))
+        await status_msg.edit_text(
+            "\n".join(result_lines), reply_markup=self._command_center_keyboard(), parse_mode=_PM
+        )
+        refreshed = await asyncio.to_thread(
+            self.store.get_schedule_track, int(track.get("user_id") or 0), str(track.get("track_id") or "")
+        )
         if refreshed:
             await self._schedule_refresh_track(refreshed, allow_notify=False)
 
     async def _schedule_pick_candidate(self, msg: Any, user_id: int, idx: int) -> None:
         flow = self._get_flow(user_id)
         if not flow or flow.get("mode") != "schedule":
-            await self._render_schedule_ui(user_id, msg, {"mode": "schedule", "stage": "await_show"}, "<b>⏰ Session Expired</b>\nThat schedule setup has expired.\n<i>Start /schedule again.</i>", reply_markup=None)
+            await self._render_schedule_ui(
+                user_id,
+                msg,
+                {"mode": "schedule", "stage": "await_show"},
+                "<b>⏰ Session Expired</b>\nThat schedule setup has expired.\n<i>Start /schedule again.</i>",
+                reply_markup=None,
+            )
             return
         candidates = list(flow.get("candidates") or [])
         if idx < 0 or idx >= len(candidates):
-            await self._render_schedule_ui(user_id, msg, flow, "<b>⚠️ Show Not Found</b>\nThat show choice is no longer available.\n<i>Search again with /schedule.</i>", reply_markup=None)
+            await self._render_schedule_ui(
+                user_id,
+                msg,
+                flow,
+                "<b>⚠️ Show Not Found</b>\nThat show choice is no longer available.\n<i>Search again with /schedule.</i>",
+                reply_markup=None,
+            )
             return
-        await self._render_schedule_ui(user_id, msg, flow, "<b>🔎 Looking Up Show</b>\n<i>Researching the show and comparing Plex/library episodes…</i>", reply_markup=None)
+        await self._render_schedule_ui(
+            user_id,
+            msg,
+            flow,
+            "<b>🔎 Looking Up Show</b>\n<i>Researching the show and comparing Plex/library episodes…</i>",
+            reply_markup=None,
+        )
         candidate = candidates[idx]
         try:
             bundle = await asyncio.to_thread(
@@ -2685,7 +2606,9 @@ class BotApp:
                 raw_probe,
             )
         except Exception as e:
-            await self._render_schedule_ui(user_id, msg, flow, f"<b>⚠️ Lookup Failed</b>\n<i>{_h(str(e))}</i>", reply_markup=None)
+            await self._render_schedule_ui(
+                user_id, msg, flow, f"<b>⚠️ Lookup Failed</b>\n<i>{_h(str(e))}</i>", reply_markup=None
+            )
             return
         flow["stage"] = "confirm"
         flow["selected_show"] = self._schedule_show_info(bundle)
@@ -2701,10 +2624,18 @@ class BotApp:
             reply_markup=self._schedule_preview_keyboard(probe),
         )
 
-    async def _schedule_confirm_selection(self, msg: Any, user_id: int, chat_id: int, post_action: str | None = None) -> None:
+    async def _schedule_confirm_selection(
+        self, msg: Any, user_id: int, chat_id: int, post_action: str | None = None
+    ) -> None:
         flow = self._get_flow(user_id)
         if not flow or flow.get("mode") != "schedule" or flow.get("stage") != "confirm":
-            await self._render_schedule_ui(user_id, msg, {"mode": "schedule", "stage": "await_show"}, "<b>⏰ Session Expired</b>\nThat schedule setup is no longer active.\n<i>Start /schedule again.</i>", reply_markup=None)
+            await self._render_schedule_ui(
+                user_id,
+                msg,
+                {"mode": "schedule", "stage": "await_show"},
+                "<b>⏰ Session Expired</b>\nThat schedule setup is no longer active.\n<i>Start /schedule again.</i>",
+                reply_markup=None,
+            )
             return
         probe = dict(flow.get("probe") or {})
         show = dict(flow.get("selected_show") or {})
@@ -2745,14 +2676,18 @@ class BotApp:
 
         if post_action == "series":
             # Download all actionable missing across every season of this show
-            codes = list(effective_probe.get("series_actionable_all") or effective_probe.get("actionable_missing_codes") or [])
+            codes = list(
+                effective_probe.get("series_actionable_all") or effective_probe.get("actionable_missing_codes") or []
+            )
             await self._render_schedule_ui(user_id, msg, flow, final_text, reply_markup=None)
             self._clear_flow(user_id)
             await self._schedule_download_requested(msg, track, codes)
             return
 
         if post_action == "pick":
-            current_missing = list(effective_probe.get("actionable_missing_codes") or effective_probe.get("missing_codes") or [])
+            current_missing = list(
+                effective_probe.get("actionable_missing_codes") or effective_probe.get("missing_codes") or []
+            )
             all_missing = self._schedule_picker_all_missing(effective_probe, season, current_missing)
             if not any(all_missing.values()):
                 await self._render_schedule_ui(user_id, msg, flow, final_text, reply_markup=None)
@@ -2766,7 +2701,9 @@ class BotApp:
             flow["picker_track_id"] = track_id
             self._set_flow(user_id, flow)
             await self._render_schedule_ui(
-                user_id, msg, flow,
+                user_id,
+                msg,
+                flow,
                 self._schedule_picker_text(flow),
                 reply_markup=self._schedule_picker_keyboard(flow),
             )
@@ -2789,18 +2726,8 @@ class BotApp:
     # ---------- Parsing helpers ----------
 
     def _build_search_parser(self) -> argparse.ArgumentParser:
-        p = argparse.ArgumentParser(prog="/search", add_help=False)
-        p.add_argument("--plugin", default="enabled")
-        p.add_argument("--search-cat", default="all")
-        p.add_argument("--min-seeds", type=int)
-        p.add_argument("--min-size")
-        p.add_argument("--max-size")
-        p.add_argument("--min-quality", type=int, choices=[0, 480, 720, 1080, 2160])
-        p.add_argument("--sort", choices=["seeds", "size", "name", "leechers"])
-        p.add_argument("--order", choices=["asc", "desc"])
-        p.add_argument("--limit", type=int)
-        p.add_argument("query", nargs="+")
-        return p
+        """Delegation stub -- logic lives in handlers/search.py."""
+        return search_handler.build_search_parser()
 
     def _apply_filters(
         self,
@@ -2811,321 +2738,62 @@ class BotApp:
         max_size: int | None,
         min_quality: int,
     ) -> list[dict[str, Any]]:
-        out: list[dict[str, Any]] = []
-        for r in rows:
-            seeds = int(r.get("nbSeeders") or r.get("seeders") or 0)
-            size = int(r.get("fileSize") or r.get("size") or 0)
-            name = str(r.get("fileName") or r.get("name") or "")
-            if seeds < min_seeds:
-                continue
-            if min_size is not None and size < min_size:
-                continue
-            if max_size is not None and size > max_size:
-                continue
-            if min_quality > 0 and quality_tier(name) < min_quality:
-                continue
+        """Delegation stub -- logic lives in handlers/search.py."""
+        return search_handler.apply_filters(
+            rows, min_seeds=min_seeds, min_size=min_size, max_size=max_size, min_quality=min_quality
+        )
 
-            # Keep only results that have a usable direct torrent source.
-            rh = str(r.get("fileHash") or r.get("hash") or "").strip().lower()
-            has_hash = bool(re.fullmatch(r"[a-f0-9]{40}", rh))
-            if not has_hash:
-                candidates = [
-                    str(r.get("fileUrl") or r.get("file_url") or "").strip(),
-                    str(r.get("url") or "").strip(),
-                    str(r.get("descrLink") or r.get("descr_link") or "").strip(),
-                ]
-                if not any(self._is_direct_torrent_link(c) for c in candidates if c):
-                    continue
-
-            out.append(r)
-        return out
+    @staticmethod
+    def _deduplicate_results(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Delegation stub -- logic lives in handlers/search.py."""
+        return search_handler.deduplicate_results(rows)
 
     @staticmethod
     def _sort_rows(rows: list[dict[str, Any]], key: str, order: str) -> list[dict[str, Any]]:
-        reverse = order == "desc"
-        if key == "seeds":
-            return sorted(rows, key=lambda x: int(x.get("nbSeeders") or x.get("seeders") or 0), reverse=reverse)
-        if key == "size":
-            return sorted(rows, key=lambda x: int(x.get("fileSize") or x.get("size") or 0), reverse=reverse)
-        if key == "leechers":
-            return sorted(rows, key=lambda x: int(x.get("nbLeechers") or x.get("leechers") or 0), reverse=reverse)
-        return sorted(rows, key=lambda x: str(x.get("fileName") or x.get("name") or "").lower(), reverse=reverse)
+        """Delegation stub -- logic lives in handlers/search.py."""
+        return search_handler.sort_rows(rows, key, order)
 
     def _parse_tv_filter(self, text: str) -> tuple[int | None, int | None] | None:
-        t = text.strip().lower()
-
-        m = re.search(r"\bs(?:eason\s*)?(\d{1,2})\s*[\-\s_]?e(?:pisode\s*)?(\d{1,2})\b", t)
-        if m:
-            return int(m.group(1)), int(m.group(2))
-
-        m = re.search(r"\bseason\s*(\d{1,2})\b", t)
-        season = int(m.group(1)) if m else None
-        m = re.search(r"\bepisode\s*(\d{1,2})\b", t)
-        episode = int(m.group(1)) if m else None
-        if season is not None or episode is not None:
-            return season, episode
-
-        m = re.search(r"\bs(\d{1,2})\b", t)
-        season = int(m.group(1)) if m else None
-        m = re.search(r"\be(\d{1,2})\b", t)
-        episode = int(m.group(1)) if m else None
-        if season is not None or episode is not None:
-            return season, episode
-
-        return None
+        """Delegation stub -- logic lives in handlers/search.py."""
+        return search_handler.parse_tv_filter(text)
 
     @staticmethod
     def _build_tv_query(title: str, season: int | None, episode: int | None) -> str:
-        title = title.strip()
-        if season is not None and episode is not None:
-            return f"{title} S{season:02d}E{episode:02d}"
-        if season is not None:
-            return f"{title} S{season:02d}"
-        if episode is not None:
-            return f"{title} E{episode:02d}"
-        return title
+        """Delegation stub -- logic lives in handlers/search.py."""
+        return search_handler.build_tv_query(title, season, episode)
 
     def _strip_patchy_name(self, text: str) -> str:
-        name = re.escape(self.cfg.patchy_chat_name or "Patchy")
-        cleaned = re.sub(rf"^\s*(?:hey|hi|hello|yo)\s+@?{name}\s*[:,!\-]?\s*", "", text, flags=re.I)
-        cleaned = re.sub(rf"^\s*@?{name}\s*[:,!\-]?\s*", "", cleaned, flags=re.I)
-        return cleaned.strip()
+        """Delegation stub -- logic lives in handlers/search.py."""
+        return search_handler.strip_patchy_name(text, self.cfg.patchy_chat_name)
 
     def _extract_search_intent(self, text: str) -> tuple[str | None, str]:
-        t = self._strip_patchy_name(text) or text.strip()
-        low = t.lower().strip()
-
-        # Strong intent: explicit search verbs.
-        patterns = [
-            r"^(?:please\s+)?(?:search|find|look\s+for|get|download|grab)\s+(?:for\s+)?(?P<q>.+)$",
-            r"^(?:can you|could you|would you|pls|please)\s+(?:search|find|look\s+for)\s+(?:for\s+)?(?P<q>.+)$",
-        ]
-
-        query: str | None = None
-        for p in patterns:
-            m = re.match(p, t, flags=re.I)
-            if m:
-                query = (m.group("q") or "").strip()
-                break
-
-        # Also allow plain prefixed media queries.
-        media_hint = "any"
-        if query is None:
-            if low.startswith("movie ") or low.startswith("movies "):
-                query = re.sub(r"^movies?\s+", "", t, flags=re.I).strip()
-                media_hint = "movies"
-            elif low.startswith("tv ") or low.startswith("show ") or low.startswith("series "):
-                query = re.sub(r"^(tv|show|series)\s+", "", t, flags=re.I).strip()
-                media_hint = "tv"
-
-        if not query:
-            return None, "any"
-
-        query = query.rstrip(" ?!.\t\n\r")
-        if len(query) < 2:
-            return None, "any"
-
-        qlow = query.lower()
-        if qlow.startswith("movie ") or qlow.startswith("movies "):
-            query = re.sub(r"^movies?\s+", "", query, flags=re.I).strip()
-            media_hint = "movies"
-        elif qlow.startswith("tv ") or qlow.startswith("show ") or qlow.startswith("series "):
-            query = re.sub(r"^(tv|show|series)\s+", "", query, flags=re.I).strip()
-            media_hint = "tv"
-
-        return query, media_hint
+        """Delegation stub -- logic lives in handlers/search.py."""
+        return search_handler.extract_search_intent(text, self.cfg.patchy_chat_name)
 
     @staticmethod
     def _chat_needs_qbt_snapshot(text: str) -> bool:
-        low = text.lower()
-        keywords = {
-            "qbit",
-            "qbittorrent",
-            "torrent",
-            "download",
-            "seeding",
-            "seed",
-            "active",
-            "speed",
-            "eta",
-            "storage",
-            "category",
-            "categories",
-            "vpn",
-        }
-        return any(k in low for k in keywords)
+        """Delegation stub — logic lives in handlers/chat.py."""
+        return chat_handler.chat_needs_qbt_snapshot(text)
 
     def _build_qbt_snapshot(self) -> str:
-        lines: list[str] = []
-        try:
-            active = self.qbt.list_active(limit=6)
-        except Exception as e:
-            active = []
-            lines.append(f"active_error={e}")
-
-        if not active:
-            lines.append("active: none")
-        else:
-            lines.append("active:")
-            for t in active[:6]:
-                name = str(t.get("name") or "?")
-                progress = float(t.get("progress", 0.0) or 0.0) * 100.0
-                dls = int(t.get("dlspeed", 0) or 0)
-                state = str(t.get("state") or "unknown")
-                lines.append(f"- {name} | {progress:.1f}% | {state} | down={human_size(dls)}/s")
-
-        try:
-            transport_ok, transport_reason = self._qbt_transport_status()
-            lines.append(f"qbt transport: {'ready' if transport_ok else 'blocked'} ({transport_reason})")
-        except Exception as e:
-            lines.append(f"qbt transport: error ({e})")
-
-        try:
-            ok, reason = self._storage_status()
-            lines.append(f"storage: {'ready' if ok else 'not-ready'} ({reason})")
-        except Exception as e:
-            lines.append(f"storage: error ({e})")
-
-        try:
-            vpn_ok, vpn_reason = self._vpn_ready_for_download()
-            lines.append(f"vpn: {'ready' if vpn_ok else 'blocked'} ({vpn_reason})")
-        except Exception as e:
-            lines.append(f"vpn: error ({e})")
-
-        return "\n".join(lines)
+        """Delegation stub — logic lives in handlers/chat.py."""
+        return chat_handler.build_qbt_snapshot(self._ctx)
 
     def _patchy_system_prompt(self) -> str:
-        return (
-            f"You are {self.cfg.patchy_chat_name}, a friendly assistant for a home Plex/qBittorrent server. "
-            "READ-ONLY MODE is mandatory: never claim to execute state-changing actions, "
-            "never add/remove/pause/resume torrents, never edit files/services. "
-            "You may analyze, explain, and recommend next steps only. "
-            "If the user asks for a state change, clearly say it requires an explicit bot command/button. "
-            "When a 'Read-only qBittorrent snapshot' message is provided, treat it as current source-of-truth data "
-            "and answer from it directly (do not claim you lack access). "
-            "Keep responses concise, practical, and human."
-        )
+        """Delegation stub — logic lives in handlers/chat.py."""
+        return chat_handler.patchy_system_prompt(self._ctx)
 
     async def _reply_patchy_chat(self, msg: Any, user_id: int, text: str) -> None:
-        # TEMPORARY: chat disabled until API key is reconfigured
-        await msg.reply_text("<i>Chat temporarily disabled.</i>", parse_mode=_PM)
-        return
+        """Delegation stub — logic lives in handlers/chat.py."""
+        await chat_handler.reply_patchy_chat(self._ctx, msg, user_id, text)
 
-        if not self.cfg.patchy_chat_enabled:  # noqa: unreachable
-            await msg.reply_text("Chat mode is currently disabled.", parse_mode=_PM)
-            return
-
-        if not self.patchy_llm.ready():
-            await msg.reply_text(
-                "Patchy chat is not configured yet. Set PATCHY_LLM_BASE_URL + PATCHY_LLM_API_KEY (or keep OpenClaw provider auto-discovery enabled).",
-                parse_mode=_PM,
-            )
-            return
-
-        user_text = (self._strip_patchy_name(text) or text.strip())[:2000]
-
-        snapshot_prefix = ""
-        if self._chat_needs_qbt_snapshot(user_text):
-            snapshot = await asyncio.to_thread(self._build_qbt_snapshot)
-            if snapshot:
-                snapshot_prefix = "Read-only qBittorrent snapshot:\n" + snapshot + "\n\n"
-
-        messages: list[dict[str, str]] = [{"role": "system", "content": self._patchy_system_prompt()}]
-        hist = self.chat_history.get(user_id, [])
-        # Move to end on read to mark as recently used
-        if user_id in self.chat_history:
-            self.chat_history.move_to_end(user_id)
-        if hist:
-            messages.extend(hist[-(self.cfg.patchy_chat_history_turns * 2) :])
-
-        user_content = snapshot_prefix + "User request:\n" + user_text
-        messages.append({"role": "user", "content": user_content})
-
-        try:
-            reply, _used_model = await asyncio.to_thread(
-                self.patchy_llm.chat,
-                messages=messages,
-                model=self.cfg.patchy_chat_model,
-                fallback_model=self.cfg.patchy_chat_fallback_model,
-                max_tokens=self.cfg.patchy_chat_max_tokens,
-                temperature=self.cfg.patchy_chat_temperature,
-            )
-        except Exception as e:
-            LOG.warning("Patchy chat failed", exc_info=True)
-            await msg.reply_text(f"Patchy is online, but the model request failed right now: {_h(str(e))}", parse_mode=_PM)
-            return
-
-        hist = self.chat_history.setdefault(user_id, [])
-        hist.append({"role": "user", "content": user_text})
-        hist.append({"role": "assistant", "content": reply})
-        keep = self.cfg.patchy_chat_history_turns * 2
-        if len(hist) > keep:
-            del hist[:-keep]
-        self.chat_history.move_to_end(user_id)
-        # Evict oldest entry if over the user limit
-        while len(self.chat_history) > self._chat_history_max_users:
-            self.chat_history.popitem(last=False)
-
-        await msg.reply_text(_h(reply), parse_mode=_PM)
-
-    def _render_page(self, search_meta: dict[str, Any], rows: list[dict[str, Any]], page: int) -> tuple[str, InlineKeyboardMarkup | None]:
-        total = len(rows)
-        ps = self.cfg.page_size
-        pages = max(1, math.ceil(total / ps))
-        page = max(1, min(page, pages))
-        start = (page - 1) * ps
-        view = rows[start : start + ps]
-
-        opts = search_meta["options"]
-        min_q = int(opts.get("min_quality") or 0)
-        qtxt = f"{min_q}p+" if min_q else "any"
-        media_hint = str(opts.get("media_hint") or "any")
-        sid = search_meta['search_id']
-        query = search_meta['query']
-        lines = [
-            f"<b>🔎 Search:</b> <code>{_h(query)}</code>",
-            f"Results: <b>{total}</b> • Page: <b>{page}/{pages}</b>",
-            f"Sort: {opts.get('sort', 'seeds')} {opts.get('order', 'desc')} • Quality: <code>{qtxt}</code> • Type: <code>{media_hint}</code>",
-        ]
-        lines.append("")
-
-        for row in view:
-            idx = row["idx"]
-            name = str(row["name"])
-            seeds = int(row.get("seeds") or 0)
-            leech = int(row.get("leechers") or 0)
-            size = human_size(int(row.get("size") or 0))
-            site = str((row.get("site") or "?").replace("https://", "").replace("http://", ""))
-            # Jackett wraps real tracker name in brackets at end of torrent name
-            bracket_match = re.search(r'\[([^\[\]]+)\]\s*$', name)
-            if bracket_match:
-                site = bracket_match.group(1)
-                name = name[:bracket_match.start()].rstrip()
-            qv = quality_tier(name)
-            qlbl = f"{qv}p" if qv else "?"
-            lines.append(f"<b>{idx}.</b> <code>{_h(name)}</code>")
-            lines.append(f"   🌱 <b>{seeds}</b> | 🧲 {leech} | 📦 <code>{size}</code> | 🎞 <code>{qlbl}</code> | 🌐 <i>{_h(site)}</i>")
-            lines.append("")
-
-        lines.append("<i>Tap Add on a result, then choose Movies or TV.</i>")
-        text = "\n".join(lines)
-
-        kb_rows: list[list[InlineKeyboardButton]] = []
-        for row in view:
-            idx = row["idx"]
-            seeds = int(row.get("seeds") or 0)
-            kb_rows.append([InlineKeyboardButton(text=f"⬇️ Add #{idx} ({seeds} seeds)", callback_data=f"a:{search_meta['search_id']}:{idx}")])
-
-        nav: list[InlineKeyboardButton] = []
-        if page > 1:
-            nav.append(InlineKeyboardButton("◀️ Prev", callback_data=f"p:{search_meta['search_id']}:{page-1}"))
-        if page < pages:
-            nav.append(InlineKeyboardButton("Next ▶️", callback_data=f"p:{search_meta['search_id']}:{page+1}"))
-        if nav:
-            kb_rows.append(nav)
-        kb_rows.extend(self._nav_footer())
-
-        return text, InlineKeyboardMarkup(kb_rows) if kb_rows else None
+    def _render_page(
+        self, search_meta: dict[str, Any], rows: list[dict[str, Any]], page: int
+    ) -> tuple[str, InlineKeyboardMarkup | None]:
+        """Delegation stub -- logic lives in handlers/search.py."""
+        return search_handler.render_page(
+            search_meta, rows, page, page_size=self.cfg.page_size, nav_footer_fn=self._nav_footer
+        )
 
     # ---------- Core actions ----------
 
@@ -3209,6 +2877,7 @@ class BotApp:
                 max_size=max_size,
                 min_quality=min_quality,
             )
+            filtered = self._deduplicate_results(filtered)
             ranked = self._sort_rows(filtered, key=sort_key, order=order)
             final_rows = ranked[:limit]
 
@@ -3254,343 +2923,90 @@ class BotApp:
                 kwargs["reply_markup"] = InlineKeyboardMarkup(self._nav_footer())
             await status_msg.edit_text(f"Search failed: {_h(str(e))}", **kwargs)
 
+    # ---------- Remove system (delegated to handlers.remove) ----------
+
     def _remove_roots(self) -> list[dict[str, str]]:
-        roots: list[dict[str, str]] = []
-        seen: set[str] = set()
-        for key, label, path in [
-            ("movies", "Movies", self.cfg.movies_path),
-            ("tv", "TV", self.cfg.tv_path),
-            ("spam", "Spam", self.cfg.spam_path),
-        ]:
-            root_path = str(path or "").strip()
-            if not root_path or not os.path.isdir(root_path):
-                continue
-            real = os.path.realpath(root_path)
-            if real in seen:
-                continue
-            seen.add(real)
-            roots.append({"key": key, "label": label, "path": real})
-        return roots
+        return remove_handler.remove_roots(self._ctx)
 
     @staticmethod
     def _path_size_bytes(path: str) -> int:
-        try:
-            if os.path.isfile(path):
-                return max(0, os.path.getsize(path))
-            total = 0
-            for dirpath, dirnames, filenames in os.walk(path, topdown=True, followlinks=False):
-                dirnames[:] = [d for d in dirnames if not os.path.islink(os.path.join(dirpath, d))]
-                for filename in filenames:
-                    full = os.path.join(dirpath, filename)
-                    if os.path.islink(full):
-                        continue
-                    try:
-                        total += max(0, os.path.getsize(full))
-                    except OSError:
-                        continue
-            return total
-        except OSError:
-            return 0
+        return remove_handler.path_size_bytes(path)
 
     @staticmethod
     def _remove_match_score(query_norm: str, candidate_norm: str) -> int:
-        if not query_norm or not candidate_norm:
-            return 0
-        if query_norm == candidate_norm:
-            return 100
-        if query_norm in candidate_norm:
-            return 70
-        if candidate_norm in query_norm:
-            return 55
-        q_tokens = set(query_norm.split())
-        c_tokens = set(candidate_norm.split())
-        overlap = len(q_tokens & c_tokens)
-        if overlap <= 0:
-            return 0
-        return overlap * 10
+        return remove_handler.remove_match_score(query_norm, candidate_norm)
 
     def _find_remove_candidates(self, query: str, limit: int = 8) -> list[dict[str, Any]]:
-        query_norm = normalize_title(query)
-        candidates: list[tuple[int, dict[str, Any]]] = []
-        for root in self._remove_roots():
-            root_path = root["path"]
-            try:
-                entries = list(os.scandir(root_path))
-            except OSError:
-                continue
-            for entry in entries:
-                try:
-                    if entry.is_symlink():
-                        continue
-                    entry_path = os.path.realpath(entry.path)
-                    if os.path.dirname(entry_path) != root_path:
-                        continue
-                    is_dir = entry.is_dir(follow_symlinks=False)
-                    if not is_dir and root["key"] in {"movies", "tv"} and not is_remove_media_file(entry.name):
-                        continue
-                    score = self._remove_match_score(query_norm, normalize_title(entry.name))
-                    if score <= 0:
-                        continue
-                    size_bytes = self._path_size_bytes(entry_path)
-                    if root["key"] == "tv":
-                        remove_kind = "show" if is_dir else "episode"
-                    elif root["key"] == "movies":
-                        remove_kind = "movie"
-                    else:
-                        remove_kind = "item"
-                    candidates.append(
-                        (
-                            score,
-                            {
-                                "name": entry.name,
-                                "path": entry_path,
-                                "root_key": root["key"],
-                                "root_label": root["label"],
-                                "root_path": root_path,
-                                "is_dir": is_dir,
-                                "size_bytes": size_bytes,
-                                "remove_kind": remove_kind,
-                            },
-                        )
-                    )
-                except OSError:
-                    continue
-        deduped: list[dict[str, Any]] = []
-        seen_paths: set[str] = set()
-        for _score, candidate in sorted(candidates, key=lambda item: (item[0], item[1]["size_bytes"], item[1]["name"].lower()), reverse=True):
-            if candidate["path"] in seen_paths:
-                continue
-            seen_paths.add(candidate["path"])
-            deduped.append(candidate)
-            if len(deduped) >= max(1, limit):
-                break
-        return deduped
+        return remove_handler.find_remove_candidates(self._ctx, query, limit)
 
     def _remove_prompt_keyboard(self, selected_count: int = 0) -> InlineKeyboardMarkup:
-        rows: list[list[InlineKeyboardButton]] = [
-            [InlineKeyboardButton("📚 Browse Plex Library", callback_data="rm:browse")],
-        ]
-        if selected_count > 0:
-            rows.append([InlineKeyboardButton(f"🧾 Review Selection ({selected_count})", callback_data="rm:review")])
-            rows.append([InlineKeyboardButton("🧹 Clear Selection", callback_data="rm:clear")])
-        rows.append([InlineKeyboardButton("🏠 Home", callback_data="nav:home")])
-        rows.extend(self._nav_footer(include_home=False))
-        return InlineKeyboardMarkup(self._compact_action_rows(rows))
+        return remove_handler.remove_prompt_keyboard(selected_count)
 
-    def _remove_browse_root_keyboard(self, movie_count: int, show_count: int, selected_count: int = 0) -> InlineKeyboardMarkup:
-        rows: list[list[InlineKeyboardButton]] = [
-            [
-                InlineKeyboardButton(f"🎬 Movies ({movie_count})", callback_data="rm:browsecat:movies"),
-                InlineKeyboardButton(f"📺 Shows ({show_count})", callback_data="rm:browsecat:tv"),
-            ],
-        ]
-        if selected_count > 0:
-            rows.append([InlineKeyboardButton(f"🧾 Review Selection ({selected_count})", callback_data="rm:review")])
-            rows.append([InlineKeyboardButton("🧹 Clear Selection", callback_data="rm:clear")])
-        rows.extend(self._nav_footer(back_data="rm:cancel", include_home=False))
-        return InlineKeyboardMarkup(self._compact_action_rows(rows))
+    def _remove_browse_root_keyboard(
+        self, movie_count: int, show_count: int, selected_count: int = 0
+    ) -> InlineKeyboardMarkup:
+        return remove_handler.remove_browse_root_keyboard(movie_count, show_count, selected_count)
 
     @staticmethod
     def _remove_selected_path(candidate: dict[str, Any]) -> str:
-        return os.path.realpath(str(candidate.get("path") or "").strip())
+        return remove_handler.remove_selected_path(candidate)
 
     def _remove_selection_items(self, flow: dict[str, Any] | None) -> list[dict[str, Any]]:
-        selected: list[dict[str, Any]] = []
-        for raw in list((flow or {}).get("selected_items") or []):
-            candidate = self._remove_enrich_candidate(dict(raw))
-            if self._remove_selected_path(candidate):
-                selected.append(candidate)
-        return selected
+        return remove_handler.remove_selection_items(flow)
 
     def _remove_selected_paths(self, flow: dict[str, Any] | None) -> set[str]:
-        return {self._remove_selected_path(candidate) for candidate in self._remove_selection_items(flow)}
+        return remove_handler.remove_selected_paths(flow)
 
     def _remove_selection_count(self, flow: dict[str, Any] | None) -> int:
-        return len(self._remove_selection_items(flow))
+        return remove_handler.remove_selection_count(flow)
 
     def _remove_toggle_candidate(self, flow: dict[str, Any], candidate: dict[str, Any]) -> bool:
-        candidate = self._remove_enrich_candidate(candidate)
-        target_path = self._remove_selected_path(candidate)
-        if not target_path:
-            return False
-        selected = self._remove_selection_items(flow)
-        updated: list[dict[str, Any]] = []
-        removed_exact = False
-        for existing in selected:
-            existing_path = self._remove_selected_path(existing)
-            if not existing_path:
-                continue
-            if existing_path == target_path:
-                removed_exact = True
-                continue
-            if existing_path.startswith(target_path + os.sep):
-                continue
-            if target_path.startswith(existing_path + os.sep):
-                continue
-            updated.append(existing)
-        if not removed_exact:
-            updated.append(candidate)
-        flow["selected_items"] = sorted(
-            updated,
-            key=lambda item: (str(item.get("root_label") or ""), str(item.get("name") or "").lower(), str(item.get("path") or "")),
-        )
-        return not removed_exact
+        return remove_handler.remove_toggle_candidate(flow, candidate)
 
     def _remove_selection_total_size(self, candidates: list[dict[str, Any]]) -> int:
-        return sum(int(self._remove_enrich_candidate(candidate).get("size_bytes") or 0) for candidate in candidates)
+        return remove_handler.remove_selection_total_size(candidates)
 
     def _remove_effective_candidates(self, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        deduped: list[dict[str, Any]] = []
-        seen_paths: set[str] = set()
-        for raw in candidates:
-            candidate = self._remove_enrich_candidate(dict(raw))
-            path = self._remove_selected_path(candidate)
-            if not path or path in seen_paths:
-                continue
-            seen_paths.add(path)
-            candidate["_resolved_path"] = path
-            deduped.append(candidate)
-        deduped.sort(key=lambda item: (item["_resolved_path"].count(os.sep), item["_resolved_path"]))
-        collapsed: list[dict[str, Any]] = []
-        for candidate in deduped:
-            path = candidate["_resolved_path"]
-            if any(path == kept["_resolved_path"] or path.startswith(kept["_resolved_path"] + os.sep) for kept in collapsed):
-                continue
-            collapsed.append(candidate)
-        for candidate in collapsed:
-            candidate.pop("_resolved_path", None)
-        return collapsed
+        return remove_handler.remove_effective_candidates(candidates)
 
     def _remove_toggle_label(self, candidate: dict[str, Any], selected_paths: set[str]) -> str:
-        prefix = "✅ " if self._remove_selected_path(candidate) in selected_paths else ""
-        name = str(candidate.get("name") or "Item")
-        if str(candidate.get("remove_kind") or "") == "movie":
-            name = BotApp._extract_movie_name(name)
-        return f"{prefix}{name[:56]}"
+        return remove_handler.remove_toggle_label(candidate, selected_paths)
 
-    def _remove_candidate_keyboard(self, candidates: list[dict[str, Any]], selected_paths: set[str] | None = None) -> InlineKeyboardMarkup:
-        chosen = set(selected_paths or set())
-        rows: list[list[InlineKeyboardButton]] = []
-        for idx, candidate in enumerate(candidates[:8]):
-            rows.append([InlineKeyboardButton(self._remove_toggle_label(candidate, chosen), callback_data=f"rm:pick:{idx}")])
-        rows.append([InlineKeyboardButton(f"🧾 Review Selection ({len(chosen)})", callback_data="rm:review")])
-        if chosen:
-            rows.append([InlineKeyboardButton("🧹 Clear Selection", callback_data="rm:clear")])
-        rows.append([InlineKeyboardButton("🏠 Home", callback_data="nav:home")])
-        rows.extend(self._nav_footer(include_home=False))
-        return InlineKeyboardMarkup(rows)
+    def _remove_candidate_keyboard(
+        self, candidates: list[dict[str, Any]], selected_paths: set[str] | None = None
+    ) -> InlineKeyboardMarkup:
+        return remove_handler.remove_candidate_keyboard(candidates, selected_paths)
 
     def _remove_confirm_keyboard(self, selected_count: int) -> InlineKeyboardMarkup:
-        rows: list[list[InlineKeyboardButton]] = [[InlineKeyboardButton(f"✅ Confirm Delete ({selected_count})", callback_data="rm:confirm")]]
-        rows.append([InlineKeyboardButton("🧹 Clear Selection", callback_data="rm:clear")])
-        rows.append([InlineKeyboardButton("🏠 Home", callback_data="nav:home")])
-        rows.extend(self._nav_footer(include_home=False))
-        return InlineKeyboardMarkup(self._compact_action_rows(rows))
+        return remove_handler.remove_confirm_keyboard(selected_count)
 
     @staticmethod
     def _remove_kind_label(kind: str, is_dir: bool) -> str:
-        mapping = {
-            "movie": "movie" if not is_dir else "movie folder",
-            "show": "series",
-            "season": "season",
-            "episode": "episode" if not is_dir else "episode folder",
-            "item": "item" if not is_dir else "folder",
-        }
-        return mapping.get(str(kind or "").strip(), "folder" if is_dir else "file")
+        return remove_handler.remove_kind_label(kind, is_dir)
 
     def _remove_enrich_candidate(self, candidate: dict[str, Any]) -> dict[str, Any]:
-        enriched = dict(candidate)
-        if enriched.get("size_bytes") is None:
-            enriched["size_bytes"] = self._path_size_bytes(str(enriched.get("path") or ""))
-        return enriched
+        return remove_handler.remove_enrich_candidate(candidate)
 
     def _remove_candidate_text(self, candidate: dict[str, Any]) -> str:
-        candidate = self._remove_enrich_candidate(candidate)
-        kind = self._remove_kind_label(str(candidate.get("remove_kind") or ""), bool(candidate.get("is_dir")))
-        size_txt = human_size(int(candidate.get("size_bytes") or 0))
-        name = str(candidate.get("name") or "")
-        if str(candidate.get("remove_kind") or "") == "movie":
-            name = BotApp._extract_movie_name(name) if name else name
-        return f"{_h(name)} ({_h(candidate.get('root_label') or '')} <i>{_h(kind)}</i>, <code>{_h(size_txt)}</code>)"
+        return remove_handler.remove_candidate_text(candidate)
 
-    def _remove_candidates_text(self, query: str, candidates: list[dict[str, Any]], selected_paths: set[str] | None = None) -> str:
-        chosen = set(selected_paths or set())
-        lines = [f"<b>🗑️ Remove: Search Results</b>\nQuery: <code>{_h(query)}</code>", ""]
-        for idx, candidate in enumerate(candidates, start=1):
-            prefix = "✅ " if self._remove_selected_path(candidate) in chosen else ""
-            lines.append(f"{idx}. {prefix}{self._remove_candidate_text(candidate)}")
-        lines.extend(["", f"Selected so far: <b>{len(chosen)}</b> item(s)", "<i>Tap items to toggle them, then use Review Selection when you're ready.</i>"])
-        return "\n".join(lines)
+    def _remove_candidates_text(
+        self, query: str, candidates: list[dict[str, Any]], selected_paths: set[str] | None = None
+    ) -> str:
+        return remove_handler.remove_candidates_text(query, candidates, selected_paths)
 
     def _remove_confirm_text(self, candidates: list[dict[str, Any]]) -> str:
-        effective = self._remove_effective_candidates(candidates)
-        count = len(effective)
-        total_size = human_size(self._remove_selection_total_size(effective))
-        numbered_items = []
-        path_lines = []
-        for idx, candidate in enumerate(effective[:12], start=1):
-            candidate = self._remove_enrich_candidate(candidate)
-            kind = self._remove_kind_label(str(candidate.get("remove_kind") or ""), bool(candidate.get("is_dir")))
-            size_txt = human_size(int(candidate.get("size_bytes") or 0))
-            name = _h(candidate.get("name") or "")
-            root_label = _h(candidate.get("root_label") or "")
-            numbered_items.append(f"{idx}. <b>{name}</b> ({root_label} {_h(kind)}, <code>{_h(size_txt)}</code>)")
-            path_lines.append(_h(str(candidate.get("path") or "")))
-        if count > 12:
-            numbered_items.append(f"…and {count - 12} more item(s).")
-            path_lines.append(f"…and {count - 12} more.")
-        paths_block = "\n".join(path_lines)
-        lines = [
-            "<b>⚠️ Confirm Permanent Delete</b>",
-            "━━━━━━━━━━━━━━━━━━━━",
-            f"Selected <b>{count}</b> item(s) totaling <b>{_h(total_size)}</b>:",
-            "",
-        ]
-        lines.extend(numbered_items)
-        lines.extend([
-            "",
-            f"<blockquote expandable>Full paths:\n{paths_block}</blockquote>",
-            "",
-            "<b>This will fully delete the selected items from disk.</b>",
-        ])
-        return "\n".join(lines)
+        return remove_handler.remove_confirm_text(candidates)
 
     def _remove_show_action_keyboard(self, series_selected: bool, selected_count: int) -> InlineKeyboardMarkup:
-        rows: list[list[InlineKeyboardButton]] = []
-        if not series_selected:
-            rows.append([
-                InlineKeyboardButton("🗑 Select Entire Series", callback_data="rm:series"),
-                InlineKeyboardButton("📂 Browse Seasons", callback_data="rm:seasons"),
-            ])
-        rows.append([InlineKeyboardButton(f"🧾 Review Selection ({selected_count})", callback_data="rm:review")])
-        if selected_count > 0:
-            rows.append([InlineKeyboardButton("🧹 Clear Selection", callback_data="rm:clear")])
-        rows.append([InlineKeyboardButton("🏠 Home", callback_data="nav:home")])
-        rows.extend(self._nav_footer(include_home=False))
-        return InlineKeyboardMarkup(self._compact_action_rows(rows))
+        return remove_handler.remove_show_action_keyboard(series_selected, selected_count)
 
     def _remove_season_action_keyboard(self, selected: bool, selected_count: int) -> InlineKeyboardMarkup:
-        rows: list[list[InlineKeyboardButton]] = [
-            [
-                InlineKeyboardButton("✅ Entire Season Selected" if selected else "🗑 Select Entire Season", callback_data="rm:seasondel"),
-                InlineKeyboardButton("🎞 Browse Episodes", callback_data="rm:episodes"),
-            ],
-            [InlineKeyboardButton(f"🧾 Review Selection ({selected_count})", callback_data="rm:review")],
-        ]
-        if selected_count > 0:
-            rows.append([InlineKeyboardButton("🧹 Clear Selection", callback_data="rm:clear")])
-        rows.append([InlineKeyboardButton("⬅️ Back to Series", callback_data="rm:back:show")])
-        rows.append([InlineKeyboardButton("🏠 Home", callback_data="nav:home")])
-        rows.extend(self._nav_footer(include_home=False))
-        return InlineKeyboardMarkup(self._compact_action_rows(rows))
+        return remove_handler.remove_season_action_keyboard(selected, selected_count)
 
     @staticmethod
     def _remove_page_bounds(items: list[dict[str, Any]], page: int, per_page: int = 8) -> tuple[int, int, int, int]:
-        total_pages = max(1, math.ceil(max(1, len(items)) / per_page))
-        page = max(0, min(int(page), total_pages - 1))
-        start = page * per_page
-        end = min(start + per_page, len(items))
-        return page, total_pages, start, end
+        return remove_handler.remove_page_bounds(items, page, per_page)
 
     def _remove_paginated_keyboard(
         self,
@@ -3602,521 +3018,67 @@ class BotApp:
         back_callback: str | None = None,
         selected_paths: set[str] | None = None,
     ) -> InlineKeyboardMarkup:
-        page, total_pages, start, end = self._remove_page_bounds(items, page)
-        chosen = set(selected_paths or set())
-        rows: list[list[InlineKeyboardButton]] = []
-        for idx in range(start, end):
-            candidate = items[idx]
-            rows.append([InlineKeyboardButton(self._remove_toggle_label(candidate, chosen), callback_data=f"{item_prefix}:{idx}")])
-        nav_row: list[InlineKeyboardButton] = []
-        if page > 0:
-            nav_row.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"{nav_prefix}:{page - 1}"))
-        if page < total_pages - 1:
-            nav_row.append(InlineKeyboardButton("Next ➡️", callback_data=f"{nav_prefix}:{page + 1}"))
-        if nav_row:
-            rows.append(nav_row)
-        rows.append([InlineKeyboardButton(f"🧾 Review Selection ({len(chosen)})", callback_data="rm:review")])
-        if chosen:
-            rows.append([InlineKeyboardButton("🧹 Clear Selection", callback_data="rm:clear")])
-        if back_callback:
-            rows.append([InlineKeyboardButton("⬅️ Back", callback_data=back_callback)])
-        rows.append([InlineKeyboardButton("🏠 Home", callback_data="nav:home")])
-        rows.extend(self._nav_footer(include_home=False))
-        return InlineKeyboardMarkup(rows)
+        return remove_handler.remove_paginated_keyboard(
+            items,
+            page,
+            item_prefix=item_prefix,
+            nav_prefix=nav_prefix,
+            back_callback=back_callback,
+            selected_paths=selected_paths,
+        )
 
-    def _remove_list_text(self, title: str, items: list[dict[str, Any]], page: int, *, hint: str, selected_paths: set[str] | None = None) -> str:
-        page, total_pages, start, end = self._remove_page_bounds(items, page)
-        chosen = set(selected_paths or set())
-        lines = [f"<b>{_h(title)}</b>"]
-        if total_pages > 1:
-            lines.extend(["", f"<i>Page {page + 1}/{total_pages}</i>"])
-        lines.extend(["", f"Selected so far: <b>{len(chosen)}</b> item(s)", f"<i>{_h(hint)}</i>"])
-        return "\n".join(lines)
+    def _remove_list_text(
+        self, title: str, items: list[dict[str, Any]], page: int, *, hint: str, selected_paths: set[str] | None = None
+    ) -> str:
+        return remove_handler.remove_list_text(title, items, page, hint=hint, selected_paths=selected_paths)
 
     def _remove_library_items(self, root_key: str) -> list[dict[str, Any]]:
-        roots = {root["key"]: root for root in self._remove_roots()}
-        root = roots.get(str(root_key or ""))
-        if not root:
-            return []
-        root_path = root["path"]
-        items: list[dict[str, Any]] = []
-        try:
-            entries = sorted(os.scandir(root_path), key=lambda entry: entry.name.lower())
-        except OSError:
-            return []
-        for entry in entries:
-            try:
-                if entry.is_symlink():
-                    continue
-                entry_path = os.path.realpath(entry.path)
-                if os.path.dirname(entry_path) != root_path:
-                    continue
-                is_dir = entry.is_dir(follow_symlinks=False)
-                if not is_dir and root["key"] in {"movies", "tv"} and not is_remove_media_file(entry.name):
-                    continue
-                if root["key"] == "tv":
-                    remove_kind = "show" if is_dir else "episode"
-                elif root["key"] == "movies":
-                    remove_kind = "movie"
-                else:
-                    remove_kind = "item"
-                items.append(
-                    {
-                        "name": entry.name,
-                        "path": entry_path,
-                        "root_key": root["key"],
-                        "root_label": root["label"],
-                        "root_path": root_path,
-                        "is_dir": is_dir,
-                        "size_bytes": None,
-                        "remove_kind": remove_kind,
-                    }
-                )
-            except OSError:
-                continue
-        items.sort(key=remove_tv_item_sort_key)
-        return items
+        return remove_handler.remove_library_items(self._ctx, root_key)
 
     def _remove_show_children(self, show_candidate: dict[str, Any]) -> list[dict[str, Any]]:
-        show_path = os.path.realpath(str(show_candidate.get("path") or ""))
-        root_path = os.path.realpath(str(show_candidate.get("root_path") or ""))
-        show_name = str(show_candidate.get("name") or "Show")
-        if not show_path or not root_path or not os.path.isdir(show_path):
-            return []
-        if os.path.commonpath([show_path, root_path]) != root_path:
-            return []
-        items: list[dict[str, Any]] = []
-        try:
-            entries = sorted(os.scandir(show_path), key=lambda entry: entry.name.lower())
-        except OSError:
-            return []
-        for entry in entries:
-            try:
-                if entry.is_symlink():
-                    continue
-                child_path = os.path.realpath(entry.path)
-                if os.path.dirname(child_path) != show_path:
-                    continue
-                is_dir = entry.is_dir(follow_symlinks=False)
-                if is_dir:
-                    season_number = extract_season_number(entry.name)
-                    if season_number is None:
-                        continue
-                    display_name = format_remove_season_label(entry.name)
-                else:
-                    if not is_remove_media_file(entry.name):
-                        continue
-                    season_number = None
-                    display_name = format_remove_episode_label(entry.name)
-                items.append(
-                    {
-                        "name": display_name,
-                        "source_name": entry.name,
-                        "path": child_path,
-                        "root_key": str(show_candidate.get("root_key") or "tv"),
-                        "root_label": str(show_candidate.get("root_label") or "TV"),
-                        "root_path": root_path,
-                        "is_dir": is_dir,
-                        "size_bytes": None,
-                        "remove_kind": "season" if is_dir else "episode",
-                        "show_name": show_name,
-                        "show_path": show_path,
-                        "season_number": season_number,
-                    }
-                )
-            except OSError:
-                continue
-        items.sort(key=remove_tv_item_sort_key)
-        return items
+        return remove_handler.remove_show_children(show_candidate)
 
     def _remove_season_children(self, season_candidate: dict[str, Any]) -> list[dict[str, Any]]:
-        season_path = os.path.realpath(str(season_candidate.get("path") or ""))
-        root_path = os.path.realpath(str(season_candidate.get("root_path") or ""))
-        show_path = os.path.realpath(str(season_candidate.get("show_path") or ""))
-        season_number = int(season_candidate.get("season_number") or 0) or extract_season_number(str(season_candidate.get("name") or ""))
-        if not season_path or not root_path or not os.path.isdir(season_path):
-            return []
-        if os.path.commonpath([season_path, root_path]) != root_path:
-            return []
-        items: list[dict[str, Any]] = []
-        try:
-            entries = sorted(os.scandir(season_path), key=lambda entry: entry.name.lower())
-        except OSError:
-            return []
-        for entry in entries:
-            try:
-                if entry.is_symlink() or entry.is_dir(follow_symlinks=False) or not is_remove_media_file(entry.name):
-                    continue
-                child_path = os.path.realpath(entry.path)
-                if os.path.dirname(child_path) != season_path:
-                    continue
-                items.append(
-                    {
-                        "name": format_remove_episode_label(entry.name, season_number),
-                        "source_name": entry.name,
-                        "path": child_path,
-                        "root_key": str(season_candidate.get("root_key") or "tv"),
-                        "root_label": str(season_candidate.get("root_label") or "TV"),
-                        "root_path": root_path,
-                        "is_dir": False,
-                        "size_bytes": None,
-                        "remove_kind": "episode",
-                        "show_name": str(season_candidate.get("show_name") or "Show"),
-                        "show_path": show_path,
-                        "season_name": str(season_candidate.get("name") or "Season"),
-                        "season_path": season_path,
-                        "season_number": season_number,
-                    }
-                )
-            except OSError:
-                continue
-        items.sort(key=remove_tv_item_sort_key)
-        return items
-
-    # ------ Show-group helpers (normalize + group TV folders by show name) ------
-
-    _SHOW_NAME_STOP = re.compile(
-        r"\b(S\d{1,2}E\d{1,2}|S\d{2}(?=[\s._-]|$)|Season|SEASON|COMPLETE|PROPER|REPACK"
-        r"|4K|UHD|\d{3,4}p|BluRay|Blu-Ray|WEB|HDTV|WEBRip|BDRip|DVDRip"
-        r"|x264|x265|HEVC|H\.264|H\.265|10bit|6CH|HDR|DDP|Atmos|AAC|AC3)\b",
-        re.IGNORECASE,
-    )
+        return remove_handler.remove_season_children(season_candidate)
 
     @staticmethod
     def _extract_movie_name(folder_name: str) -> str:
-        """Return a clean 'Title (Year)' string for a movie folder/file name."""
-        name = folder_name
-        name = re.sub(r"^www\.\S+\s*[-–]\s*", "", name)
-        name = name.replace("_", " ")
-        if "." in name and " " not in name:
-            name = name.replace(".", " ")
-        # Extract year — prefer (YYYY) in parens, fall back to bare YYYY
-        year: str | None = None
-        m = re.search(r"\((\d{4})\)", name)
-        if m:
-            year = m.group(1)
-        else:
-            m = re.search(r"\b((?:19|20)\d{2})\b", name)
-            if m:
-                year = m.group(1)
-        # Cut at first quality/encoding marker
-        m_stop = BotApp._SHOW_NAME_STOP.search(name)
-        if m_stop:
-            name = name[: m_stop.start()]
-        # Cut at bare year position if it wasn't wrapped in parens
-        if year and f"({year})" not in name:
-            m_yr = re.search(rf"\b{re.escape(year)}\b", name)
-            if m_yr:
-                name = name[: m_yr.start()]
-        # Strip trailing bracketed/parenthesized blocks (year parens already captured above)
-        name = re.sub(r"\s*[\[{(][^\])}]*[\])}]\s*$", "", name)
-        name = re.sub(r"\s*[-–]\s*[A-Za-z0-9]{2,12}\s*$", "", name)
-        name = re.sub(r"[\s.\-_\[({]+$", "", name).strip()
-        title = name or folder_name
-        if year and f"({year})" not in title:
-            return f"{title} ({year})"
-        return title
+        return remove_handler.extract_movie_name(folder_name)
 
     @staticmethod
     def _extract_show_name(folder_name: str) -> str:
-        """Normalise a torrent-style folder name to a clean show title."""
-        name = folder_name
-        # Strip site junk: "www.Site.org - " prefix
-        name = re.sub(r"^www\.\S+\s*[-–]\s*", "", name)
-        # Common separator cleanup before further parsing.
-        name = name.replace("_", " ")
-        # Dot-separated names → spaces (only if the name has no spaces)
-        if "." in name and " " not in name:
-            name = name.replace(".", " ")
-        # Drop trailing bracketed tag blocks often used for source/release noise.
-        name = re.sub(r"\s*[\[{(][^\])}]*[\])}]\s*$", "", name)
-        # Cut at the first quality/episode marker
-        m = BotApp._SHOW_NAME_STOP.search(name)
-        if m:
-            name = name[: m.start()]
-        # Strip bare trailing year labels too, not just "(2024)".
-        name = re.sub(r"\s+(19|20)\d{2}\s*$", "", name)
-        # Remove a trailing release-group suffix such as "- NTb" or "-TGx".
-        name = re.sub(r"\s*[-–]\s*[A-Za-z0-9]{2,12}\s*$", "", name)
-        # Strip trailing year-in-parens: "(2024)"
-        name = re.sub(r"\s*\(\d{4}\)\s*$", "", name)
-        # Strip trailing punctuation / whitespace
-        name = re.sub(r"[\s.\-_]+$", "", name).strip()
-        return name or folder_name
+        return remove_handler.extract_show_name(folder_name)
 
     def _remove_group_tv_items(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Group flat TV top-level items by normalised show name."""
-        groups: dict[str, list[dict[str, Any]]] = {}
-        for item in items:
-            key = self._extract_show_name(str(item.get("name") or "")).lower()
-            groups.setdefault(key, []).append(item)
-
-        result: list[dict[str, Any]] = []
-        for group_items in groups.values():
-            # Clean-named folders (with spaces) first, then torrent packs
-            group_items.sort(key=lambda i: (0 if " " in str(i.get("name", "")) else 1, str(i.get("name", "")).lower()))
-            primary = group_items[0]
-            display_name = self._extract_show_name(str(primary.get("name") or ""))
-            result.append({
-                **primary,
-                "name": display_name,
-                "remove_kind": "show",
-                "group_items": group_items,
-            })
-
-        result.sort(key=lambda x: str(x.get("name") or "").lower())
-        return result
+        return remove_handler.remove_group_tv_items(items)
 
     def _remove_show_group_children(self, group_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Aggregate all seasons / episode packs from every folder in a show group."""
-        all_children: list[dict[str, Any]] = []
-        for item in group_items:
-            if not item.get("is_dir"):
-                all_children.append({
-                    **item,
-                    "name": format_remove_episode_label(str(item.get("source_name") or item.get("name") or "")),
-                    "remove_kind": "episode",
-                })
-                continue
-            sub = self._remove_show_children(item)
-            # If the folder directly contains season sub-dirs, expose those seasons
-            has_dir_children = any(c.get("is_dir") for c in sub)
-            if has_dir_children:
-                all_children.extend(sub)
-            elif sub:
-                # Download pack whose contents are plain episode files → treat
-                # the pack folder itself as one deletable "season" unit
-                all_children.append({
-                    **item,
-                    "name": format_remove_season_label(str(item.get("name") or "Season")),
-                    "remove_kind": "season",
-                    "show_name": self._extract_show_name(str(item.get("name") or "")),
-                    "show_path": str(item.get("path") or ""),
-                    "season_number": extract_season_number(str(item.get("name") or "")),
-                })
-            # Empty directory → skip
-        all_children.sort(key=remove_tv_item_sort_key)
-        return all_children
+        return remove_handler.remove_show_group_children(group_items)
 
     def _remove_group_any_selected(self, flow: dict[str, Any], group_item: dict[str, Any]) -> bool:
-        """Return True if any path in the group is currently in the selection."""
-        group_items = group_item.get("group_items") or [group_item]
-        selected_paths = self._remove_selected_paths(flow)
-        return any(self._remove_selected_path(i) in selected_paths for i in group_items)
+        return remove_handler.remove_group_any_selected(flow, group_item)
 
     def _remove_toggle_group(self, flow: dict[str, Any], group_item: dict[str, Any]) -> bool:
-        """Toggle all paths in a group as a batch. Returns True if group is now selected."""
-        group_items = group_item.get("group_items") or [group_item]
-        group_paths = {self._remove_selected_path(i) for i in group_items}
-        any_selected = bool(group_paths & self._remove_selected_paths(flow))
-        # Remove any existing group paths from selection first
-        flow["selected_items"] = [
-            s for s in (flow.get("selected_items") or [])
-            if self._remove_selected_path(s) not in group_paths
-        ]
-        if not any_selected:
-            for item in group_items:
-                self._remove_toggle_candidate(flow, item)
-            return True
-        return False
-
-    # -----------------------------------------------------------------------
+        return remove_handler.remove_toggle_group(flow, group_item)
 
     def _remove_show_actions_text(self, show_candidate: dict[str, Any], series_selected: bool) -> str:
-        group_items: list[dict[str, Any]] = show_candidate.get("group_items") or []
-        if len(group_items) > 1:
-            total_size = sum(self._path_size_bytes(str(i.get("path") or "")) for i in group_items)
-            detail = f"{show_candidate.get('name')} (TV series, {human_size(total_size)}, {len(group_items)} folders)"
-        else:
-            show_candidate = self._remove_enrich_candidate(show_candidate)
-            detail = self._remove_candidate_text(show_candidate)
-        series_status = "✅ <b>Entire series is selected for deletion.</b>" if series_selected else "ℹ️ <b>Entire series is not currently selected.</b>"
-        return (
-            "<b>📺 TV Delete Options</b>\n\n"
-            f"Selected series: {detail}\n"
-            f"{series_status}\n\n"
-            "<i>Choose whether to remove the entire series or browse seasons and episodes.</i>"
-        )
+        return remove_handler.remove_show_actions_text(show_candidate, series_selected)
 
     def _remove_season_actions_text(self, season_candidate: dict[str, Any]) -> str:
-        season_candidate = self._remove_enrich_candidate(season_candidate)
-        show_name = str(season_candidate.get("show_name") or "Show")
-        return (
-            "<b>📂 Season Delete Options</b>\n\n"
-            f"Series: {_h(show_name)}\n"
-            f"Selected season: {self._remove_candidate_text(season_candidate)}\n\n"
-            "<i>Choose whether to remove the entire season or browse individual episodes.</i>"
-        )
+        return remove_handler.remove_season_actions_text(season_candidate)
 
     def _cleanup_qbt_for_path(self, target_path: str) -> list[str]:
-        """Remove qBittorrent torrents whose content matches a deleted path."""
-        real_target = os.path.realpath(target_path)
-        if not real_target:
-            return []
-        try:
-            all_torrents = self.qbt.list_torrents(limit=5000)
-        except Exception:
-            LOG.warning("Failed to list qBittorrent torrents for cleanup", exc_info=True)
-            return []
-        cleaned: list[str] = []
-        for t in all_torrents:
-            content = str(t.get("content_path") or "").strip()
-            if not content:
-                continue
-            real_content = os.path.realpath(content)
-            if real_content == real_target or real_content.startswith(real_target + os.sep):
-                try:
-                    self.qbt.delete_torrent(t["hash"], delete_files=False)
-                    cleaned.append(str(t.get("name") or t["hash"]))
-                except Exception:
-                    LOG.warning("Failed to remove qBittorrent torrent %s", t.get("hash"), exc_info=True)
-        return cleaned
+        return remove_handler.cleanup_qbt_for_path(self._ctx, target_path)
 
-    def _delete_remove_candidate(self, candidate: dict[str, Any], *, user_id: int | None = None, chat_id: int | None = None) -> dict[str, Any]:
-        raw_root_path = str(candidate.get("root_path") or "").strip()
-        raw_target_path = str(candidate.get("path") or "").strip()
-        root_key = str(candidate.get("root_key") or "").strip().lower()
-        remove_kind = str(candidate.get("remove_kind") or "").strip().lower()
-        root_path = os.path.realpath(raw_root_path)
-        target_path = os.path.realpath(raw_target_path)
-        if not root_path or not target_path or not raw_target_path:
-            raise RuntimeError("Invalid removal target")
-        if os.path.islink(raw_target_path):
-            raise RuntimeError("Refusing to delete symbolic links")
-        if os.path.commonpath([target_path, root_path]) != root_path:
-            raise RuntimeError("Refusing to delete outside configured media roots")
-        if not os.path.exists(target_path):
-            raise RuntimeError("The selected item no longer exists on disk")
+    def _delete_remove_candidate(
+        self, candidate: dict[str, Any], *, user_id: int | None = None, chat_id: int | None = None
+    ) -> dict[str, Any]:
+        return remove_handler.delete_remove_candidate(self._ctx, candidate, user_id=user_id, chat_id=chat_id)
 
-        rel_parts = [part for part in os.path.relpath(target_path, root_path).split(os.sep) if part and part != "."]
-        if root_key in {"movies", "spam"}:
-            if len(rel_parts) != 1:
-                raise RuntimeError("Refusing to delete nested paths directly")
-        elif root_key == "tv":
-            if remove_kind == "show":
-                if len(rel_parts) != 1:
-                    raise RuntimeError("Refusing to delete outside a top-level TV series folder")
-            elif remove_kind == "season":
-                if len(rel_parts) != 2:
-                    raise RuntimeError("Refusing to delete outside a direct season path")
-            elif remove_kind == "episode":
-                if len(rel_parts) not in {1, 2, 3} or os.path.isdir(target_path):
-                    raise RuntimeError("Refusing to delete outside a direct episode path")
-            else:
-                raise RuntimeError("Unsupported TV removal type")
-        else:
-            raise RuntimeError("Unsupported library root for deletion")
-
-        identity: dict[str, Any] | None = None
-        deleted_size = self._path_size_bytes(target_path)
-        if self.plex.ready() and root_key in {"movies", "tv"}:
-            try:
-                identity = self.plex.resolve_remove_identity(target_path, remove_kind)
-            except Exception:
-                LOG.warning("Failed to resolve Plex identity before delete for %s", target_path, exc_info=True)
-        if os.path.isdir(target_path):
-            shutil.rmtree(target_path)
-        else:
-            os.remove(target_path)
-
-        # Clean up matching qBittorrent torrents (files already gone from disk)
-        qbt_cleaned = self._cleanup_qbt_for_path(target_path)
-        if qbt_cleaned:
-            LOG.info("Cleaned up %d qBittorrent torrent(s) for %s: %s", len(qbt_cleaned), target_path, qbt_cleaned)
-
-        plex_status = "skipped"
-        plex_note = "Plex cleanup skipped."
-        remove_job: dict[str, Any] | None = None
-        if self.plex.ready() and root_key in {"movies", "tv"}:
-            verification = self._remove_build_job_verification(candidate, target_path, identity)
-            remove_job = self.store.create_remove_job(
-                user_id=int(user_id or 0),
-                chat_id=int(chat_id or 0),
-                item_name=str(candidate.get("name") or os.path.basename(target_path)),
-                root_key=root_key,
-                root_label=str(candidate.get("root_label") or ""),
-                remove_kind=remove_kind,
-                target_path=target_path,
-                root_path=root_path,
-                scan_path=str(identity.get("scan_path") or "") if identity else None,
-                plex_section_key=str(identity.get("section_key") or "") if identity else None,
-                plex_rating_key=str(identity.get("primary_rating_key") or "") if identity else None,
-                plex_title=str(identity.get("title") or candidate.get("name") or "") if identity else None,
-                verification_json=verification,
-                status="plex_pending",
-                disk_deleted_at=now_ts(),
-                next_retry_at=now_ts(),
-            )
-            cleanup = self._remove_attempt_plex_cleanup(remove_job, inline_timeout_s=90)
-            plex_status = str(cleanup.get("status") or "plex_pending")
-            plex_note = str(cleanup.get("detail") or "Plex cleanup pending")
-            remove_job = self.store.get_remove_job(str(remove_job.get("job_id") or "")) or remove_job
-
-        size_txt = human_size(int(deleted_size or 0))
-        return {
-            "name": str(candidate.get("name") or ""),
-            "root_label": str(candidate.get("root_label") or ""),
-            "size_bytes": int(deleted_size or 0),
-            "path": target_path,
-            "disk_status": "deleted",
-            "plex_status": plex_status,
-            "plex_note": plex_note,
-            "job_id": str(remove_job.get("job_id") or "") if remove_job else None,
-            "remove_kind": remove_kind,
-            "display_text": (
-                "✅ Delete complete\n"
-                f"Removed: {candidate.get('name')}\n"
-                f"Library: {candidate.get('root_label')}\n"
-                f"Freed: {size_txt}\n"
-                f"Disk path: {target_path}\n"
-                f"Plex: {plex_note}"
-            ),
-        }
-
-    def _delete_remove_candidates(self, candidates: list[dict[str, Any]], *, user_id: int | None = None, chat_id: int | None = None) -> str:
-        effective = self._remove_effective_candidates(candidates)
-        if not effective:
-            raise RuntimeError("No items are selected for deletion")
-        verified: list[dict[str, Any]] = []
-        pending: list[dict[str, Any]] = []
-        failures: list[str] = []
-        total_freed = 0
-        for candidate in effective:
-            enriched = self._remove_enrich_candidate(candidate)
-            try:
-                result = self._delete_remove_candidate(enriched, user_id=user_id, chat_id=chat_id)
-                total_freed += int(result.get("size_bytes") or 0)
-                if str(result.get("plex_status") or "") == "verified":
-                    verified.append(result)
-                elif str(result.get("plex_status") or "") in {"plex_pending", "skipped"}:
-                    pending.append(result)
-                else:
-                    failures.append(f"• {result.get('name')}: {result.get('plex_note')}")
-            except Exception as e:
-                failures.append(f"• {enriched.get('name')}: {e}")
-        header = "✅ Batch delete verified" if not pending and not failures else "⚠️ Batch delete completed with follow-up"
-        lines = [header, "", f"Disk deleted: {len(verified) + len(pending)}/{len(effective)} item(s)", f"Freed: {human_size(total_freed)}"]
-        if verified:
-            lines.append("")
-            lines.append("Verified in Plex:")
-            for result in verified[:12]:
-                lines.append(f"• {self._remove_candidate_text(result)}")
-            if len(verified) > 12:
-                lines.append(f"• …and {len(verified) - 12} more")
-        if pending:
-            lines.append("")
-            lines.append("Plex cleanup pending:")
-            for result in pending[:12]:
-                lines.append(f"• {result.get('name')}: {result.get('plex_note')}")
-            if len(pending) > 12:
-                lines.append(f"• …and {len(pending) - 12} more pending")
-        if failures:
-            lines.append("")
-            lines.append("Failures:")
-            lines.extend(failures[:12])
-            if len(failures) > 12:
-                lines.append(f"• …and {len(failures) - 12} more failures")
-        return "\n".join(lines)
+    def _delete_remove_candidates(
+        self, candidates: list[dict[str, Any]], *, user_id: int | None = None, chat_id: int | None = None
+    ) -> str:
+        return remove_handler.delete_remove_candidates(self._ctx, candidates, user_id=user_id, chat_id=chat_id)
 
     def _schedule_active_line(self, track: dict[str, Any]) -> str:
         probe = dict(track.get("last_probe_json") or {})
@@ -4138,27 +3100,31 @@ class BotApp:
         else:
             lead = "✅"
             status = "up to date"
-        extra: list[str] = []
+        details: list[str] = [status]
         if unreleased > 0:
-            extra.append(f"{unreleased} unreleased")
+            details.append(f"{unreleased} unreleased")
         next_air_ts = int(track.get("next_air_ts") or probe.get("next_air_ts") or 0)
         if next_air_ts > 0:
-            extra.append(f"next {_relative_time(next_air_ts)}")
+            details.append(f"next {_relative_time(next_air_ts)}")
         next_check_at = int(track.get("next_check_at") or 0)
         if next_check_at > 0:
-            extra.append(f"check {_relative_time(next_check_at)}")
+            details.append(f"check {_relative_time(next_check_at)}")
         if probe.get("metadata_stale"):
-            extra.append("⚠️ stale data")
-        detail_parts = [status] + extra[:2]
-        detail = " · ".join(detail_parts)
-        return f"{lead} <b>{_h(name)}</b> S{season:02d}\n   {detail}"
+            details.append("⚠️ stale data")
+        detail_line = " · ".join(details[:3])
+        return f"{lead} <b>{_h(name)}</b>\n   Season {season} · {detail_line}"
+
+    def _schedule_paused_line(self, name: str, season: int) -> str:
+        return f"⏸ <b>{_h(name)}</b>\n   Season {season} · <i>paused</i>"
 
     async def _send_active(self, msg: Any, n: int = 10, user_id: int | None = None) -> None:
         items = await asyncio.to_thread(self.qbt.list_active, limit=max(n * 4, 50))
         active_downloads = [t for t in items if not self._is_complete_torrent(t)][:n]
         schedule_tracks: list[dict[str, Any]] = []
         if user_id is not None:
-            schedule_tracks = await asyncio.to_thread(self.store.list_schedule_tracks, int(user_id), True, max(5, min(20, n)))
+            schedule_tracks = await asyncio.to_thread(
+                self.store.list_schedule_tracks, int(user_id), True, max(5, min(20, n))
+            )
 
         lines: list[str] = []
         if not active_downloads and not schedule_tracks:
@@ -4172,7 +3138,9 @@ class BotApp:
                 us = human_size(int(t.get("upspeed", 0))) + "/s"
                 state_txt = self._state_label(t)
                 eta_txt = self._eta_label(t)
-                lines.append(f"• <code>{_h(name)}</code>\n  {progress:.1f}% | <b>{state_txt}</b> | ↓ <code>{ds}</code> ↑ <code>{us}</code> | ETA <code>{eta_txt}</code>")
+                lines.append(
+                    f"• <code>{_h(name)}</code>\n  {progress:.1f}% | <b>{state_txt}</b> | ↓ <code>{ds}</code> ↑ <code>{us}</code> | ETA <code>{eta_txt}</code>"
+                )
         else:
             lines.append("<b>📥 Current Active Downloads</b>")
             lines.append("• none")
@@ -4187,10 +3155,14 @@ class BotApp:
 
         await msg.reply_text("\n".join(lines), parse_mode=_PM)
 
-    async def _render_active_ui(self, user_id: int, msg: Any, n: int = 10, current_ui_message: Any | None = None) -> Any:
+    async def _render_active_ui(
+        self, user_id: int, msg: Any, n: int = 10, current_ui_message: Any | None = None
+    ) -> Any:
         items = await asyncio.to_thread(self.qbt.list_active, limit=max(n * 4, 50))
         active_downloads = [t for t in items if not self._is_complete_torrent(t)][:n]
-        schedule_tracks = await asyncio.to_thread(self.store.list_schedule_tracks, int(user_id), True, max(5, min(20, n)))
+        schedule_tracks = await asyncio.to_thread(
+            self.store.list_schedule_tracks, int(user_id), True, max(5, min(20, n))
+        )
 
         if not active_downloads and not schedule_tracks:
             text = "<b>📭 Nothing Active</b>\n<i>No downloads or tracking jobs running.</i>"
@@ -4205,7 +3177,9 @@ class BotApp:
                     us = human_size(int(t.get("upspeed", 0))) + "/s"
                     state_txt = self._state_label(t)
                     eta_txt = self._eta_label(t)
-                    lines.append(f"• <code>{_h(name)}</code>\n  {progress:.1f}% | <b>{state_txt}</b> | ↓ <code>{ds}</code> ↑ <code>{us}</code> | ETA <code>{eta_txt}</code>")
+                    lines.append(
+                        f"• <code>{_h(name)}</code>\n  {progress:.1f}% | <b>{state_txt}</b> | ↓ <code>{ds}</code> ↑ <code>{us}</code> | ETA <code>{eta_txt}</code>"
+                    )
             else:
                 lines.append("<b>📥 Current Active Downloads</b>")
                 lines.append("• none")
@@ -4225,7 +3199,9 @@ class BotApp:
         cats = await asyncio.to_thread(self.qbt.list_categories)
         lines = ["<b>⚙️ Categories</b>"]
         lines.append(f"• status: <b>{'ready' if ok else 'not ready'}</b> (<code>{_h(reason)}</code>)")
-        lines.append(f"• NVMe mount policy: <b>{'required' if self.cfg.require_nvme_mount else 'optional'}</b> @ <code>{_h(self.cfg.nvme_mount_path)}</code>")
+        lines.append(
+            f"• NVMe mount policy: <b>{'required' if self.cfg.require_nvme_mount else 'optional'}</b> @ <code>{_h(self.cfg.nvme_mount_path)}</code>"
+        )
         lines.append(f"• Movies path: <code>{_h(self.cfg.movies_path)}</code>")
         lines.append(f"• TV path: <code>{_h(self.cfg.tv_path)}</code>")
         lines.append(f"• Spam path: <code>{_h(self.cfg.spam_path)}</code>")
@@ -4244,7 +3220,9 @@ class BotApp:
         cats = await asyncio.to_thread(self.qbt.list_categories)
         lines = ["<b>⚙️ Categories</b>"]
         lines.append(f"• status: <b>{'ready' if ok else 'not ready'}</b> (<code>{_h(reason)}</code>)")
-        lines.append(f"• NVMe mount policy: <b>{'required' if self.cfg.require_nvme_mount else 'optional'}</b> @ <code>{_h(self.cfg.nvme_mount_path)}</code>")
+        lines.append(
+            f"• NVMe mount policy: <b>{'required' if self.cfg.require_nvme_mount else 'optional'}</b> @ <code>{_h(self.cfg.nvme_mount_path)}</code>"
+        )
         lines.append(f"• Movies path: <code>{_h(self.cfg.movies_path)}</code>")
         lines.append(f"• TV path: <code>{_h(self.cfg.tv_path)}</code>")
         lines.append(f"• Spam path: <code>{_h(self.cfg.spam_path)}</code>")
@@ -4261,11 +3239,13 @@ class BotApp:
     async def _send_plugins(self, msg: Any) -> None:
         plugins = await asyncio.to_thread(self.qbt.list_search_plugins)
         if not plugins:
-            await msg.reply_text("<b>🔌 Plugins</b>\n<i>No search plugins installed in qBittorrent.</i>", parse_mode=_PM)
+            await msg.reply_text(
+                "<b>🔌 Plugins</b>\n<i>No search plugins installed in qBittorrent.</i>", parse_mode=_PM
+            )
             return
         lines = ["<b>🔌 Plugins</b>"]
         for p in plugins:
-            pname = _h(str(p.get('fullName') or p.get('name') or '?'))
+            pname = _h(str(p.get("fullName") or p.get("name") or "?"))
             lines.append(
                 f"• <code>{pname}</code> | enabled=<b>{p.get('enabled')}</b> | version=<code>{_h(str(p.get('version') or '?'))}</code>"
             )
@@ -4288,114 +3268,20 @@ class BotApp:
     # ---------- Commands ----------
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self.is_allowed(update):
-            await self.deny(update)
-            return
-        msg = update.effective_message
-        if not msg:
-            return
-
-        try:
-            uid = update.effective_user.id if update.effective_user else None
-        except Exception:
-            uid = None
-        LOG.info("Handling /start command for user=%s chat=%s", uid, getattr(update.effective_chat, "id", None))
-        if uid is not None:
-            self._clear_flow(uid)
-            self._cancel_pending_trackers_for_user(uid)
-            self._stop_command_center_refresh(uid)
-            await self._cleanup_ephemeral_messages(uid, msg.get_bot())
-
-            # Recover CC location from DB if the in-memory dict was lost (e.g. bot restart).
-            existing_nav = self.user_nav_ui.get(uid)
-            if not existing_nav:
-                db_cc = await asyncio.to_thread(self.store.get_command_center, uid)
-                if db_cc:
-                    self.user_nav_ui[uid] = db_cc
-                    existing_nav = db_cc
-
-            if existing_nav:
-                # Try to delete the OLD CC message so there's never a duplicate.
-                bot = msg.get_bot()
-                try:
-                    await bot.delete_message(
-                        chat_id=existing_nav["chat_id"],
-                        message_id=existing_nav["message_id"],
-                    )
-                except TelegramError:
-                    pass
-                self.user_nav_ui.pop(uid, None)
-
-        # Always send a fresh CC as a reply to the user's /start message.
-        await self._send_command_center(msg=msg)
+        await commands_handler.cmd_start(self, update, context)
 
     async def cmd_search(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self.is_allowed(update):
-            await self.deny(update)
-            return
-        msg = update.effective_message
-        if not msg:
-            return
-
-        raw = " ".join(context.args or [])
-        if not raw:
-            await msg.reply_text("Usage: /search <query> [--min-seeds N] [--min-quality 1080] [--limit N] [--sort ...]", parse_mode=_PM)
-            return
-
-        parser = self._build_search_parser()
-        try:
-            args = parser.parse_args(shlex.split(raw))
-        except Exception as e:
-            await msg.reply_text(f"Search command parse error: {_h(str(e))}", parse_mode=_PM)
-            return
-
-        query = " ".join(args.query).strip()
-        await self._run_search(
-            update=update,
-            query=query,
-            plugin=args.plugin,
-            search_cat=args.search_cat,
-            min_seeds=args.min_seeds,
-            min_size=parse_size_to_bytes(args.min_size),
-            max_size=parse_size_to_bytes(args.max_size),
-            min_quality=args.min_quality,
-            sort_key=args.sort,
-            order=args.order,
-            limit=args.limit,
-            media_hint="any",
-        )
+        await commands_handler.cmd_search(self, update, context)
 
     async def cmd_schedule(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self.is_allowed(update):
-            await self.deny(update)
-            return
-        msg = update.effective_message
-        if not msg:
-            return
-        uid = update.effective_user.id
-        self._schedule_start_flow(uid)
-        flow = self._get_flow(uid) or {"mode": "schedule", "stage": "await_show", "tracking_mode": "upcoming"}
-        await self._render_schedule_ui(
-            uid,
-            msg,
-            flow,
-            "<b>✏️ Type a show name to search</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n\n"
-            "Monitors your Plex library and auto-queues missing episodes as they air.\n\n"
-            "<i>Example: Severance</i>"
-        )
+        await commands_handler.cmd_schedule(self, update, context)
 
     async def cmd_remove(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self.is_allowed(update):
-            await self.deny(update)
-            return
-        msg = update.effective_message
-        if not msg:
-            return
-        uid = update.effective_user.id
-        await self._open_remove_search_prompt(uid, msg)
+        await commands_handler.cmd_remove(self, update, context)
 
-    async def _open_remove_search_prompt(self, user_id: int, msg: Any, *, current_ui_message: Any | None = None) -> None:
+    async def _open_remove_search_prompt(
+        self, user_id: int, msg: Any, *, current_ui_message: Any | None = None
+    ) -> None:
         flow = self._get_flow(user_id) or {"mode": "remove", "selected_items": []}
         flow["mode"] = "remove"
         flow["stage"] = "await_query"
@@ -4422,7 +3308,9 @@ class BotApp:
             msg,
             flow,
             "📚 <b>Browse Plex/library items</b>\n\nChoose a library to browse, or <b>type any movie or show name</b> and the bot will find it for you directly.",
-            reply_markup=self._remove_browse_root_keyboard(len(movie_items), len(show_items), self._remove_selection_count(flow)),
+            reply_markup=self._remove_browse_root_keyboard(
+                len(movie_items), len(show_items), self._remove_selection_count(flow)
+            ),
             current_ui_message=current_ui_message,
         )
 
@@ -4538,14 +3426,24 @@ class BotApp:
                 return
 
             if mode == "schedule" and stage == "await_show":
-                await self._render_schedule_ui(user_id, msg, flow, "<b>🔎 Looking Up Show</b>\n<i>Checking TVMaze for matches…</i>", reply_markup=None)
+                await self._render_schedule_ui(
+                    user_id,
+                    msg,
+                    flow,
+                    "<b>🔎 Looking Up Show</b>\n<i>Checking TVMaze for matches…</i>",
+                    reply_markup=None,
+                )
                 try:
                     candidates = await asyncio.to_thread(self.tvmeta.search_shows, text, 5)
                 except Exception as e:
-                    await self._render_schedule_ui(user_id, msg, flow, f"<b>⚠️ Lookup Failed</b>\n<i>{_h(str(e))}</i>", reply_markup=None)
+                    await self._render_schedule_ui(
+                        user_id, msg, flow, f"<b>⚠️ Lookup Failed</b>\n<i>{_h(str(e))}</i>", reply_markup=None
+                    )
                     return
                 if not candidates:
-                    await self._render_schedule_ui(user_id, msg, flow, "No matching shows found. Try a more specific title.", reply_markup=None)
+                    await self._render_schedule_ui(
+                        user_id, msg, flow, "No matching shows found. Try a more specific title.", reply_markup=None
+                    )
                     return
                 flow["stage"] = "choose_show"
                 flow["candidates"] = candidates
@@ -4553,7 +3451,9 @@ class BotApp:
                 lines = ["<b>📺 Pick the Correct Show</b>", ""]
                 for idx, candidate in enumerate(candidates, start=1):
                     net = candidate.get("network") or candidate.get("country") or "Unknown network"
-                    lines.append(f"<b>{idx}.</b> {_h(candidate['name'])} (<code>{_h(candidate.get('year') or '?')}</code>) • <code>{_h(candidate.get('status') or 'Unknown')}</code> • <i>{_h(net)}</i>")
+                    lines.append(
+                        f"<b>{idx}.</b> {_h(candidate['name'])} (<code>{_h(candidate.get('year') or '?')}</code>) • <code>{_h(candidate.get('status') or 'Unknown')}</code> • <i>{_h(net)}</i>"
+                    )
                 lines.append("")
                 lines.append("<i>Tap a show below, or send another title if you want to search again.</i>")
                 await self._render_schedule_ui(
@@ -4568,14 +3468,24 @@ class BotApp:
             if mode == "schedule" and stage in {"choose_show", "confirm"}:
                 self._schedule_start_flow(user_id)
                 flow = self._get_flow(user_id) or {"mode": "schedule", "stage": "await_show"}
-                await self._render_schedule_ui(user_id, msg, flow, "<b>🔎 Looking Up Show</b>\n<i>Checking TVMaze for matches…</i>", reply_markup=None)
+                await self._render_schedule_ui(
+                    user_id,
+                    msg,
+                    flow,
+                    "<b>🔎 Looking Up Show</b>\n<i>Checking TVMaze for matches…</i>",
+                    reply_markup=None,
+                )
                 try:
                     candidates = await asyncio.to_thread(self.tvmeta.search_shows, text, 5)
                 except Exception as e:
-                    await self._render_schedule_ui(user_id, msg, flow, f"<b>⚠️ Lookup Failed</b>\n<i>{_h(str(e))}</i>", reply_markup=None)
+                    await self._render_schedule_ui(
+                        user_id, msg, flow, f"<b>⚠️ Lookup Failed</b>\n<i>{_h(str(e))}</i>", reply_markup=None
+                    )
                     return
                 if not candidates:
-                    await self._render_schedule_ui(user_id, msg, flow, "No matching shows found. Try a more specific title.", reply_markup=None)
+                    await self._render_schedule_ui(
+                        user_id, msg, flow, "No matching shows found. Try a more specific title.", reply_markup=None
+                    )
                     return
                 flow["stage"] = "choose_show"
                 flow["candidates"] = candidates
@@ -4583,7 +3493,9 @@ class BotApp:
                 lines = ["<b>📺 Pick the Correct Show</b>", ""]
                 for idx, candidate in enumerate(candidates, start=1):
                     net = candidate.get("network") or candidate.get("country") or "Unknown network"
-                    lines.append(f"<b>{idx}.</b> {_h(candidate['name'])} (<code>{_h(candidate.get('year') or '?')}</code>) • <code>{_h(candidate.get('status') or 'Unknown')}</code> • <i>{_h(net)}</i>")
+                    lines.append(
+                        f"<b>{idx}.</b> {_h(candidate['name'])} (<code>{_h(candidate.get('year') or '?')}</code>) • <code>{_h(candidate.get('status') or 'Unknown')}</code> • <i>{_h(net)}</i>"
+                    )
                 lines.append("")
                 lines.append("<i>Tap a show below, or send another title if you want to search again.</i>")
                 await self._render_schedule_ui(
@@ -4597,7 +3509,13 @@ class BotApp:
 
             if mode == "schedule" and stage == "await_season_pick":
                 if not text.isdigit():
-                    await self._render_schedule_ui(user_id, msg, flow, "Send a season number from the available season list shown above.", reply_markup=None)
+                    await self._render_schedule_ui(
+                        user_id,
+                        msg,
+                        flow,
+                        "Send a season number from the available season list shown above.",
+                        reply_markup=None,
+                    )
                     return
                 wanted_season = int(text)
                 available = [int(x) for x in list(flow.get("selected_show", {}).get("available_seasons") or [])]
@@ -4606,11 +3524,14 @@ class BotApp:
                         user_id,
                         msg,
                         flow,
-                        "That season is not available for this show. Send one of: " + ", ".join(str(x) for x in available),
+                        "That season is not available for this show. Send one of: "
+                        + ", ".join(str(x) for x in available),
                         reply_markup=None,
                     )
                     return
-                await self._render_schedule_ui(user_id, msg, flow, "🔄 Re-checking that season against Plex/library inventory…", reply_markup=None)
+                await self._render_schedule_ui(
+                    user_id, msg, flow, "🔄 Re-checking that season against Plex/library inventory…", reply_markup=None
+                )
                 try:
                     bundle = await asyncio.to_thread(
                         self._schedule_get_show_bundle,
@@ -4642,11 +3563,19 @@ class BotApp:
 
             if mode == "remove" and stage == "await_query":
                 await self._cleanup_private_user_message(msg)
-                await self._render_remove_ui(user_id, msg, flow, "<b>🔎 Scanning Library</b>\n<i>Searching Plex for matching items…</i>", reply_markup=None)
+                await self._render_remove_ui(
+                    user_id,
+                    msg,
+                    flow,
+                    "<b>🔎 Scanning Library</b>\n<i>Searching Plex for matching items…</i>",
+                    reply_markup=None,
+                )
                 try:
                     candidates = await asyncio.to_thread(self._find_remove_candidates, text, 8)
                 except Exception as e:
-                    await self._render_remove_ui(user_id, msg, flow, f"<b>⚠️ Search Failed</b>\n<i>{_h(str(e))}</i>", reply_markup=None)
+                    await self._render_remove_ui(
+                        user_id, msg, flow, f"<b>⚠️ Search Failed</b>\n<i>{_h(str(e))}</i>", reply_markup=None
+                    )
                     return
                 if not candidates:
                     await self._render_remove_ui(
@@ -4671,16 +3600,41 @@ class BotApp:
                 )
                 return
 
-            if mode == "remove" and stage in {"choose_item", "confirm_delete", "browse_root", "show_actions", "browse_children", "season_actions", "browse_episodes"}:
+            if mode == "remove" and stage in {
+                "choose_item",
+                "confirm_delete",
+                "browse_root",
+                "show_actions",
+                "browse_children",
+                "season_actions",
+                "browse_episodes",
+            }:
                 await self._cleanup_private_user_message(msg)
                 preserved_selected = list(flow.get("selected_items") or [])
-                self._set_flow(user_id, {"mode": "remove", "stage": "await_query", "selected_items": preserved_selected})
-                flow = self._get_flow(user_id) or {"mode": "remove", "stage": "await_query", "selected_items": preserved_selected}
-                await self._render_remove_ui(user_id, msg, flow, "<b>🔎 Scanning Library</b>\n<i>Searching Plex for matching items…</i>", reply_markup=None)
+                new_flow: dict[str, Any] = {
+                    "mode": "remove",
+                    "stage": "await_query",
+                    "selected_items": preserved_selected,
+                }
+                # Preserve UI message reference so the next render edits the existing message
+                for key in ("remove_ui_chat_id", "remove_ui_message_id"):
+                    if flow.get(key):
+                        new_flow[key] = flow[key]
+                self._set_flow(user_id, new_flow)
+                flow = self._get_flow(user_id) or new_flow
+                await self._render_remove_ui(
+                    user_id,
+                    msg,
+                    flow,
+                    "<b>🔎 Scanning Library</b>\n<i>Searching Plex for matching items…</i>",
+                    reply_markup=None,
+                )
                 try:
                     candidates = await asyncio.to_thread(self._find_remove_candidates, text, 8)
                 except Exception as e:
-                    await self._render_remove_ui(user_id, msg, flow, f"<b>⚠️ Search Failed</b>\n<i>{_h(str(e))}</i>", reply_markup=None)
+                    await self._render_remove_ui(
+                        user_id, msg, flow, f"<b>⚠️ Search Failed</b>\n<i>{_h(str(e))}</i>", reply_markup=None
+                    )
                     return
                 if not candidates:
                     await self._render_remove_ui(
@@ -4735,7 +3689,9 @@ class BotApp:
         if low in {"tv", "show", "tv search", "show search", "tv show"}:
             flow = {"mode": "tv", "stage": "await_filter_choice", "season": None, "episode": None}
             self._set_flow(user_id, flow)
-            await self._render_tv_ui(user_id, msg, flow, self._tv_filter_choice_text(), reply_markup=self._tv_filter_choice_keyboard())
+            await self._render_tv_ui(
+                user_id, msg, flow, self._tv_filter_choice_text(), reply_markup=self._tv_filter_choice_keyboard()
+            )
             return
 
         if low.startswith("movie "):
@@ -4757,25 +3713,7 @@ class BotApp:
         await self._reply_patchy_chat(msg, user_id, text)
 
     async def cmd_show(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self.is_allowed(update):
-            await self.deny(update)
-            return
-        msg = update.effective_message
-        if not msg:
-            return
-        if len(context.args) < 1:
-            await msg.reply_text("Usage: /show <search_id> [page]", parse_mode=_PM)
-            return
-
-        sid = context.args[0].strip()
-        page = int(context.args[1]) if len(context.args) > 1 and context.args[1].isdigit() else 1
-        payload = self.store.get_search(update.effective_user.id, sid)
-        if not payload:
-            await msg.reply_text("<b>⚠️ Search Expired</b>\nThis search session has expired.\n<i>Run a new search to continue.</i>", parse_mode=_PM)
-            return
-        search_meta, rows = payload
-        text, markup = self._render_page(search_meta, rows, page)
-        await msg.reply_text(text, reply_markup=markup, disable_web_page_preview=True, parse_mode=_PM)
+        await commands_handler.cmd_show(self, update, context)
 
     @staticmethod
     def _is_direct_torrent_link(url: str) -> bool:
@@ -4817,7 +3755,9 @@ class BotApp:
         if d and self._is_direct_torrent_link(d):
             return d
 
-        raise RuntimeError("Result source is a webpage, not a direct torrent/magnet link. Pick a different result/source.")
+        raise RuntimeError(
+            "Result source is a webpage, not a direct torrent/magnet link. Pick a different result/source."
+        )
 
     @staticmethod
     def _extract_hash(row: dict[str, Any], url: str) -> str | None:
@@ -4869,7 +3809,7 @@ class BotApp:
 
         # Check 2: Interface must not be down.
         try:
-            with open(f"/sys/class/net/{iface}/operstate", "r", encoding="utf-8") as f:
+            with open(f"/sys/class/net/{iface}/operstate", encoding="utf-8") as f:
                 state = f.read().strip().lower()
         except Exception:
             state = "unknown"
@@ -4880,7 +3820,9 @@ class BotApp:
         try:
             ip_result = subprocess.run(
                 ["ip", "-4", "addr", "show", "dev", iface],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
             if ip_result.returncode != 0 or "inet " not in (ip_result.stdout or ""):
                 return False, f"VPN interface {iface} has no IPv4 address"
@@ -4961,413 +3903,55 @@ class BotApp:
         }
 
     async def cmd_add(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self.is_allowed(update):
-            await self.deny(update)
-            return
-        msg = update.effective_message
-        if not msg:
-            return
-
-        if len(context.args) < 2:
-            await msg.reply_text("Usage: /add <search_id> <index> <movies|tv>", parse_mode=_PM)
-            return
-
-        sid = context.args[0].strip()
-        if not context.args[1].isdigit():
-            await msg.reply_text("Index must be numeric.", parse_mode=_PM)
-            return
-
-        idx = int(context.args[1])
-        payload = self.store.get_search(update.effective_user.id, sid)
-        if not payload:
-            await msg.reply_text("<b>⚠️ Search Expired</b>\nThis search session has expired.\n<i>Run a new search to continue.</i>", parse_mode=_PM)
-            return
-        choice = self._normalize_media_choice(context.args[2]) if len(context.args) >= 3 else None
-        if choice is None:
-            await msg.reply_text(f"Select library for result #{idx}:", reply_markup=self._media_picker_keyboard(sid, idx), parse_mode=_PM)
-            return
-
-        pending_msg = await msg.reply_text(f"⏳ Adding result #{idx} to {choice.title()}…", parse_mode=_PM)
-        try:
-            out = await self._do_add(update.effective_user.id, sid, idx, choice)
-            await pending_msg.edit_text(out["summary"], parse_mode=_PM)
-
-            if out.get("hash"):
-                tracker_msg = await msg.reply_text("<b>📡 Live Monitor Attached</b>\n<i>Tracking download progress…</i>", reply_markup=self._stop_download_keyboard(out["hash"]), parse_mode=_PM)
-                self._start_progress_tracker(update.effective_user.id, out["hash"], tracker_msg, out["name"])
-            else:
-                self._start_pending_progress_tracker(update.effective_user.id, out["name"], out["category"], msg)
-                await msg.reply_text("⏳ Waiting for qBittorrent to assign hash… live monitor will auto-attach.", parse_mode=_PM)
-            await msg.reply_text("What's next?", reply_markup=self._command_center_keyboard(), parse_mode=_PM)
-        except Exception as e:
-            await pending_msg.edit_text(f"Add failed: {_h(str(e))}", parse_mode=_PM)
+        await commands_handler.cmd_add(self, update, context)
 
     async def cmd_categories(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self.is_allowed(update):
-            await self.deny(update)
-            return
-        msg = update.effective_message
-        if not msg:
-            return
-        try:
-            await self._send_categories(msg)
-        except Exception as e:
-            await msg.reply_text(f"Failed to read categories: {_h(str(e))}", parse_mode=_PM)
+        await commands_handler.cmd_categories(self, update, context)
 
     async def cmd_mkcat(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self.is_allowed(update):
-            await self.deny(update)
-            return
-        msg = update.effective_message
-        if not msg:
-            return
-        if len(context.args) < 1:
-            await msg.reply_text("Usage: /mkcat <name> [savepath]", parse_mode=_PM)
-            return
-        name = context.args[0].strip()
-        save = context.args[1].strip() if len(context.args) > 1 else None
-        try:
-            resp = await asyncio.to_thread(self.qbt.create_category, name, save)
-            await msg.reply_text(f"Category ready: {_h(name)}\nqBittorrent: {_h(str(resp))}", parse_mode=_PM)
-        except Exception as e:
-            await msg.reply_text(f"Failed to create category: {_h(str(e))}", parse_mode=_PM)
+        await commands_handler.cmd_mkcat(self, update, context)
 
     async def cmd_setminseeds(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self.is_allowed(update):
-            await self.deny(update)
-            return
-        msg = update.effective_message
-        if not msg:
-            return
-        if len(context.args) != 1 or not context.args[0].isdigit():
-            await msg.reply_text("Usage: /setminseeds <number>", parse_mode=_PM)
-            return
-        value = int(context.args[0])
-        self.store.set_defaults(update.effective_user.id, self.cfg, default_min_seeds=value)
-        await msg.reply_text(f"Default minimum seeds set to {value}", parse_mode=_PM)
+        await commands_handler.cmd_setminseeds(self, update, context)
 
     async def cmd_setlimit(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self.is_allowed(update):
-            await self.deny(update)
-            return
-        msg = update.effective_message
-        if not msg:
-            return
-        if len(context.args) != 1 or not context.args[0].isdigit():
-            await msg.reply_text("Usage: /setlimit <1-50>", parse_mode=_PM)
-            return
-        value = max(1, min(50, int(context.args[0])))
-        self.store.set_defaults(update.effective_user.id, self.cfg, default_limit=value)
-        await msg.reply_text(f"Default result limit set to {value}", parse_mode=_PM)
+        await commands_handler.cmd_setlimit(self, update, context)
 
     async def cmd_profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self.is_allowed(update):
-            await self.deny(update)
-            return
-        msg = update.effective_message
-        if not msg:
-            return
-        d = self.store.get_defaults(update.effective_user.id, self.cfg)
-        ok, reason = await asyncio.to_thread(self._storage_status)
-        transport_ok, transport_reason = await asyncio.to_thread(self._qbt_transport_status)
-        vpn_ok, vpn_reason = await asyncio.to_thread(self._vpn_ready_for_download)
-        plex_storage_usage = await asyncio.to_thread(self._plex_storage_display)
-        lines = [
-            "<b>⚙️ Current Profile</b>",
-            "━━━━━━━━━━━━━━━━━━━━",
-            f"• min_seeds: <code>{d['default_min_seeds']}</code>",
-            f"• sort/order: <code>{d['default_sort']} {d['default_order']}</code>",
-            f"• limit: <code>{d['default_limit']}</code>",
-            f"• quality default: <code>{self.cfg.default_min_quality}p+</code>",
-            f"• movies → <code>{_h(self.cfg.movies_category)}</code> @ <code>{_h(self.cfg.movies_path)}</code>",
-            f"• tv → <code>{_h(self.cfg.tv_category)}</code> @ <code>{_h(self.cfg.tv_path)}</code>",
-            f"• storage status: <b>{'ready' if ok else 'not ready'}</b> (<code>{_h(reason)}</code>)",
-            f"• qB transport: <b>{'ready' if transport_ok else 'blocked'}</b> (<code>{_h(transport_reason)}</code>)",
-            f"• plex storage: {plex_storage_usage}",
-            f"• vpn gate for downloads: <b>{'ready' if vpn_ok else 'blocked'}</b> (<code>{_h(vpn_reason)}</code>)",
-        ]
-        await msg.reply_text("\n".join(lines), parse_mode=_PM)
+        await commands_handler.cmd_profile(self, update, context)
 
     async def cmd_active(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self.is_allowed(update):
-            await self.deny(update)
-            return
-        msg = update.effective_message
-        if not msg:
-            return
-        n = 10
-        if context.args and context.args[0].isdigit():
-            n = max(1, min(30, int(context.args[0])))
-        try:
-            await self._send_active(msg, n=n, user_id=update.effective_user.id if update.effective_user else None)
-        except Exception as e:
-            await msg.reply_text(f"<b>⚠️ qBittorrent Error</b>\n<i>{_h(str(e))}</i>", parse_mode=_PM)
+        await commands_handler.cmd_active(self, update, context)
 
     async def cmd_plugins(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self.is_allowed(update):
-            await self.deny(update)
-            return
-        msg = update.effective_message
-        if not msg:
-            return
-        try:
-            await self._send_plugins(msg)
-        except Exception as e:
-            await msg.reply_text(f"Failed to list plugins: {_h(str(e))}", parse_mode=_PM)
+        await commands_handler.cmd_plugins(self, update, context)
 
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self.is_allowed(update):
-            await self.deny(update)
-            return
-        msg = update.effective_message
-        if not msg:
-            return
-        await msg.reply_text(self._help_text(), reply_markup=self._command_center_keyboard(), disable_web_page_preview=True, parse_mode=_PM)
+        await commands_handler.cmd_help(self, update, context)
 
     async def _cmd_text_fallback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        msg = update.effective_message
-        if not msg or not msg.text:
-            return
-        raw = msg.text.strip().lower()
-        LOG.info("Handling text fallback command raw=%s chat=%s", raw, getattr(update.effective_chat, "id", None))
-        if raw.startswith("/start"):
-            await self.cmd_start(update, context)
-            return
-        if raw.startswith("/help"):
-            await self.cmd_help(update, context)
-            return
+        await commands_handler.cmd_text_fallback(self, update, context)
 
     def _health_report(self) -> tuple[str, bool]:
-        hard_failures: list[str] = []
-        warnings: list[str] = []
-        lines: list[str] = []
-
-        try:
-            routing_ok, routing_reason = self._ensure_media_categories()
-        except Exception as e:
-            routing_ok, routing_reason = False, str(e)
-        if not routing_ok:
-            hard_failures.append(f"routing/storage not ready ({routing_reason})")
-        lines.append(f"routing/storage: {'ready' if routing_ok else 'blocked'} ({routing_reason})")
-
-        try:
-            transport_ok, transport_reason = self._qbt_transport_status()
-        except Exception as e:
-            transport_ok, transport_reason = False, str(e)
-        if not transport_ok:
-            hard_failures.append(f"qBittorrent transport not ready ({transport_reason})")
-        lines.append(f"qBittorrent transport: {'ready' if transport_ok else 'blocked'} ({transport_reason})")
-
-        try:
-            plugins = self.qbt.list_search_plugins()
-            enabled_plugins = sum(1 for row in plugins if bool(row.get("enabled", True)))
-            lines.append(f"qBittorrent search: ready ({enabled_plugins} enabled plugins)")
-        except Exception as e:
-            hard_failures.append(f"qBittorrent search unavailable ({e})")
-            lines.append(f"qBittorrent search: blocked ({e})")
-
-        try:
-            vpn_ok, vpn_reason = self._vpn_ready_for_download()
-        except Exception as e:
-            vpn_ok, vpn_reason = False, str(e)
-        if not vpn_ok:
-            warnings.append(f"vpn gate not ready ({vpn_reason})")
-        lines.append(f"vpn gate: {'ready' if vpn_ok else 'blocked'} ({vpn_reason})")
-
-        if not self.cfg.allowed_user_ids:
-            warnings.append("allowlist is empty")
-        access_mode = "password" if self._requires_password() else "allowlist-only"
-        lines.append(
-            "access controls: "
-            f"{len(self.cfg.allowed_user_ids)} allowlisted user(s), "
-            f"groups {'allowed' if self.cfg.allow_group_chats else 'blocked'}, "
-            f"mode={access_mode}"
-        )
-
-        patchy_state = "disabled"
-        if self.cfg.patchy_chat_enabled:
-            patchy_state = "ready" if self.patchy_llm.ready() else "config missing"
-            if patchy_state != "ready":
-                warnings.append("Patchy chat is enabled but provider config is incomplete")
-        lines.append(f"Patchy chat: {patchy_state}")
-
-        movie_aliases = sorted(self._qbt_category_aliases(self.cfg.movies_category, self.cfg.movies_path))
-        tv_aliases = sorted(self._qbt_category_aliases(self.cfg.tv_category, self.cfg.tv_path))
-        if len(movie_aliases) > 1:
-            warnings.append(f"movie path has multiple qB categories mapped: {', '.join(movie_aliases)}")
-        if len(tv_aliases) > 1:
-            warnings.append(f"tv path has multiple qB categories mapped: {', '.join(tv_aliases)}")
-        lines.append(
-            "schedule metadata: "
-            f"TVMaze active, TMDb {'configured' if bool(self.cfg.tmdb_api_key) else 'not configured'}, "
-            f"Plex {'configured' if self.plex.ready() else 'not configured'}"
-        )
-        try:
-            runner_status = self.store.get_schedule_runner_status()
-            diagnostics = self.store.db_diagnostics()
-            due_count = self.store.count_due_schedule_tracks(now_ts())
-            metadata_health = dict(runner_status.get("metadata_source_health_json") or {})
-            inventory_health = dict(runner_status.get("inventory_source_health_json") or {})
-            lines.append(
-                "schedule runner: "
-                f"last success <code>{format_local_ts(int(runner_status.get('last_success_at') or 0)) if int(runner_status.get('last_success_at') or 0) > 0 else 'never'}</code>, "
-                f"overdue {due_count}, "
-                f"metadata {metadata_health.get('status') or 'unknown'}, "
-                f"inventory {inventory_health.get('status') or 'unknown'}"
-            )
-            lines.append(
-                "schedule storage: "
-                f"sqlite {diagnostics.get('sqlite_runtime')} | journal={diagnostics.get('journal_mode')} | busy_timeout={diagnostics.get('busy_timeout_ms')}ms"
-            )
-        except Exception as e:
-            warnings.append(f"schedule diagnostics unavailable ({e})")
-
-        overall_ok = not hard_failures
-        header = f"<b>{'✅ OK' if overall_ok else '⚠️ DEGRADED'}: Telegram qBittorrent Bot Health</b>"
-        lines.insert(0, header)
-        lines.insert(1, "━━━━━━━━━━━━━━━━━━━━")
-        if hard_failures:
-            lines.append("<b>Hard failures:</b> " + "; ".join(_h(f) for f in hard_failures))
-        if warnings:
-            lines.append("<i>Warnings: " + "; ".join(_h(w) for w in warnings) + "</i>")
-        return "\n".join(lines), overall_ok
+        return commands_handler.health_report(self._ctx)
 
     async def cmd_health(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self.is_allowed(update):
-            await self.deny(update)
-            return
-        msg = update.effective_message
-        if msg:
-            report, _overall_ok = await asyncio.to_thread(self._health_report)
-            await msg.reply_text(report, parse_mode=_PM)
+        await commands_handler.cmd_health(self, update, context)
 
     def _speed_report(self) -> str:
-        info = self.qbt.get_transfer_info()
-        prefs = self.qbt.get_preferences()
-
-        dl_speed = int(info.get("dl_info_speed", 0) or 0)
-        ul_speed = int(info.get("up_info_speed", 0) or 0)
-        dl_total = int(info.get("dl_info_data", 0) or 0)
-        ul_total = int(info.get("up_info_data", 0) or 0)
-        dht_nodes = int(info.get("dht_nodes", 0) or 0)
-        connection_status = str(info.get("connection_status") or "unknown")
-
-        dl_limit = int(prefs.get("dl_limit", 0) or 0)
-        ul_limit = int(prefs.get("up_limit", 0) or 0)
-        max_dl = int(prefs.get("max_active_downloads", 0) or 0)
-        max_torrents = int(prefs.get("max_active_torrents", 0) or 0)
-        listen_port = int(prefs.get("listen_port", 0) or 0)
-
-        dl_limit_txt = human_size(dl_limit) + "/s" if dl_limit > 0 else "unlimited"
-        ul_limit_txt = human_size(ul_limit) + "/s" if ul_limit > 0 else "unlimited"
-
-        # Count active downloads
-        try:
-            active = self.qbt.list_active(limit=50)
-            downloading = sum(1 for t in active if not self._is_complete_torrent(t))
-            seeding = sum(1 for t in active if self._is_complete_torrent(t))
-        except Exception:
-            downloading = -1
-            seeding = -1
-
-        connectable = "yes" if connection_status == "connected" else "no" if connection_status == "disconnected" else connection_status
-
-        lines = [
-            "<b>⚡ Speed Dashboard</b>",
-            "━━━━━━━━━━━━━━━━━━━━",
-            f"↓ Download: <code>{human_size(dl_speed)}/s</code> (limit: <code>{dl_limit_txt}</code>)",
-            f"↑ Upload: <code>{human_size(ul_speed)}/s</code> (limit: <code>{ul_limit_txt}</code>)",
-            f"📊 Session: ↓ <code>{human_size(dl_total)}</code> / ↑ <code>{human_size(ul_total)}</code>",
-            "",
-            f"🔌 Status: <b>{_h(connection_status)}</b>",
-            f"🌐 DHT nodes: <code>{dht_nodes}</code>",
-            f"🚪 Port <code>{listen_port}</code>: {'connectable' if connectable == 'yes' else _h(connectable)}",
-            "",
-            f"📥 Active downloads: <b>{downloading if downloading >= 0 else '?'}</b>",
-            f"📤 Active seeding: <b>{seeding if seeding >= 0 else '?'}</b>",
-            f"⚙️ Max active DL: <code>{max_dl}</code> / Max active torrents: <code>{max_torrents}</code>",
-        ]
-
-        if ul_limit == 0:
-            lines.extend(["", "<i>⚠️ Upload is unlimited — this can slow downloads. Set a limit in qBT WebUI → Options → Speed.</i>"])
-
-        return "\n".join(lines)
+        return commands_handler.speed_report(self._ctx)
 
     async def cmd_speed(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self.is_allowed(update):
-            await self.deny(update)
-            return
-        msg = update.effective_message
-        if msg:
-            try:
-                report = await asyncio.to_thread(self._speed_report)
-                await msg.reply_text(report, parse_mode=_PM)
-            except Exception as e:
-                await msg.reply_text(f"Speed check failed: {_h(str(e))}", parse_mode=_PM)
+        await commands_handler.cmd_speed(self, update, context)
 
     async def cmd_unlock(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        msg = update.effective_message
-        if not msg:
-            return
-
-        if not self._is_allowlisted(update):
-            await self.deny(update)
-            return
-
-        if self._requires_password() is False:
-            await msg.reply_text("Password access control is disabled (allowlist-only mode).", parse_mode=_PM)
-            return
-
-        if len(context.args) < 1:
-            await msg.reply_text("Usage: /unlock <password>", parse_mode=_PM)
-            return
-
-        uid = update.effective_user.id
-        if self.store.is_auth_locked(uid):
-            await msg.reply_text("🔒 Too many failed attempts. Try again in a few minutes.", parse_mode=_PM)
-            return
-
-        provided = " ".join(context.args).strip()
-        if not secrets.compare_digest(provided, self.cfg.access_password):
-            locked = self.store.record_auth_failure(uid)
-            if locked:
-                await msg.reply_text("🔒 Too many failed attempts. Locked for 15 minutes.", parse_mode=_PM)
-            else:
-                await msg.reply_text("<b>❌ Incorrect Password</b>\n<i>Try again or check your configuration.</i>", parse_mode=_PM)
-            return
-
-        self.store.clear_auth_failures(uid)
-        self.store.unlock_user(uid, self.cfg.access_session_ttl_s)
-        # Delete the /unlock message containing the password from chat history
-        try:
-            await msg.delete()
-        except Exception:
-            pass
-        await self._send_command_center(msg)
+        await commands_handler.cmd_unlock(self, update, context)
 
     async def cmd_logout(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._is_allowlisted(update):
-            await self.deny(update)
-            return
-        msg = update.effective_message
-        if not msg:
-            return
-        uid = update.effective_user.id
-        self.store.lock_user(uid)
-        await msg.reply_text("<b>🔒 Session Locked</b>\n<i>Use /unlock &lt;password&gt; when needed.</i>", parse_mode=_PM)
+        await commands_handler.cmd_logout(self, update, context)
 
     async def on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-        err = context.error
-        if isinstance(err, Conflict):
-            LOG.warning("Telegram polling conflict detected: another getUpdates consumer was active")
-            return
-        if isinstance(err, NetworkError):
-            LOG.warning("Transient Telegram network error: %s", err)
-            return
-        if isinstance(err, TelegramError):
-            LOG.warning("Telegram API error: %s", err)
-            return
-        LOG.error("Unhandled bot error: %s", err, exc_info=exception_tuple(err))
+        await commands_handler.on_error(update, context)
 
     # ---------- Callbacks ----------
 
@@ -5384,307 +3968,271 @@ class BotApp:
         data = q.data or ""
         user_id = update.effective_user.id
 
-        # Clean up stray notification messages (download complete, schedule alerts, etc.)
-        # so the chat only shows the bubble the user is interacting with.
         await self._cleanup_ephemeral_messages(user_id, q.get_bot())
 
+        # Stop Command Center refresh when navigating away (nav:home handler restarts it)
+        if data != "nav:home":
+            self._stop_command_center_refresh(user_id)
+
         try:
-            if data == "nav:home":
-                self._clear_flow(user_id)
-                # Cancel pending trackers so they don't create monitor messages after cleanup
-                self._cancel_pending_trackers_for_user(user_id)
-                # Recover CC location from DB if lost (e.g. bot restart).
-                if not self.user_nav_ui.get(user_id):
-                    db_cc = await asyncio.to_thread(self.store.get_command_center, user_id)
-                    if db_cc:
-                        self.user_nav_ui[user_id] = db_cc
-                has_remembered = bool(self.user_nav_ui.get(user_id))
-                await self._render_command_center(q.message, user_id=user_id, use_remembered_ui=has_remembered)
-                return
-            else:
-                # User navigated away from Command Center — stop refresh loop
-                self._stop_command_center_refresh(user_id)
+            await self._dispatcher.dispatch(data, q=q, user_id=user_id)
+        except Exception as e:
+            await self._render_nav_ui(
+                user_id,
+                q.message,
+                f"Action failed: {_h(str(e))}",
+                reply_markup=self._home_only_keyboard(),
+                current_ui_message=q.message,
+            )
 
-            if data.startswith("a:"):
-                _, sid, idx_raw = data.split(":", 2)
-                idx = int(idx_raw)
-                payload = self.store.get_search(user_id, sid)
-                if not payload:
-                    await q.answer("Search expired", show_alert=True)
-                    return
-                search_meta, _ = payload
-                media_hint = str((search_meta.get("options") or {}).get("media_hint") or "any")
-                # Auto-route to the correct library when search type is known
-                if media_hint in ("tv", "movies"):
-                    # Synthesize a d: callback to skip the library picker
-                    data = f"d:{sid}:{idx_raw}:{media_hint}"
-                else:
-                    result = self.store.get_result(user_id, sid, idx)
-                    page = max(1, math.ceil(max(1, idx) / self.cfg.page_size))
-                    result_name = _h(str((result or {}).get("name") or f"Result #{idx}"))
-                    text = (
-                        f"<b>⬇️ Add Result #{idx}</b>\n"
-                        f"<code>{result_name}</code>\n\n"
-                        "Choose the destination library:"
-                    )
-                    await self._render_nav_ui(
-                        user_id,
-                        q.message,
-                        text,
-                        reply_markup=self._media_picker_keyboard(sid, idx, back_data=f"p:{sid}:{page}"),
-                        current_ui_message=q.message,
-                    )
-                    return
+    # ---------- Callback handler methods ----------
 
-            if data.startswith("d:"):
-                _, sid, idx_raw, choice = data.split(":", 3)
-                idx = int(idx_raw)
-                page = max(1, math.ceil(max(1, idx) / self.cfg.page_size))
-                choice_label = "Movies" if self._normalize_media_choice(choice) == "movies" else "TV"
-                rendered = await self._render_nav_ui(
+    async def _on_cb_nav_home(self, *, data: str, q: Any, user_id: int) -> None:
+        self._clear_flow(user_id)
+        # Cancel pending trackers so they don't create monitor messages after cleanup
+        self._cancel_pending_trackers_for_user(user_id)
+        # Recover CC location from DB if lost (e.g. bot restart).
+        if not self.user_nav_ui.get(user_id):
+            db_cc = await asyncio.to_thread(self.store.get_command_center, user_id)
+            if db_cc:
+                self.user_nav_ui[user_id] = db_cc
+        has_remembered = bool(self.user_nav_ui.get(user_id))
+        await self._render_command_center(q.message, user_id=user_id, use_remembered_ui=has_remembered)
+
+    async def _on_cb_add(self, *, data: str, q: Any, user_id: int) -> None:
+        _, sid, idx_raw = data.split(":", 2)
+        idx = int(idx_raw)
+        payload = self.store.get_search(user_id, sid)
+        if not payload:
+            await q.answer("Search expired", show_alert=True)
+            return
+        search_meta, _ = payload
+        media_hint = str((search_meta.get("options") or {}).get("media_hint") or "any")
+        # Auto-route to the correct library when search type is known
+        if media_hint in ("tv", "movies"):
+            # Synthesize a d: callback to skip the library picker and fall through to download
+            await self._on_cb_download(data=f"d:{sid}:{idx_raw}:{media_hint}", q=q, user_id=user_id)
+        else:
+            result = self.store.get_result(user_id, sid, idx)
+            page = max(1, math.ceil(max(1, idx) / self.cfg.page_size))
+            result_name = _h(str((result or {}).get("name") or f"Result #{idx}"))
+            text = f"<b>⬇️ Add Result #{idx}</b>\n<code>{result_name}</code>\n\nChoose the destination library:"
+            await self._render_nav_ui(
+                user_id,
+                q.message,
+                text,
+                reply_markup=self._media_picker_keyboard(sid, idx, back_data=f"p:{sid}:{page}"),
+                current_ui_message=q.message,
+            )
+
+    async def _on_cb_download(self, *, data: str, q: Any, user_id: int) -> None:
+        _, sid, idx_raw, choice = data.split(":", 3)
+        idx = int(idx_raw)
+        page = max(1, math.ceil(max(1, idx) / self.cfg.page_size))
+        choice_label = "Movies" if self._normalize_media_choice(choice) == "movies" else "TV"
+        rendered = await self._render_nav_ui(
+            user_id,
+            q.message,
+            f"⏳ Adding result #{idx} to {choice_label}…",
+            reply_markup=InlineKeyboardMarkup(self._nav_footer(back_data=f"p:{sid}:{page}")),
+            current_ui_message=q.message,
+        )
+        try:
+            out = await self._do_add(user_id, sid, idx, choice)
+        except Exception as e:
+            await self._render_nav_ui(
+                user_id,
+                rendered,
+                f"<b>⚠️ Add Failed</b>\n<i>{_h(str(e))}</i>",
+                reply_markup=InlineKeyboardMarkup(self._nav_footer(back_data=f"p:{sid}:{page}")),
+                current_ui_message=rendered,
+            )
+            return
+        summary = str(out["summary"])
+        if not out.get("hash"):
+            summary += "\n\n<i>Waiting for qBittorrent to assign a hash. A live monitor will attach automatically.</i>"
+        rendered = await self._render_nav_ui(
+            user_id,
+            rendered,
+            summary,
+            reply_markup=None,
+            current_ui_message=rendered,
+        )
+
+        if out.get("hash"):
+            tracker_msg = await rendered.reply_text(
+                "<b>📡 Live Monitor Attached</b>\n<i>Tracking download progress…</i>",
+                reply_markup=self._stop_download_keyboard(out["hash"]),
+                parse_mode=_PM,
+            )
+            self._start_progress_tracker(user_id, out["hash"], tracker_msg, out["name"])
+        else:
+            self._start_pending_progress_tracker(user_id, out["name"], out["category"], rendered)
+
+    async def _on_cb_page(self, *, data: str, q: Any, user_id: int) -> None:
+        _, sid, page_raw = data.split(":", 2)
+        page = int(page_raw)
+        payload = self.store.get_search(user_id, sid)
+        if not payload:
+            await q.answer("Search expired", show_alert=True)
+            return
+        search_meta, rows = payload
+        text, markup = self._render_page(search_meta, rows, page)
+        await self._render_nav_ui(
+            user_id,
+            q.message,
+            text,
+            reply_markup=markup,
+            disable_web_page_preview=True,
+            current_ui_message=q.message,
+        )
+
+    async def _on_cb_remove(self, *, data: str, q: Any, user_id: int) -> None:
+        if data == "rm:cancel":
+            self._clear_flow(user_id)
+            await self._render_command_center(q.message, user_id=user_id)
+            return
+
+        if data == "rm:browse":
+            await self._open_remove_browse_root(user_id, q.message, current_ui_message=q.message)
+            return
+
+        if data.startswith("rm:browsecat:"):
+            category = data.split(":", 2)[2]
+            candidates = await asyncio.to_thread(self._remove_library_items, category)
+            if category == "tv":
+                candidates = self._remove_group_tv_items(candidates)
+            label = "Movies" if category == "movies" else "Shows"
+            if not candidates:
+                await self._render_remove_ui(
                     user_id,
                     q.message,
-                    f"⏳ Adding result #{idx} to {choice_label}…",
-                    reply_markup=InlineKeyboardMarkup(self._nav_footer(back_data=f"p:{sid}:{page}")),
+                    self._get_flow(user_id) or {"mode": "remove", "selected_items": []},
+                    f"No {label.lower()} were found in the configured library path.",
+                    reply_markup=self._remove_browse_root_keyboard(
+                        len(await asyncio.to_thread(self._remove_library_items, "movies")),
+                        len(await asyncio.to_thread(self._remove_library_items, "tv")),
+                        self._remove_selection_count(self._get_flow(user_id) or {}),
+                    ),
                     current_ui_message=q.message,
                 )
-                try:
-                    out = await self._do_add(user_id, sid, idx, choice)
-                except Exception as e:
-                    await self._render_nav_ui(
-                        user_id,
-                        rendered,
-                        f"<b>⚠️ Add Failed</b>\n<i>{_h(str(e))}</i>",
-                        reply_markup=InlineKeyboardMarkup(self._nav_footer(back_data=f"p:{sid}:{page}")),
-                        current_ui_message=rendered,
-                    )
-                    return
-                summary = str(out["summary"])
-                if not out.get("hash"):
-                    summary += "\n\n<i>Waiting for qBittorrent to assign a hash. A live monitor will attach automatically.</i>"
-                rendered = await self._render_nav_ui(
+                return
+            flow = self._get_flow(user_id) or {"mode": "remove", "selected_items": []}
+            flow["mode"] = "remove"
+            flow["stage"] = "choose_item"
+            flow["query"] = f"Browse {label}"
+            flow["candidates"] = candidates
+            flow["browse_category"] = category
+            self._set_flow(user_id, flow)
+            selected_paths = self._remove_selected_paths(flow)
+            await self._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                self._remove_list_text(
+                    f"📚 {label} in Plex/library",
+                    candidates,
+                    0,
+                    hint="Tap items to toggle them, or page through the library.",
+                    selected_paths=selected_paths,
+                ),
+                reply_markup=self._remove_paginated_keyboard(
+                    candidates,
+                    0,
+                    item_prefix="rm:pick",
+                    nav_prefix="rm:bpage",
+                    back_callback="rm:browse",
+                    selected_paths=selected_paths,
+                ),
+                current_ui_message=q.message,
+            )
+            return
+
+        if data.startswith("rm:bpage:"):
+            flow = self._get_flow(user_id)
+            if not flow or flow.get("mode") != "remove":
+                await self._render_remove_ui(
                     user_id,
-                    rendered,
-                    summary,
+                    q.message,
+                    {"mode": "remove", "selected_items": []},
+                    "That remove flow has expired. Start /remove again.",
                     reply_markup=None,
-                    current_ui_message=rendered,
-                )
-
-                if out.get("hash"):
-                    tracker_msg = await rendered.reply_text("<b>📡 Live Monitor Attached</b>\n<i>Tracking download progress…</i>", reply_markup=self._stop_download_keyboard(out["hash"]), parse_mode=_PM)
-                    self._start_progress_tracker(user_id, out["hash"], tracker_msg, out["name"])
-                else:
-                    self._start_pending_progress_tracker(user_id, out["name"], out["category"], rendered)
-                return
-
-            if data.startswith("p:"):
-                _, sid, page_raw = data.split(":", 2)
-                page = int(page_raw)
-                payload = self.store.get_search(user_id, sid)
-                if not payload:
-                    await q.answer("Search expired", show_alert=True)
-                    return
-                search_meta, rows = payload
-                text, markup = self._render_page(search_meta, rows, page)
-                await self._render_nav_ui(
-                    user_id,
-                    q.message,
-                    text,
-                    reply_markup=markup,
-                    disable_web_page_preview=True,
                     current_ui_message=q.message,
                 )
                 return
-
-            if data == "rm:cancel":
-                self._clear_flow(user_id)
-                await self._render_command_center(q.message, user_id=user_id)
-                return
-
-            if data == "rm:browse":
-                await self._open_remove_browse_root(user_id, q.message, current_ui_message=q.message)
-                return
-
-            if data.startswith("rm:browsecat:"):
-                category = data.split(":", 2)[2]
-                candidates = await asyncio.to_thread(self._remove_library_items, category)
-                if category == "tv":
-                    candidates = self._remove_group_tv_items(candidates)
-                label = "Movies" if category == "movies" else "Shows"
-                if not candidates:
-                    await self._render_remove_ui(
-                        user_id,
-                        q.message,
-                        self._get_flow(user_id) or {"mode": "remove", "selected_items": []},
-                        f"No {label.lower()} were found in the configured library path.",
-                        reply_markup=self._remove_browse_root_keyboard(len(await asyncio.to_thread(self._remove_library_items, "movies")), len(await asyncio.to_thread(self._remove_library_items, "tv")), self._remove_selection_count(self._get_flow(user_id) or {})),
-                        current_ui_message=q.message,
-                    )
-                    return
-                flow = self._get_flow(user_id) or {"mode": "remove", "selected_items": []}
-                flow["mode"] = "remove"
-                flow["stage"] = "choose_item"
-                flow["query"] = f"Browse {label}"
-                flow["candidates"] = candidates
-                flow["browse_category"] = category
-                self._set_flow(user_id, flow)
-                selected_paths = self._remove_selected_paths(flow)
+            candidates = list(flow.get("candidates") or [])
+            if not candidates:
                 await self._render_remove_ui(
                     user_id,
                     q.message,
                     flow,
-                    self._remove_list_text(
-                        f"📚 {label} in Plex/library",
-                        candidates,
-                        0,
-                        hint="Tap items to toggle them, or page through the library.",
-                        selected_paths=selected_paths,
-                    ),
-                    reply_markup=self._remove_paginated_keyboard(
-                        candidates,
-                        0,
-                        item_prefix="rm:pick",
-                        nav_prefix="rm:bpage",
-                        back_callback="rm:browse",
-                        selected_paths=selected_paths,
-                    ),
+                    "That library browse expired. Start /remove again.",
+                    reply_markup=None,
                     current_ui_message=q.message,
                 )
                 return
+            page = int(data.split(":", 2)[2])
+            label = "Movies" if str(flow.get("browse_category") or "") == "movies" else "Shows"
+            selected_paths = self._remove_selected_paths(flow)
+            await self._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                self._remove_list_text(
+                    f"📚 {label} in Plex/library",
+                    candidates,
+                    page,
+                    hint="Tap items to toggle them, or page through the library.",
+                    selected_paths=selected_paths,
+                ),
+                reply_markup=self._remove_paginated_keyboard(
+                    candidates,
+                    page,
+                    item_prefix="rm:pick",
+                    nav_prefix="rm:bpage",
+                    back_callback="rm:browse",
+                    selected_paths=selected_paths,
+                ),
+                current_ui_message=q.message,
+            )
+            return
 
-            if data.startswith("rm:bpage:"):
-                flow = self._get_flow(user_id)
-                if not flow or flow.get("mode") != "remove":
-                    await self._render_remove_ui(
-                        user_id,
-                        q.message,
-                        {"mode": "remove", "selected_items": []},
-                        "That remove flow has expired. Start /remove again.",
-                        reply_markup=None,
-                        current_ui_message=q.message,
-                    )
-                    return
-                candidates = list(flow.get("candidates") or [])
-                if not candidates:
-                    await self._render_remove_ui(user_id, q.message, flow, "That library browse expired. Start /remove again.", reply_markup=None, current_ui_message=q.message)
-                    return
-                page = int(data.split(":", 2)[2])
-                label = "Movies" if str(flow.get("browse_category") or "") == "movies" else "Shows"
-                selected_paths = self._remove_selected_paths(flow)
+        if data.startswith("rm:pick:"):
+            flow = self._get_flow(user_id)
+            if not flow or flow.get("mode") != "remove":
+                await self._render_remove_ui(
+                    user_id,
+                    q.message,
+                    {"mode": "remove", "selected_items": []},
+                    "That remove flow has expired. Start /remove again.",
+                    reply_markup=None,
+                    current_ui_message=q.message,
+                )
+                return
+            candidates = list(flow.get("candidates") or [])
+            idx = int(data.split(":", 2)[2])
+            if idx < 0 or idx >= len(candidates):
                 await self._render_remove_ui(
                     user_id,
                     q.message,
                     flow,
-                    self._remove_list_text(
-                        f"📚 {label} in Plex/library",
-                        candidates,
-                        page,
-                        hint="Tap items to toggle them, or page through the library.",
-                        selected_paths=selected_paths,
-                    ),
-                    reply_markup=self._remove_paginated_keyboard(
-                        candidates,
-                        page,
-                        item_prefix="rm:pick",
-                        nav_prefix="rm:bpage",
-                        back_callback="rm:browse",
-                        selected_paths=selected_paths,
-                    ),
+                    "That item is no longer available. Start /remove again.",
+                    reply_markup=None,
                     current_ui_message=q.message,
                 )
                 return
-
-            if data.startswith("rm:pick:"):
-                flow = self._get_flow(user_id)
-                if not flow or flow.get("mode") != "remove":
-                    await self._render_remove_ui(
-                        user_id,
-                        q.message,
-                        {"mode": "remove", "selected_items": []},
-                        "That remove flow has expired. Start /remove again.",
-                        reply_markup=None,
-                        current_ui_message=q.message,
-                    )
-                    return
-                candidates = list(flow.get("candidates") or [])
-                idx = int(data.split(":", 2)[2])
-                if idx < 0 or idx >= len(candidates):
-                    await self._render_remove_ui(user_id, q.message, flow, "That item is no longer available. Start /remove again.", reply_markup=None, current_ui_message=q.message)
-                    return
-                selected = self._remove_enrich_candidate(dict(candidates[idx]))
-                flow["selected"] = selected
-                flow.pop("season_items", None)
-                flow.pop("episode_items", None)
-                if str(selected.get("root_key") or "") == "tv" and str(selected.get("remove_kind") or "") == "show" and bool(selected.get("is_dir")):
-                    series_selected = self._remove_group_any_selected(flow, selected)
-                    flow["stage"] = "show_actions"
-                    self._set_flow(user_id, flow)
-                    await self._render_remove_ui(
-                        user_id,
-                        q.message,
-                        flow,
-                        self._remove_show_actions_text(selected, series_selected),
-                        reply_markup=self._remove_show_action_keyboard(series_selected, self._remove_selection_count(flow)),
-                        current_ui_message=q.message,
-                    )
-                    return
-                self._remove_toggle_group(flow, selected)
-                flow["stage"] = "choose_item"
-                self._set_flow(user_id, flow)
-                selected_paths = self._remove_selected_paths(flow)
-                if flow.get("browse_category"):
-                    label = "Movies" if str(flow.get("browse_category") or "") == "movies" else "Shows"
-                    await self._render_remove_ui(
-                        user_id,
-                        q.message,
-                        flow,
-                        self._remove_list_text(
-                            f"📚 {label} in Plex/library",
-                            candidates,
-                            0,
-                            hint="Tap items to toggle them, or page through the library.",
-                            selected_paths=selected_paths,
-                        ),
-                        reply_markup=self._remove_paginated_keyboard(
-                            candidates,
-                            0,
-                            item_prefix="rm:pick",
-                            nav_prefix="rm:bpage",
-                            back_callback="rm:browse",
-                            selected_paths=selected_paths,
-                        ),
-                        current_ui_message=q.message,
-                    )
-                else:
-                    await self._render_remove_ui(
-                        user_id,
-                        q.message,
-                        flow,
-                        self._remove_candidates_text(str(flow.get("query") or "Search"), candidates, selected_paths),
-                        reply_markup=self._remove_candidate_keyboard(candidates, selected_paths),
-                        current_ui_message=q.message,
-                    )
-                return
-
-            if data == "rm:series":
-                flow = self._get_flow(user_id)
-                if not flow or flow.get("mode") != "remove" or flow.get("stage") != "show_actions":
-                    await self._render_remove_ui(
-                        user_id,
-                        q.message,
-                        {"mode": "remove", "selected_items": []},
-                        "That remove flow has expired. Start /remove again.",
-                        reply_markup=None,
-                        current_ui_message=q.message,
-                    )
-                    return
-                selected = dict(flow.get("selected") or {})
-                if not selected:
-                    await self._render_remove_ui(user_id, q.message, flow, "That remove flow has expired. Start /remove again.", reply_markup=None, current_ui_message=q.message)
-                    return
-                self._remove_toggle_group(flow, selected)
-                self._set_flow(user_id, flow)
+            selected = self._remove_enrich_candidate(dict(candidates[idx]))
+            flow["selected"] = selected
+            flow.pop("season_items", None)
+            flow.pop("episode_items", None)
+            if (
+                str(selected.get("root_key") or "") == "tv"
+                and str(selected.get("remove_kind") or "") == "show"
+                and bool(selected.get("is_dir"))
+            ):
                 series_selected = self._remove_group_any_selected(flow, selected)
+                flow["stage"] = "show_actions"
+                self._set_flow(user_id, flow)
                 await self._render_remove_ui(
                     user_id,
                     q.message,
@@ -5694,380 +4242,213 @@ class BotApp:
                     current_ui_message=q.message,
                 )
                 return
-
-            if data == "rm:seasons":
-                flow = self._get_flow(user_id)
-                if not flow or flow.get("mode") != "remove" or flow.get("stage") != "show_actions":
-                    await self._render_remove_ui(
-                        user_id,
-                        q.message,
-                        {"mode": "remove", "selected_items": []},
-                        "That remove flow has expired. Start /remove again.",
-                        reply_markup=None,
-                        current_ui_message=q.message,
-                    )
-                    return
-                selected = dict(flow.get("selected") or {})
-                group_items = selected.get("group_items")
-                if group_items:
-                    season_items = await asyncio.to_thread(self._remove_show_group_children, group_items)
-                else:
-                    season_items = await asyncio.to_thread(self._remove_show_children, selected)
-                if not season_items:
-                    await self._render_remove_ui(user_id, q.message, flow, "No seasons or direct episode files were found inside that show folder.", reply_markup=self._remove_show_action_keyboard(self._remove_group_any_selected(flow, selected), self._remove_selection_count(flow)), current_ui_message=q.message)
-                    return
-                flow["stage"] = "browse_children"
-                flow["season_items"] = season_items
-                self._set_flow(user_id, flow)
-                selected_paths = self._remove_selected_paths(flow)
+            self._remove_toggle_group(flow, selected)
+            flow["stage"] = "choose_item"
+            self._set_flow(user_id, flow)
+            selected_paths = self._remove_selected_paths(flow)
+            if flow.get("browse_category"):
+                label = "Movies" if str(flow.get("browse_category") or "") == "movies" else "Shows"
                 await self._render_remove_ui(
                     user_id,
                     q.message,
                     flow,
                     self._remove_list_text(
-                        f"📂 {selected.get('name')} seasons / episodes",
-                        season_items,
+                        f"📚 {label} in Plex/library",
+                        candidates,
                         0,
-                        hint="Tap a season to inspect it, or toggle a direct episode file.",
+                        hint="Tap items to toggle them, or page through the library.",
                         selected_paths=selected_paths,
                     ),
                     reply_markup=self._remove_paginated_keyboard(
-                        season_items,
+                        candidates,
                         0,
-                        item_prefix="rm:child",
-                        nav_prefix="rm:cpage",
-                        back_callback="rm:back:show",
+                        item_prefix="rm:pick",
+                        nav_prefix="rm:bpage",
+                        back_callback="rm:browse",
                         selected_paths=selected_paths,
                     ),
                     current_ui_message=q.message,
                 )
-                return
-
-            if data.startswith("rm:cpage:"):
-                flow = self._get_flow(user_id)
-                if not flow or flow.get("mode") != "remove":
-                    await self._render_remove_ui(
-                        user_id,
-                        q.message,
-                        {"mode": "remove", "selected_items": []},
-                        "That remove flow has expired. Start /remove again.",
-                        reply_markup=None,
-                        current_ui_message=q.message,
-                    )
-                    return
-                season_items = list(flow.get("season_items") or [])
-                selected = dict(flow.get("selected") or {})
-                if not season_items or not selected:
-                    await self._render_remove_ui(user_id, q.message, flow, "That season browser expired. Start /remove again.", reply_markup=None, current_ui_message=q.message)
-                    return
-                page = int(data.split(":", 2)[2])
-                selected_paths = self._remove_selected_paths(flow)
+            else:
                 await self._render_remove_ui(
                     user_id,
                     q.message,
                     flow,
-                    self._remove_list_text(
-                        f"📂 {selected.get('name')} seasons / episodes",
-                        season_items,
-                        page,
-                        hint="Tap a season to inspect it, or toggle a direct episode file.",
-                        selected_paths=selected_paths,
-                    ),
-                    reply_markup=self._remove_paginated_keyboard(
-                        season_items,
-                        page,
-                        item_prefix="rm:child",
-                        nav_prefix="rm:cpage",
-                        back_callback="rm:back:show",
-                        selected_paths=selected_paths,
-                    ),
+                    self._remove_candidates_text(str(flow.get("query") or "Search"), candidates, selected_paths),
+                    reply_markup=self._remove_candidate_keyboard(candidates, selected_paths),
+                    current_ui_message=q.message,
+                )
+            return
+
+        if data == "rm:series":
+            flow = self._get_flow(user_id)
+            if not flow or flow.get("mode") != "remove" or flow.get("stage") != "show_actions":
+                await self._render_remove_ui(
+                    user_id,
+                    q.message,
+                    {"mode": "remove", "selected_items": []},
+                    "That remove flow has expired. Start /remove again.",
+                    reply_markup=None,
                     current_ui_message=q.message,
                 )
                 return
-
-            if data.startswith("rm:child:"):
-                flow = self._get_flow(user_id)
-                if not flow or flow.get("mode") != "remove":
-                    await self._render_remove_ui(
-                        user_id,
-                        q.message,
-                        {"mode": "remove", "selected_items": []},
-                        "That remove flow has expired. Start /remove again.",
-                        reply_markup=None,
-                        current_ui_message=q.message,
-                    )
-                    return
-                season_items = list(flow.get("season_items") or [])
-                idx = int(data.split(":", 2)[2])
-                if idx < 0 or idx >= len(season_items):
-                    await self._render_remove_ui(user_id, q.message, flow, "That season/episode choice is no longer available. Start /remove again.", reply_markup=None, current_ui_message=q.message)
-                    return
-                selected_child = self._remove_enrich_candidate(dict(season_items[idx]))
-                flow["selected_child"] = selected_child
-                if str(selected_child.get("remove_kind") or "") == "season" and bool(selected_child.get("is_dir")):
-                    flow["stage"] = "season_actions"
-                    self._set_flow(user_id, flow)
-                    selected_paths = self._remove_selected_paths(flow)
-                    await self._render_remove_ui(
-                        user_id,
-                        q.message,
-                        flow,
-                        self._remove_season_actions_text(selected_child),
-                        reply_markup=self._remove_season_action_keyboard(
-                            self._remove_selected_path(selected_child) in selected_paths,
-                            len(selected_paths),
-                        ),
-                        current_ui_message=q.message,
-                    )
-                    return
-                self._remove_toggle_candidate(flow, selected_child)
-                flow["stage"] = "browse_children"
-                self._set_flow(user_id, flow)
-                selected_paths = self._remove_selected_paths(flow)
-                parent = dict(flow.get("selected") or {})
+            selected = dict(flow.get("selected") or {})
+            if not selected:
                 await self._render_remove_ui(
                     user_id,
                     q.message,
                     flow,
-                    self._remove_list_text(
-                        f"📂 {parent.get('name')} seasons / episodes",
-                        season_items,
-                        0,
-                        hint="Tap a season to inspect it, or toggle a direct episode file.",
-                        selected_paths=selected_paths,
-                    ),
-                    reply_markup=self._remove_paginated_keyboard(
-                        season_items,
-                        0,
-                        item_prefix="rm:child",
-                        nav_prefix="rm:cpage",
-                        back_callback="rm:back:show",
-                        selected_paths=selected_paths,
-                    ),
+                    "That remove flow has expired. Start /remove again.",
+                    reply_markup=None,
                     current_ui_message=q.message,
                 )
                 return
+            self._remove_toggle_group(flow, selected)
+            self._set_flow(user_id, flow)
+            series_selected = self._remove_group_any_selected(flow, selected)
+            await self._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                self._remove_show_actions_text(selected, series_selected),
+                reply_markup=self._remove_show_action_keyboard(series_selected, self._remove_selection_count(flow)),
+                current_ui_message=q.message,
+            )
+            return
 
-            if data == "rm:seasondel":
-                flow = self._get_flow(user_id)
-                if not flow or flow.get("mode") != "remove" or flow.get("stage") != "season_actions":
-                    await self._render_remove_ui(
-                        user_id,
-                        q.message,
-                        {"mode": "remove", "selected_items": []},
-                        "That remove flow has expired. Start /remove again.",
-                        reply_markup=None,
-                        current_ui_message=q.message,
-                    )
-                    return
-                selected_child = dict(flow.get("selected_child") or {})
-                if not selected_child:
-                    await self._render_remove_ui(user_id, q.message, flow, "That remove flow has expired. Start /remove again.", reply_markup=None, current_ui_message=q.message)
-                    return
-                self._remove_toggle_candidate(flow, selected_child)
-                self._set_flow(user_id, flow)
-                selected_paths = self._remove_selected_paths(flow)
+        if data == "rm:seasons":
+            flow = self._get_flow(user_id)
+            if not flow or flow.get("mode") != "remove" or flow.get("stage") != "show_actions":
+                await self._render_remove_ui(
+                    user_id,
+                    q.message,
+                    {"mode": "remove", "selected_items": []},
+                    "That remove flow has expired. Start /remove again.",
+                    reply_markup=None,
+                    current_ui_message=q.message,
+                )
+                return
+            selected = dict(flow.get("selected") or {})
+            group_items = selected.get("group_items")
+            if group_items:
+                season_items = await asyncio.to_thread(self._remove_show_group_children, group_items)
+            else:
+                season_items = await asyncio.to_thread(self._remove_show_children, selected)
+            if not season_items:
                 await self._render_remove_ui(
                     user_id,
                     q.message,
                     flow,
-                    self._remove_season_actions_text(selected_child),
-                    reply_markup=self._remove_season_action_keyboard(
-                        self._remove_selected_path(selected_child) in selected_paths,
-                        len(selected_paths),
+                    "No seasons or direct episode files were found inside that show folder.",
+                    reply_markup=self._remove_show_action_keyboard(
+                        self._remove_group_any_selected(flow, selected), self._remove_selection_count(flow)
                     ),
                     current_ui_message=q.message,
                 )
                 return
+            flow["stage"] = "browse_children"
+            flow["season_items"] = season_items
+            self._set_flow(user_id, flow)
+            selected_paths = self._remove_selected_paths(flow)
+            await self._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                self._remove_list_text(
+                    f"📂 {selected.get('name')} seasons / episodes",
+                    season_items,
+                    0,
+                    hint="Tap a season to inspect it, or toggle a direct episode file.",
+                    selected_paths=selected_paths,
+                ),
+                reply_markup=self._remove_paginated_keyboard(
+                    season_items,
+                    0,
+                    item_prefix="rm:child",
+                    nav_prefix="rm:cpage",
+                    back_callback="rm:back:show",
+                    selected_paths=selected_paths,
+                ),
+                current_ui_message=q.message,
+            )
+            return
 
-            if data == "rm:episodes":
-                flow = self._get_flow(user_id)
-                if not flow or flow.get("mode") != "remove" or flow.get("stage") != "season_actions":
-                    await self._render_remove_ui(
-                        user_id,
-                        q.message,
-                        {"mode": "remove", "selected_items": []},
-                        "That remove flow has expired. Start /remove again.",
-                        reply_markup=None,
-                        current_ui_message=q.message,
-                    )
-                    return
-                selected_child = dict(flow.get("selected_child") or {})
-                episode_items = await asyncio.to_thread(self._remove_season_children, selected_child)
-                if not episode_items:
-                    await self._render_remove_ui(
-                        user_id,
-                        q.message,
-                        flow,
-                        "No direct episode files were found inside that season folder.",
-                        reply_markup=self._remove_season_action_keyboard(
-                            self._remove_selected_path(selected_child) in self._remove_selected_paths(flow),
-                            self._remove_selection_count(flow),
-                        ),
-                        current_ui_message=q.message,
-                    )
-                    return
-                flow["stage"] = "browse_episodes"
-                flow["episode_items"] = episode_items
-                self._set_flow(user_id, flow)
-                selected_paths = self._remove_selected_paths(flow)
+        if data.startswith("rm:cpage:"):
+            flow = self._get_flow(user_id)
+            if not flow or flow.get("mode") != "remove":
+                await self._render_remove_ui(
+                    user_id,
+                    q.message,
+                    {"mode": "remove", "selected_items": []},
+                    "That remove flow has expired. Start /remove again.",
+                    reply_markup=None,
+                    current_ui_message=q.message,
+                )
+                return
+            season_items = list(flow.get("season_items") or [])
+            selected = dict(flow.get("selected") or {})
+            if not season_items or not selected:
                 await self._render_remove_ui(
                     user_id,
                     q.message,
                     flow,
-                    self._remove_list_text(
-                        f"🎞 {selected_child.get('show_name')} — {selected_child.get('name')}",
-                        episode_items,
-                        0,
-                        hint="Tap episode files to toggle them into the delete batch.",
-                        selected_paths=selected_paths,
-                    ),
-                    reply_markup=self._remove_paginated_keyboard(
-                        episode_items,
-                        0,
-                        item_prefix="rm:episode",
-                        nav_prefix="rm:epage",
-                        back_callback="rm:back:season",
-                        selected_paths=selected_paths,
-                    ),
+                    "That season browser expired. Start /remove again.",
+                    reply_markup=None,
                     current_ui_message=q.message,
                 )
                 return
+            page = int(data.split(":", 2)[2])
+            selected_paths = self._remove_selected_paths(flow)
+            await self._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                self._remove_list_text(
+                    f"📂 {selected.get('name')} seasons / episodes",
+                    season_items,
+                    page,
+                    hint="Tap a season to inspect it, or toggle a direct episode file.",
+                    selected_paths=selected_paths,
+                ),
+                reply_markup=self._remove_paginated_keyboard(
+                    season_items,
+                    page,
+                    item_prefix="rm:child",
+                    nav_prefix="rm:cpage",
+                    back_callback="rm:back:show",
+                    selected_paths=selected_paths,
+                ),
+                current_ui_message=q.message,
+            )
+            return
 
-            if data.startswith("rm:epage:"):
-                flow = self._get_flow(user_id)
-                if not flow or flow.get("mode") != "remove":
-                    await self._render_remove_ui(
-                        user_id,
-                        q.message,
-                        {"mode": "remove", "selected_items": []},
-                        "That remove flow has expired. Start /remove again.",
-                        reply_markup=None,
-                        current_ui_message=q.message,
-                    )
-                    return
-                episode_items = list(flow.get("episode_items") or [])
-                selected_child = dict(flow.get("selected_child") or {})
-                if not episode_items or not selected_child:
-                    await self._render_remove_ui(user_id, q.message, flow, "That episode browser expired. Start /remove again.", reply_markup=None, current_ui_message=q.message)
-                    return
-                page = int(data.split(":", 2)[2])
-                selected_paths = self._remove_selected_paths(flow)
+        if data.startswith("rm:child:"):
+            flow = self._get_flow(user_id)
+            if not flow or flow.get("mode") != "remove":
+                await self._render_remove_ui(
+                    user_id,
+                    q.message,
+                    {"mode": "remove", "selected_items": []},
+                    "That remove flow has expired. Start /remove again.",
+                    reply_markup=None,
+                    current_ui_message=q.message,
+                )
+                return
+            season_items = list(flow.get("season_items") or [])
+            idx = int(data.split(":", 2)[2])
+            if idx < 0 or idx >= len(season_items):
                 await self._render_remove_ui(
                     user_id,
                     q.message,
                     flow,
-                    self._remove_list_text(
-                        f"🎞 {selected_child.get('show_name')} — {selected_child.get('name')}",
-                        episode_items,
-                        page,
-                        hint="Tap episode files to toggle them into the delete batch.",
-                        selected_paths=selected_paths,
-                    ),
-                    reply_markup=self._remove_paginated_keyboard(
-                        episode_items,
-                        page,
-                        item_prefix="rm:episode",
-                        nav_prefix="rm:epage",
-                        back_callback="rm:back:season",
-                        selected_paths=selected_paths,
-                    ),
+                    "That season/episode choice is no longer available. Start /remove again.",
+                    reply_markup=None,
                     current_ui_message=q.message,
                 )
                 return
-
-            if data.startswith("rm:episode:"):
-                flow = self._get_flow(user_id)
-                if not flow or flow.get("mode") != "remove":
-                    await self._render_remove_ui(
-                        user_id,
-                        q.message,
-                        {"mode": "remove", "selected_items": []},
-                        "That remove flow has expired. Start /remove again.",
-                        reply_markup=None,
-                        current_ui_message=q.message,
-                    )
-                    return
-                episode_items = list(flow.get("episode_items") or [])
-                idx = int(data.split(":", 2)[2])
-                if idx < 0 or idx >= len(episode_items):
-                    await self._render_remove_ui(user_id, q.message, flow, "That episode choice is no longer available. Start /remove again.", reply_markup=None, current_ui_message=q.message)
-                    return
-                selected_episode = self._remove_enrich_candidate(dict(episode_items[idx]))
-                self._remove_toggle_candidate(flow, selected_episode)
-                flow["stage"] = "browse_episodes"
-                self._set_flow(user_id, flow)
-                selected_paths = self._remove_selected_paths(flow)
-                selected_child = dict(flow.get("selected_child") or {})
-                await self._render_remove_ui(
-                    user_id,
-                    q.message,
-                    flow,
-                    self._remove_list_text(
-                        f"🎞 {selected_child.get('show_name')} — {selected_child.get('name')}",
-                        episode_items,
-                        0,
-                        hint="Tap episode files to toggle them into the delete batch.",
-                        selected_paths=selected_paths,
-                    ),
-                    reply_markup=self._remove_paginated_keyboard(
-                        episode_items,
-                        0,
-                        item_prefix="rm:episode",
-                        nav_prefix="rm:epage",
-                        back_callback="rm:back:season",
-                        selected_paths=selected_paths,
-                    ),
-                    current_ui_message=q.message,
-                )
-                return
-
-            if data == "rm:back:show":
-                flow = self._get_flow(user_id)
-                if not flow or flow.get("mode") != "remove":
-                    await self._render_remove_ui(
-                        user_id,
-                        q.message,
-                        {"mode": "remove", "selected_items": []},
-                        "That remove flow has expired. Start /remove again.",
-                        reply_markup=None,
-                        current_ui_message=q.message,
-                    )
-                    return
-                selected = dict(flow.get("selected") or {})
-                if not selected:
-                    await self._render_remove_ui(user_id, q.message, flow, "That remove flow has expired. Start /remove again.", reply_markup=None, current_ui_message=q.message)
-                    return
-                flow["stage"] = "show_actions"
-                self._set_flow(user_id, flow)
-                selected_paths = self._remove_selected_paths(flow)
-                series_selected = self._remove_group_any_selected(flow, selected)
-                await self._render_remove_ui(
-                    user_id,
-                    q.message,
-                    flow,
-                    self._remove_show_actions_text(selected, series_selected),
-                    reply_markup=self._remove_show_action_keyboard(series_selected, len(selected_paths)),
-                    current_ui_message=q.message,
-                )
-                return
-
-            if data == "rm:back:season":
-                flow = self._get_flow(user_id)
-                if not flow or flow.get("mode") != "remove":
-                    await self._render_remove_ui(
-                        user_id,
-                        q.message,
-                        {"mode": "remove", "selected_items": []},
-                        "That remove flow has expired. Start /remove again.",
-                        reply_markup=None,
-                        current_ui_message=q.message,
-                    )
-                    return
-                selected_child = dict(flow.get("selected_child") or {})
-                if not selected_child:
-                    await self._render_remove_ui(user_id, q.message, flow, "That remove flow has expired. Start /remove again.", reply_markup=None, current_ui_message=q.message)
-                    return
+            selected_child = self._remove_enrich_candidate(dict(season_items[idx]))
+            flow["selected_child"] = selected_child
+            if str(selected_child.get("remove_kind") or "") == "season" and bool(selected_child.get("is_dir")):
                 flow["stage"] = "season_actions"
                 self._set_flow(user_id, flow)
                 selected_paths = self._remove_selected_paths(flow)
@@ -6083,400 +4464,1076 @@ class BotApp:
                     current_ui_message=q.message,
                 )
                 return
+            self._remove_toggle_candidate(flow, selected_child)
+            flow["stage"] = "browse_children"
+            self._set_flow(user_id, flow)
+            selected_paths = self._remove_selected_paths(flow)
+            parent = dict(flow.get("selected") or {})
+            await self._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                self._remove_list_text(
+                    f"📂 {parent.get('name')} seasons / episodes",
+                    season_items,
+                    0,
+                    hint="Tap a season to inspect it, or toggle a direct episode file.",
+                    selected_paths=selected_paths,
+                ),
+                reply_markup=self._remove_paginated_keyboard(
+                    season_items,
+                    0,
+                    item_prefix="rm:child",
+                    nav_prefix="rm:cpage",
+                    back_callback="rm:back:show",
+                    selected_paths=selected_paths,
+                ),
+                current_ui_message=q.message,
+            )
+            return
 
-            if data == "rm:review":
-                flow = self._get_flow(user_id)
-                if not flow or flow.get("mode") != "remove":
-                    await self._render_remove_ui(
-                        user_id,
-                        q.message,
-                        {"mode": "remove", "selected_items": []},
-                        "That remove flow has expired. Start /remove again.",
-                        reply_markup=None,
-                        current_ui_message=q.message,
-                    )
-                    return
-                selected_items = self._remove_selection_items(flow)
-                effective = self._remove_effective_candidates(selected_items)
-                if not effective:
-                    return
-                flow["stage"] = "confirm_delete"
-                self._set_flow(user_id, flow)
+        if data == "rm:seasondel":
+            flow = self._get_flow(user_id)
+            if not flow or flow.get("mode") != "remove" or flow.get("stage") != "season_actions":
                 await self._render_remove_ui(
                     user_id,
                     q.message,
-                    flow,
-                    self._remove_confirm_text(effective),
-                    reply_markup=self._remove_confirm_keyboard(len(effective)),
-                    current_ui_message=q.message,
-                )
-                return
-
-            if data == "rm:clear":
-                flow = self._get_flow(user_id)
-                if not flow or flow.get("mode") != "remove":
-                    await self._render_remove_ui(
-                        user_id,
-                        q.message,
-                        {"mode": "remove", "selected_items": []},
-                        "That remove flow has expired. Start /remove again.",
-                        reply_markup=None,
-                        current_ui_message=q.message,
-                    )
-                    return
-                flow["selected_items"] = []
-                flow.pop("selected", None)
-                flow.pop("selected_child", None)
-                flow.pop("season_items", None)
-                flow.pop("episode_items", None)
-                self._set_flow(user_id, flow)
-                await self._open_remove_browse_root(user_id, q.message, current_ui_message=q.message)
-                return
-
-            if data == "rm:confirm":
-                flow = self._get_flow(user_id)
-                if not flow or flow.get("mode") != "remove" or flow.get("stage") != "confirm_delete":
-                    await self._render_remove_ui(
-                        user_id,
-                        q.message,
-                        {"mode": "remove", "selected_items": []},
-                        "That remove confirmation expired. Start /remove again.",
-                        reply_markup=None,
-                        current_ui_message=q.message,
-                    )
-                    return
-                selected_items = self._remove_selection_items(flow)
-                effective = self._remove_effective_candidates(selected_items)
-                if not effective:
-                    await self._render_remove_ui(user_id, q.message, flow, "That remove confirmation expired. Start /remove again.", reply_markup=None, current_ui_message=q.message)
-                    return
-                await self._render_remove_ui(
-                    user_id,
-                    q.message,
-                    flow,
-                    f"🗑 Deleting {len(effective)} selected item(s) from disk…",
+                    {"mode": "remove", "selected_items": []},
+                    "That remove flow has expired. Start /remove again.",
                     reply_markup=None,
                     current_ui_message=q.message,
                 )
-                try:
-                    result_text = await asyncio.to_thread(
-                        self._delete_remove_candidates,
-                        effective,
-                        user_id=user_id,
-                        chat_id=getattr(q.message, "chat_id", 0) if q.message else 0,
-                    )
-                except Exception as e:
-                    await self._render_remove_ui(
-                        user_id,
-                        q.message,
-                        flow,
-                        f"Delete failed: {e}",
-                        reply_markup=self._home_only_keyboard(),
-                        current_ui_message=q.message,
-                    )
-                    return
+                return
+            selected_child = dict(flow.get("selected_child") or {})
+            if not selected_child:
                 await self._render_remove_ui(
                     user_id,
                     q.message,
                     flow,
-                    result_text,
+                    "That remove flow has expired. Start /remove again.",
+                    reply_markup=None,
+                    current_ui_message=q.message,
+                )
+                return
+            self._remove_toggle_candidate(flow, selected_child)
+            self._set_flow(user_id, flow)
+            selected_paths = self._remove_selected_paths(flow)
+            await self._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                self._remove_season_actions_text(selected_child),
+                reply_markup=self._remove_season_action_keyboard(
+                    self._remove_selected_path(selected_child) in selected_paths,
+                    len(selected_paths),
+                ),
+                current_ui_message=q.message,
+            )
+            return
+
+        if data == "rm:episodes":
+            flow = self._get_flow(user_id)
+            if not flow or flow.get("mode") != "remove" or flow.get("stage") != "season_actions":
+                await self._render_remove_ui(
+                    user_id,
+                    q.message,
+                    {"mode": "remove", "selected_items": []},
+                    "That remove flow has expired. Start /remove again.",
+                    reply_markup=None,
+                    current_ui_message=q.message,
+                )
+                return
+            selected_child = dict(flow.get("selected_child") or {})
+            episode_items = await asyncio.to_thread(self._remove_season_children, selected_child)
+            if not episode_items:
+                await self._render_remove_ui(
+                    user_id,
+                    q.message,
+                    flow,
+                    "No direct episode files were found inside that season folder.",
+                    reply_markup=self._remove_season_action_keyboard(
+                        self._remove_selected_path(selected_child) in self._remove_selected_paths(flow),
+                        self._remove_selection_count(flow),
+                    ),
+                    current_ui_message=q.message,
+                )
+                return
+            flow["stage"] = "browse_episodes"
+            flow["episode_items"] = episode_items
+            self._set_flow(user_id, flow)
+            selected_paths = self._remove_selected_paths(flow)
+            await self._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                self._remove_list_text(
+                    f"🎞 {selected_child.get('show_name')} — {selected_child.get('name')}",
+                    episode_items,
+                    0,
+                    hint="Tap episode files to toggle them into the delete batch.",
+                    selected_paths=selected_paths,
+                ),
+                reply_markup=self._remove_paginated_keyboard(
+                    episode_items,
+                    0,
+                    item_prefix="rm:episode",
+                    nav_prefix="rm:epage",
+                    back_callback="rm:back:season",
+                    selected_paths=selected_paths,
+                ),
+                current_ui_message=q.message,
+            )
+            return
+
+        if data.startswith("rm:epage:"):
+            flow = self._get_flow(user_id)
+            if not flow or flow.get("mode") != "remove":
+                await self._render_remove_ui(
+                    user_id,
+                    q.message,
+                    {"mode": "remove", "selected_items": []},
+                    "That remove flow has expired. Start /remove again.",
+                    reply_markup=None,
+                    current_ui_message=q.message,
+                )
+                return
+            episode_items = list(flow.get("episode_items") or [])
+            selected_child = dict(flow.get("selected_child") or {})
+            if not episode_items or not selected_child:
+                await self._render_remove_ui(
+                    user_id,
+                    q.message,
+                    flow,
+                    "That episode browser expired. Start /remove again.",
+                    reply_markup=None,
+                    current_ui_message=q.message,
+                )
+                return
+            page = int(data.split(":", 2)[2])
+            selected_paths = self._remove_selected_paths(flow)
+            await self._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                self._remove_list_text(
+                    f"🎞 {selected_child.get('show_name')} — {selected_child.get('name')}",
+                    episode_items,
+                    page,
+                    hint="Tap episode files to toggle them into the delete batch.",
+                    selected_paths=selected_paths,
+                ),
+                reply_markup=self._remove_paginated_keyboard(
+                    episode_items,
+                    page,
+                    item_prefix="rm:episode",
+                    nav_prefix="rm:epage",
+                    back_callback="rm:back:season",
+                    selected_paths=selected_paths,
+                ),
+                current_ui_message=q.message,
+            )
+            return
+
+        if data.startswith("rm:episode:"):
+            flow = self._get_flow(user_id)
+            if not flow or flow.get("mode") != "remove":
+                await self._render_remove_ui(
+                    user_id,
+                    q.message,
+                    {"mode": "remove", "selected_items": []},
+                    "That remove flow has expired. Start /remove again.",
+                    reply_markup=None,
+                    current_ui_message=q.message,
+                )
+                return
+            episode_items = list(flow.get("episode_items") or [])
+            idx = int(data.split(":", 2)[2])
+            if idx < 0 or idx >= len(episode_items):
+                await self._render_remove_ui(
+                    user_id,
+                    q.message,
+                    flow,
+                    "That episode choice is no longer available. Start /remove again.",
+                    reply_markup=None,
+                    current_ui_message=q.message,
+                )
+                return
+            selected_episode = self._remove_enrich_candidate(dict(episode_items[idx]))
+            self._remove_toggle_candidate(flow, selected_episode)
+            flow["stage"] = "browse_episodes"
+            self._set_flow(user_id, flow)
+            selected_paths = self._remove_selected_paths(flow)
+            selected_child = dict(flow.get("selected_child") or {})
+            await self._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                self._remove_list_text(
+                    f"🎞 {selected_child.get('show_name')} — {selected_child.get('name')}",
+                    episode_items,
+                    0,
+                    hint="Tap episode files to toggle them into the delete batch.",
+                    selected_paths=selected_paths,
+                ),
+                reply_markup=self._remove_paginated_keyboard(
+                    episode_items,
+                    0,
+                    item_prefix="rm:episode",
+                    nav_prefix="rm:epage",
+                    back_callback="rm:back:season",
+                    selected_paths=selected_paths,
+                ),
+                current_ui_message=q.message,
+            )
+            return
+
+        if data == "rm:back:show":
+            flow = self._get_flow(user_id)
+            if not flow or flow.get("mode") != "remove":
+                await self._render_remove_ui(
+                    user_id,
+                    q.message,
+                    {"mode": "remove", "selected_items": []},
+                    "That remove flow has expired. Start /remove again.",
+                    reply_markup=None,
+                    current_ui_message=q.message,
+                )
+                return
+            selected = dict(flow.get("selected") or {})
+            if not selected:
+                await self._render_remove_ui(
+                    user_id,
+                    q.message,
+                    flow,
+                    "That remove flow has expired. Start /remove again.",
+                    reply_markup=None,
+                    current_ui_message=q.message,
+                )
+                return
+            flow["stage"] = "show_actions"
+            self._set_flow(user_id, flow)
+            selected_paths = self._remove_selected_paths(flow)
+            series_selected = self._remove_group_any_selected(flow, selected)
+            await self._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                self._remove_show_actions_text(selected, series_selected),
+                reply_markup=self._remove_show_action_keyboard(series_selected, len(selected_paths)),
+                current_ui_message=q.message,
+            )
+            return
+
+        if data == "rm:back:season":
+            flow = self._get_flow(user_id)
+            if not flow or flow.get("mode") != "remove":
+                await self._render_remove_ui(
+                    user_id,
+                    q.message,
+                    {"mode": "remove", "selected_items": []},
+                    "That remove flow has expired. Start /remove again.",
+                    reply_markup=None,
+                    current_ui_message=q.message,
+                )
+                return
+            selected_child = dict(flow.get("selected_child") or {})
+            if not selected_child:
+                await self._render_remove_ui(
+                    user_id,
+                    q.message,
+                    flow,
+                    "That remove flow has expired. Start /remove again.",
+                    reply_markup=None,
+                    current_ui_message=q.message,
+                )
+                return
+            flow["stage"] = "season_actions"
+            self._set_flow(user_id, flow)
+            selected_paths = self._remove_selected_paths(flow)
+            await self._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                self._remove_season_actions_text(selected_child),
+                reply_markup=self._remove_season_action_keyboard(
+                    self._remove_selected_path(selected_child) in selected_paths,
+                    len(selected_paths),
+                ),
+                current_ui_message=q.message,
+            )
+            return
+
+        if data == "rm:review":
+            flow = self._get_flow(user_id)
+            if not flow or flow.get("mode") != "remove":
+                await self._render_remove_ui(
+                    user_id,
+                    q.message,
+                    {"mode": "remove", "selected_items": []},
+                    "That remove flow has expired. Start /remove again.",
+                    reply_markup=None,
+                    current_ui_message=q.message,
+                )
+                return
+            selected_items = self._remove_selection_items(flow)
+            effective = self._remove_effective_candidates(selected_items)
+            if not effective:
+                return
+            flow["stage"] = "confirm_delete"
+            self._set_flow(user_id, flow)
+            await self._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                self._remove_confirm_text(effective),
+                reply_markup=self._remove_confirm_keyboard(len(effective)),
+                current_ui_message=q.message,
+            )
+            return
+
+        if data == "rm:clear":
+            flow = self._get_flow(user_id)
+            if not flow or flow.get("mode") != "remove":
+                await self._render_remove_ui(
+                    user_id,
+                    q.message,
+                    {"mode": "remove", "selected_items": []},
+                    "That remove flow has expired. Start /remove again.",
+                    reply_markup=None,
+                    current_ui_message=q.message,
+                )
+                return
+            flow["selected_items"] = []
+            flow.pop("selected", None)
+            flow.pop("selected_child", None)
+            flow.pop("season_items", None)
+            flow.pop("episode_items", None)
+            self._set_flow(user_id, flow)
+            await self._open_remove_browse_root(user_id, q.message, current_ui_message=q.message)
+            return
+
+        if data == "rm:confirm":
+            flow = self._get_flow(user_id)
+            if not flow or flow.get("mode") != "remove" or flow.get("stage") != "confirm_delete":
+                await self._render_remove_ui(
+                    user_id,
+                    q.message,
+                    {"mode": "remove", "selected_items": []},
+                    "That remove confirmation expired. Start /remove again.",
+                    reply_markup=None,
+                    current_ui_message=q.message,
+                )
+                return
+            selected_items = self._remove_selection_items(flow)
+            effective = self._remove_effective_candidates(selected_items)
+            if not effective:
+                await self._render_remove_ui(
+                    user_id,
+                    q.message,
+                    flow,
+                    "That remove confirmation expired. Start /remove again.",
+                    reply_markup=None,
+                    current_ui_message=q.message,
+                )
+                return
+            await self._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                f"🗑 Deleting {len(effective)} selected item(s) from disk…",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            try:
+                result_text = await asyncio.to_thread(
+                    self._delete_remove_candidates,
+                    effective,
+                    user_id=user_id,
+                    chat_id=getattr(q.message, "chat_id", 0) if q.message else 0,
+                )
+            except Exception as e:
+                await self._render_remove_ui(
+                    user_id,
+                    q.message,
+                    flow,
+                    f"Delete failed: {e}",
                     reply_markup=self._home_only_keyboard(),
                     current_ui_message=q.message,
                 )
-                self._clear_flow(user_id)
                 return
+            await self._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                result_text,
+                reply_markup=self._home_only_keyboard(),
+                current_ui_message=q.message,
+            )
+            self._clear_flow(user_id)
+            return
 
-            if data == "sch:cancel":
-                self._clear_flow(user_id)
-                await self._render_command_center(q.message, user_id=user_id)
+    async def _on_cb_schedule(self, *, data: str, q: Any, user_id: int) -> None:
+        if data == "sch:cancel":
+            self._clear_flow(user_id)
+            await self._render_command_center(q.message, user_id=user_id)
+            return
+
+        if data.startswith("sch:pick:"):
+            idx = int(data.split(":", 2)[2])
+            await self._schedule_pick_candidate(q.message, user_id, idx)
+            return
+
+        if data == "sch:change":
+            self._schedule_start_flow(user_id)
+            flow = self._get_flow(user_id) or {"mode": "schedule", "stage": "await_show"}
+            await self._render_schedule_ui(
+                user_id,
+                q.message,
+                flow,
+                "<b>✏️ Type a show name to search</b>\n━━━━━━━━━━━━━━━━━━━━\n\nMonitors your Plex library and auto-queues missing episodes as they air.\n\n<i>Example: Severance</i>",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
+
+        if data == "sch:season":
+            flow = self._get_flow(user_id)
+            if not flow or flow.get("mode") != "schedule" or flow.get("stage") != "confirm":
+                await self._render_schedule_ui(
+                    user_id,
+                    q.message,
+                    {"mode": "schedule", "stage": "await_show"},
+                    "<b>⏰ Session Expired</b>\nThat schedule setup is no longer active.\n<i>Start /schedule again.</i>",
+                    reply_markup=None,
+                    current_ui_message=q.message,
+                )
                 return
+            available = list(
+                (flow.get("probe") or {}).get("available_seasons")
+                or flow.get("selected_show", {}).get("available_seasons")
+                or []
+            )
+            flow["stage"] = "await_season_pick"
+            self._set_flow(user_id, flow)
+            await self._render_schedule_ui(
+                user_id,
+                q.message,
+                flow,
+                "Send the season number to track. Available seasons: " + ", ".join(str(x) for x in available),
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
 
-            if data.startswith("sch:pick:"):
-                idx = int(data.split(":", 2)[2])
-                await self._schedule_pick_candidate(q.message, user_id, idx)
+        if data == "sch:confirm:all":
+            flow = self._get_flow(user_id)
+            if not flow or flow.get("stage") != "confirm":
+                await self._schedule_confirm_selection(q.message, user_id, int(q.message.chat_id), post_action="all")
                 return
-
-            if data == "sch:change":
-                self._schedule_start_flow(user_id)
-                flow = self._get_flow(user_id) or {"mode": "schedule", "stage": "await_show"}
-                await self._render_schedule_ui(user_id, q.message, flow, "<b>✏️ Type a show name to search</b>\n━━━━━━━━━━━━━━━━━━━━\n\nMonitors your Plex library and auto-queues missing episodes as they air.\n\n<i>Example: Severance</i>", reply_markup=None, current_ui_message=q.message)
+            probe = dict(flow.get("probe") or {})
+            codes = list(probe.get("actionable_missing_codes") or probe.get("missing_codes") or [])
+            if not codes:
+                await self._schedule_confirm_selection(q.message, user_id, int(q.message.chat_id), post_action=None)
                 return
+            flow["stage"] = "dl_confirm"
+            flow["dl_confirm_codes"] = codes
+            flow["dl_confirm_post_action"] = "all"
+            flow["dl_confirm_from"] = "confirm"
+            self._set_flow(user_id, flow)
+            await self._render_schedule_ui(
+                user_id,
+                q.message,
+                flow,
+                self._schedule_dl_confirm_text(flow),
+                reply_markup=self._schedule_dl_confirm_keyboard(),
+                current_ui_message=q.message,
+            )
+            return
 
-            if data == "sch:season":
-                flow = self._get_flow(user_id)
-                if not flow or flow.get("mode") != "schedule" or flow.get("stage") != "confirm":
-                    await self._render_schedule_ui(user_id, q.message, {"mode": "schedule", "stage": "await_show"}, "<b>⏰ Session Expired</b>\nThat schedule setup is no longer active.\n<i>Start /schedule again.</i>", reply_markup=None, current_ui_message=q.message)
-                    return
-                available = list((flow.get("probe") or {}).get("available_seasons") or flow.get("selected_show", {}).get("available_seasons") or [])
-                flow["stage"] = "await_season_pick"
+        if data == "sch:confirm:series":
+            flow = self._get_flow(user_id)
+            if not flow or flow.get("stage") != "confirm":
+                await self._schedule_confirm_selection(q.message, user_id, int(q.message.chat_id), post_action="series")
+                return
+            probe = dict(flow.get("probe") or {})
+            codes = list(probe.get("series_actionable_all") or probe.get("actionable_missing_codes") or [])
+            if not codes:
+                await self._schedule_confirm_selection(q.message, user_id, int(q.message.chat_id), post_action=None)
+                return
+            flow["stage"] = "dl_confirm"
+            flow["dl_confirm_codes"] = codes
+            flow["dl_confirm_post_action"] = "series"
+            flow["dl_confirm_from"] = "confirm"
+            self._set_flow(user_id, flow)
+            await self._render_schedule_ui(
+                user_id,
+                q.message,
+                flow,
+                self._schedule_dl_confirm_text(flow),
+                reply_markup=self._schedule_dl_confirm_keyboard(),
+                current_ui_message=q.message,
+            )
+            return
+
+        if data == "sch:confirm:pick":
+            await self._schedule_confirm_selection(q.message, user_id, int(q.message.chat_id), post_action="pick")
+            return
+
+        if data == "sch:confirm":
+            await self._schedule_confirm_selection(q.message, user_id, int(q.message.chat_id))
+            return
+
+        if data.startswith("sch:all:"):
+            track_id = data.split(":", 2)[2]
+            track = await asyncio.to_thread(self.store.get_schedule_track, user_id, track_id)
+            if not track:
+                await self._render_nav_ui(
+                    user_id,
+                    q.message,
+                    "That schedule entry was not found.",
+                    reply_markup=self._home_only_keyboard(),
+                    current_ui_message=q.message,
+                )
+                return
+            probe = dict(track.get("last_probe_json") or {})
+            codes = list(probe.get("actionable_missing_codes") or probe.get("missing_codes") or [])
+            await self._schedule_download_requested(q.message, track, codes)
+            return
+
+        if data.startswith("sch:pickeps:"):
+            track_id = data.split(":", 2)[2]
+            track = await asyncio.to_thread(self.store.get_schedule_track, user_id, track_id)
+            if not track:
+                await self._render_nav_ui(
+                    user_id,
+                    q.message,
+                    "That schedule entry was not found.",
+                    reply_markup=self._home_only_keyboard(),
+                    current_ui_message=q.message,
+                )
+                return
+            probe = dict(track.get("last_probe_json") or {})
+            current_season = int(track.get("season") or 1)
+            current_missing = list(probe.get("actionable_missing_codes") or probe.get("missing_codes") or [])
+            all_missing = self._schedule_picker_all_missing(probe, current_season, current_missing)
+            if not any(all_missing.values()):
+                await self._render_nav_ui(
+                    user_id,
+                    q.message,
+                    "There are no current missing episodes to pick from.",
+                    reply_markup=self._home_only_keyboard(),
+                    current_ui_message=q.message,
+                )
+                return
+            picker_flow: dict[str, Any] = {
+                "mode": "schedule",
+                "stage": "picker",
+                "picker_selected": [],
+                "picker_season": current_season,
+                "picker_all_missing": all_missing,
+                "picker_has_preview": False,
+                "picker_track_id": track_id,
+                "picker_show": dict(track.get("show_json") or {}),
+            }
+            self._set_flow(user_id, picker_flow)
+            await self._render_schedule_ui(
+                user_id,
+                q.message,
+                picker_flow,
+                self._schedule_picker_text(picker_flow),
+                reply_markup=self._schedule_picker_keyboard(picker_flow),
+                current_ui_message=q.message,
+            )
+            return
+
+        if data.startswith("sch:pktog:"):
+            code = data[len("sch:pktog:") :]
+            flow = self._get_flow(user_id)
+            if not flow or flow.get("stage") != "picker":
+                await q.answer("Session expired — start over.", show_alert=True)
+                return
+            selected_list: list[str] = list(flow.get("picker_selected") or [])
+            if code in selected_list:
+                selected_list.remove(code)
+            else:
+                selected_list.append(code)
+            flow["picker_selected"] = selected_list
+            self._set_flow(user_id, flow)
+            await self._render_schedule_ui(
+                user_id,
+                q.message,
+                flow,
+                self._schedule_picker_text(flow),
+                reply_markup=self._schedule_picker_keyboard(flow),
+                current_ui_message=q.message,
+            )
+            return
+
+        if data.startswith("sch:pkseason:"):
+            new_season = int(data.split(":", 2)[2])
+            flow = self._get_flow(user_id)
+            if not flow or flow.get("stage") != "picker":
+                await q.answer("Session expired — start over.", show_alert=True)
+                return
+            flow["picker_season"] = new_season
+            self._set_flow(user_id, flow)
+            await self._render_schedule_ui(
+                user_id,
+                q.message,
+                flow,
+                self._schedule_picker_text(flow),
+                reply_markup=self._schedule_picker_keyboard(flow),
+                current_ui_message=q.message,
+            )
+            return
+
+        if data == "sch:pkconfirm":
+            flow = self._get_flow(user_id)
+            if not flow or flow.get("stage") != "picker":
+                await q.answer("Session expired — start over.", show_alert=True)
+                return
+            selected_codes = list(flow.get("picker_selected") or [])
+            if not selected_codes:
+                await q.answer("No episodes selected.", show_alert=True)
+                return
+            flow["stage"] = "dl_confirm"
+            flow["dl_confirm_codes"] = selected_codes
+            flow["dl_confirm_post_action"] = "pick"
+            flow["dl_confirm_from"] = "picker"
+            self._set_flow(user_id, flow)
+            await self._render_schedule_ui(
+                user_id,
+                q.message,
+                flow,
+                self._schedule_dl_confirm_text(flow),
+                reply_markup=self._schedule_dl_confirm_keyboard(),
+                current_ui_message=q.message,
+            )
+            return
+
+        if data == "sch:pkback":
+            flow = self._get_flow(user_id)
+            if not flow or flow.get("stage") != "picker":
+                await q.answer("Session expired.", show_alert=True)
+                return
+            if flow.get("picker_has_preview"):
+                probe = dict(flow.get("probe") or {})
+                flow["stage"] = "confirm"
                 self._set_flow(user_id, flow)
                 await self._render_schedule_ui(
                     user_id,
                     q.message,
                     flow,
-                    "Send the season number to track. Available seasons: " + ", ".join(str(x) for x in available),
-                    reply_markup=None,
+                    self._schedule_preview_text(probe),
+                    reply_markup=self._schedule_preview_keyboard(probe),
                     current_ui_message=q.message,
                 )
-                return
-
-            if data == "sch:confirm:all":
-                flow = self._get_flow(user_id)
-                if not flow or flow.get("stage") != "confirm":
-                    await self._schedule_confirm_selection(q.message, user_id, int(update.effective_chat.id), post_action="all")
-                    return
-                probe = dict(flow.get("probe") or {})
-                codes = list(probe.get("actionable_missing_codes") or probe.get("missing_codes") or [])
-                if not codes:
-                    await self._schedule_confirm_selection(q.message, user_id, int(update.effective_chat.id), post_action=None)
-                    return
-                flow["stage"] = "dl_confirm"
-                flow["dl_confirm_codes"] = codes
-                flow["dl_confirm_post_action"] = "all"
-                flow["dl_confirm_from"] = "confirm"
-                self._set_flow(user_id, flow)
-                await self._render_schedule_ui(user_id, q.message, flow, self._schedule_dl_confirm_text(flow), reply_markup=self._schedule_dl_confirm_keyboard(), current_ui_message=q.message)
-                return
-
-            if data == "sch:confirm:series":
-                flow = self._get_flow(user_id)
-                if not flow or flow.get("stage") != "confirm":
-                    await self._schedule_confirm_selection(q.message, user_id, int(update.effective_chat.id), post_action="series")
-                    return
-                probe = dict(flow.get("probe") or {})
-                codes = list(probe.get("series_actionable_all") or probe.get("actionable_missing_codes") or [])
-                if not codes:
-                    await self._schedule_confirm_selection(q.message, user_id, int(update.effective_chat.id), post_action=None)
-                    return
-                flow["stage"] = "dl_confirm"
-                flow["dl_confirm_codes"] = codes
-                flow["dl_confirm_post_action"] = "series"
-                flow["dl_confirm_from"] = "confirm"
-                self._set_flow(user_id, flow)
-                await self._render_schedule_ui(user_id, q.message, flow, self._schedule_dl_confirm_text(flow), reply_markup=self._schedule_dl_confirm_keyboard(), current_ui_message=q.message)
-                return
-
-            if data == "sch:confirm:pick":
-                await self._schedule_confirm_selection(q.message, user_id, int(update.effective_chat.id), post_action="pick")
-                return
-
-            if data == "sch:confirm":
-                await self._schedule_confirm_selection(q.message, user_id, int(update.effective_chat.id))
-                return
-
-            if data.startswith("sch:all:"):
-                track_id = data.split(":", 2)[2]
-                track = await asyncio.to_thread(self.store.get_schedule_track, user_id, track_id)
-                if not track:
-                    await self._render_nav_ui(
-                        user_id,
-                        q.message,
-                        "That schedule entry was not found.",
-                        reply_markup=self._home_only_keyboard(),
-                        current_ui_message=q.message,
-                    )
-                    return
-                probe = dict(track.get("last_probe_json") or {})
-                codes = list(probe.get("actionable_missing_codes") or probe.get("missing_codes") or [])
-                await self._schedule_download_requested(q.message, track, codes)
-                return
-
-            if data.startswith("sch:pickeps:"):
-                track_id = data.split(":", 2)[2]
-                track = await asyncio.to_thread(self.store.get_schedule_track, user_id, track_id)
-                if not track:
-                    await self._render_nav_ui(user_id, q.message, "That schedule entry was not found.", reply_markup=self._home_only_keyboard(), current_ui_message=q.message)
-                    return
-                probe = dict(track.get("last_probe_json") or {})
-                current_season = int(track.get("season") or 1)
-                current_missing = list(probe.get("actionable_missing_codes") or probe.get("missing_codes") or [])
-                all_missing = self._schedule_picker_all_missing(probe, current_season, current_missing)
-                if not any(all_missing.values()):
-                    await self._render_nav_ui(user_id, q.message, "There are no current missing episodes to pick from.", reply_markup=self._home_only_keyboard(), current_ui_message=q.message)
-                    return
-                picker_flow: dict[str, Any] = {
-                    "mode": "schedule",
-                    "stage": "picker",
-                    "picker_selected": [],
-                    "picker_season": current_season,
-                    "picker_all_missing": all_missing,
-                    "picker_has_preview": False,
-                    "picker_track_id": track_id,
-                    "picker_show": dict(track.get("show_json") or {}),
-                }
-                self._set_flow(user_id, picker_flow)
-                await self._render_schedule_ui(user_id, q.message, picker_flow, self._schedule_picker_text(picker_flow), reply_markup=self._schedule_picker_keyboard(picker_flow), current_ui_message=q.message)
-                return
-
-            if data.startswith("sch:pktog:"):
-                code = data[len("sch:pktog:"):]
-                flow = self._get_flow(user_id)
-                if not flow or flow.get("stage") != "picker":
-                    await q.answer("Session expired — start over.", show_alert=True)
-                    return
-                selected_list: list[str] = list(flow.get("picker_selected") or [])
-                if code in selected_list:
-                    selected_list.remove(code)
-                else:
-                    selected_list.append(code)
-                flow["picker_selected"] = selected_list
-                self._set_flow(user_id, flow)
-                await self._render_schedule_ui(user_id, q.message, flow, self._schedule_picker_text(flow), reply_markup=self._schedule_picker_keyboard(flow), current_ui_message=q.message)
-                return
-
-            if data.startswith("sch:pkseason:"):
-                new_season = int(data.split(":", 2)[2])
-                flow = self._get_flow(user_id)
-                if not flow or flow.get("stage") != "picker":
-                    await q.answer("Session expired — start over.", show_alert=True)
-                    return
-                flow["picker_season"] = new_season
-                self._set_flow(user_id, flow)
-                await self._render_schedule_ui(user_id, q.message, flow, self._schedule_picker_text(flow), reply_markup=self._schedule_picker_keyboard(flow), current_ui_message=q.message)
-                return
-
-            if data == "sch:pkconfirm":
-                flow = self._get_flow(user_id)
-                if not flow or flow.get("stage") != "picker":
-                    await q.answer("Session expired — start over.", show_alert=True)
-                    return
-                selected_codes = list(flow.get("picker_selected") or [])
-                if not selected_codes:
-                    await q.answer("No episodes selected.", show_alert=True)
-                    return
-                flow["stage"] = "dl_confirm"
-                flow["dl_confirm_codes"] = selected_codes
-                flow["dl_confirm_post_action"] = "pick"
-                flow["dl_confirm_from"] = "picker"
-                self._set_flow(user_id, flow)
-                await self._render_schedule_ui(user_id, q.message, flow, self._schedule_dl_confirm_text(flow), reply_markup=self._schedule_dl_confirm_keyboard(), current_ui_message=q.message)
-                return
-
-            if data == "sch:pkback":
-                flow = self._get_flow(user_id)
-                if not flow or flow.get("stage") != "picker":
-                    await q.answer("Session expired.", show_alert=True)
-                    return
-                if flow.get("picker_has_preview"):
-                    probe = dict(flow.get("probe") or {})
-                    flow["stage"] = "confirm"
-                    self._set_flow(user_id, flow)
-                    await self._render_schedule_ui(user_id, q.message, flow, self._schedule_preview_text(probe), reply_markup=self._schedule_preview_keyboard(probe), current_ui_message=q.message)
-                else:
-                    self._clear_flow(user_id)
-                    await self._render_nav_ui(user_id, q.message, "<b>↩️ Cancelled</b>", reply_markup=self._home_only_keyboard(), current_ui_message=q.message)
-                return
-
-            if data == "sch:dlgo":
-                flow = self._get_flow(user_id)
-                if not flow or flow.get("stage") != "dl_confirm":
-                    await q.answer("Session expired — start over.", show_alert=True)
-                    return
-                post_action = str(flow.get("dl_confirm_post_action") or "all")
-                dl_from = str(flow.get("dl_confirm_from") or "confirm")
-                if dl_from == "picker":
-                    selected_codes = list(flow.get("dl_confirm_codes") or [])
-                    pk_track_id = str(flow.get("picker_track_id") or "")
-                    pk_track = await asyncio.to_thread(self.store.get_schedule_track, user_id, pk_track_id)
-                    if not pk_track:
-                        await self._render_schedule_ui(user_id, q.message, flow, "That schedule entry was not found.", reply_markup=None, current_ui_message=q.message)
-                        self._clear_flow(user_id)
-                        return
-                    self._clear_flow(user_id)
-                    n = len(selected_codes)
-                    await self._render_schedule_ui(user_id, q.message, flow, f"Queuing {n} episode{'s' if n != 1 else ''}…", reply_markup=None, current_ui_message=q.message)
-                    await self._schedule_download_requested(q.message, pk_track, selected_codes)
-                else:
-                    flow["stage"] = "confirm"
-                    self._set_flow(user_id, flow)
-                    await self._schedule_confirm_selection(q.message, user_id, int(update.effective_chat.id), post_action=post_action)
-                return
-
-            if data == "sch:dlback":
-                flow = self._get_flow(user_id)
-                if not flow or flow.get("stage") != "dl_confirm":
-                    await q.answer("Session expired.", show_alert=True)
-                    return
-                dl_from = str(flow.get("dl_confirm_from") or "confirm")
-                if dl_from == "picker":
-                    flow["stage"] = "picker"
-                    self._set_flow(user_id, flow)
-                    await self._render_schedule_ui(user_id, q.message, flow, self._schedule_picker_text(flow), reply_markup=self._schedule_picker_keyboard(flow), current_ui_message=q.message)
-                else:
-                    probe = dict(flow.get("probe") or {})
-                    flow["stage"] = "confirm"
-                    self._set_flow(user_id, flow)
-                    await self._render_schedule_ui(user_id, q.message, flow, self._schedule_preview_text(probe), reply_markup=self._schedule_preview_keyboard(probe), current_ui_message=q.message)
-                return
-
-            if data.startswith("sch:ep:"):
-                _, _, track_id, episode_raw = data.split(":", 3)
-                track = await asyncio.to_thread(self.store.get_schedule_track, user_id, track_id)
-                if not track:
-                    await self._render_nav_ui(
-                        user_id,
-                        q.message,
-                        "That schedule entry was not found.",
-                        reply_markup=self._home_only_keyboard(),
-                        current_ui_message=q.message,
-                    )
-                    return
-                code = episode_code(int(track.get("season") or 1), int(episode_raw))
-                await self._schedule_download_requested(q.message, track, [code])
-                return
-
-            if data.startswith("sch:skip:"):
-                track_id = data.split(":", 2)[2]
-                track = await asyncio.to_thread(self.store.get_schedule_track, user_id, track_id)
-                if not track:
-                    await self._render_nav_ui(
-                        user_id,
-                        q.message,
-                        "That schedule entry was not found.",
-                        reply_markup=self._home_only_keyboard(),
-                        current_ui_message=q.message,
-                    )
-                    return
-                probe = dict(track.get("last_probe_json") or {})
-                signature = str(probe.get("signature") or "") or None
-                await asyncio.to_thread(self.store.update_schedule_track, track_id, skipped_signature=signature, last_missing_signature=signature)
+            else:
+                self._clear_flow(user_id)
                 await self._render_nav_ui(
                     user_id,
                     q.message,
-                    "👍 Got it — I'll skip this notification.\n"
-                    "<i>I'll alert you again if new episodes air or the missing count changes.</i>",
+                    "<b>↩️ Cancelled</b>",
+                    reply_markup=self._home_only_keyboard(),
+                    current_ui_message=q.message,
+                )
+            return
+
+        if data == "sch:dlgo":
+            flow = self._get_flow(user_id)
+            if not flow or flow.get("stage") != "dl_confirm":
+                await q.answer("Session expired — start over.", show_alert=True)
+                return
+            post_action = str(flow.get("dl_confirm_post_action") or "all")
+            dl_from = str(flow.get("dl_confirm_from") or "confirm")
+            if dl_from == "picker":
+                selected_codes = list(flow.get("dl_confirm_codes") or [])
+                pk_track_id = str(flow.get("picker_track_id") or "")
+                pk_track = await asyncio.to_thread(self.store.get_schedule_track, user_id, pk_track_id)
+                if not pk_track:
+                    await self._render_schedule_ui(
+                        user_id,
+                        q.message,
+                        flow,
+                        "That schedule entry was not found.",
+                        reply_markup=None,
+                        current_ui_message=q.message,
+                    )
+                    self._clear_flow(user_id)
+                    return
+                self._clear_flow(user_id)
+                n = len(selected_codes)
+                await self._render_schedule_ui(
+                    user_id,
+                    q.message,
+                    flow,
+                    f"Queuing {n} episode{'s' if n != 1 else ''}…",
+                    reply_markup=None,
+                    current_ui_message=q.message,
+                )
+                await self._schedule_download_requested(q.message, pk_track, selected_codes)
+            else:
+                flow["stage"] = "confirm"
+                self._set_flow(user_id, flow)
+                await self._schedule_confirm_selection(
+                    q.message, user_id, int(q.message.chat_id), post_action=post_action
+                )
+            return
+
+        if data == "sch:dlback":
+            flow = self._get_flow(user_id)
+            if not flow or flow.get("stage") != "dl_confirm":
+                await q.answer("Session expired.", show_alert=True)
+                return
+            dl_from = str(flow.get("dl_confirm_from") or "confirm")
+            if dl_from == "picker":
+                flow["stage"] = "picker"
+                self._set_flow(user_id, flow)
+                await self._render_schedule_ui(
+                    user_id,
+                    q.message,
+                    flow,
+                    self._schedule_picker_text(flow),
+                    reply_markup=self._schedule_picker_keyboard(flow),
+                    current_ui_message=q.message,
+                )
+            else:
+                probe = dict(flow.get("probe") or {})
+                flow["stage"] = "confirm"
+                self._set_flow(user_id, flow)
+                await self._render_schedule_ui(
+                    user_id,
+                    q.message,
+                    flow,
+                    self._schedule_preview_text(probe),
+                    reply_markup=self._schedule_preview_keyboard(probe),
+                    current_ui_message=q.message,
+                )
+            return
+
+        if data.startswith("sch:ep:"):
+            _, _, track_id, episode_raw = data.split(":", 3)
+            track = await asyncio.to_thread(self.store.get_schedule_track, user_id, track_id)
+            if not track:
+                await self._render_nav_ui(
+                    user_id,
+                    q.message,
+                    "That schedule entry was not found.",
                     reply_markup=self._home_only_keyboard(),
                     current_ui_message=q.message,
                 )
                 return
+            code = episode_code(int(track.get("season") or 1), int(episode_raw))
+            await self._schedule_download_requested(q.message, track, [code])
+            return
 
-            # Command center actions
-            if data == "menu:movie":
-                self._set_flow(user_id, {"mode": "movie", "stage": "await_title"})
-                text = (
-                    "<b>🎬 Movie Search</b>\n"
-                    "━━━━━━━━━━━━━━━━━━━━\n\n"
-                    "Send the movie title to search.\n\n"
-                    "<i>Example: Dune Part Two</i>"
-                )
-                kb = InlineKeyboardMarkup(self._nav_footer(back_data="nav:home", include_home=False))
-                await self._render_nav_ui(user_id, q.message, text, reply_markup=kb, current_ui_message=q.message)
-                return
-
-            if data == "menu:tv":
-                flow = {"mode": "tv", "stage": "await_filter_choice", "season": None, "episode": None}
-                self._set_flow(user_id, flow)
-                await self._render_tv_ui(
+        if data.startswith("sch:skip:"):
+            track_id = data.split(":", 2)[2]
+            track = await asyncio.to_thread(self.store.get_schedule_track, user_id, track_id)
+            if not track:
+                await self._render_nav_ui(
                     user_id,
                     q.message,
-                    flow,
-                    self._tv_filter_choice_text(),
-                    reply_markup=self._tv_filter_choice_keyboard(),
+                    "That schedule entry was not found.",
+                    reply_markup=self._home_only_keyboard(),
                     current_ui_message=q.message,
                 )
                 return
+            probe = dict(track.get("last_probe_json") or {})
+            signature = str(probe.get("signature") or "") or None
+            await asyncio.to_thread(
+                self.store.update_schedule_track,
+                track_id,
+                skipped_signature=signature,
+                last_missing_signature=signature,
+            )
+            await self._render_nav_ui(
+                user_id,
+                q.message,
+                "👍 Got it — I'll skip this notification.\n"
+                "<i>I'll alert you again if new episodes air or the missing count changes.</i>",
+                reply_markup=self._home_only_keyboard(),
+                current_ui_message=q.message,
+            )
+            return
 
-            if data == "menu:schedule":
+        if data == "sch:addnew":
+            self._schedule_start_flow(user_id)
+            text = (
+                "<b>✏️ Type a show name to search</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "Monitors your Plex library and auto-queues missing episodes as they air.\n\n"
+                "<i>Example: Severance</i>"
+            )
+            kb = InlineKeyboardMarkup(self._nav_footer(back_data="menu:schedule", include_home=False))
+            await self._render_nav_ui(user_id, q.message, text, reply_markup=kb, current_ui_message=q.message)
+            return
+
+        if data == "sch:myshows":
+            tracks = await asyncio.to_thread(self.store.list_schedule_tracks, user_id, False, 50)
+            if not tracks:
+                await self._render_nav_ui(
+                    user_id,
+                    q.message,
+                    "<b>📋 My Shows</b>\n━━━━━━━━━━━━━━━━━━━━\n\nNo shows tracked yet.\nTap <b>Add New Show</b> to get started.",
+                    reply_markup=InlineKeyboardMarkup(
+                        [
+                            [InlineKeyboardButton("➕ Add New Show", callback_data="sch:addnew")],
+                        ]
+                        + self._nav_footer(back_data="menu:schedule", include_home=False)
+                    ),
+                    current_ui_message=q.message,
+                )
+                return
+            lines = [
+                "<b>📋 My Shows</b>",
+                "━━━━━━━━━━━━━━━━━━━━",
+                "<i>⏸ Pause or ▶️ Resume tracking. 🚫 Stop to remove a show.</i>",
+            ]
+            rows: list[list[InlineKeyboardButton]] = []
+            for track in tracks:
+                show = dict(track.get("show_json") or {})
+                name = str(show.get("name") or track.get("show_name") or "Unknown")
+                season = int(track.get("season") or 1)
+                tid = track["track_id"]
+                enabled = track.get("enabled")
+                lines.append("")
+                if enabled:
+                    lines.append(self._schedule_active_line(track))
+                else:
+                    lines.append(self._schedule_paused_line(name, season))
+                if enabled:
+                    rows.append(
+                        [
+                            InlineKeyboardButton(f"⏸ {name}", callback_data=f"sch:pause:{tid}"),
+                            InlineKeyboardButton("🚫 Stop Tracking", callback_data=f"sch:dconf:{tid}"),
+                        ]
+                    )
+                else:
+                    rows.append(
+                        [
+                            InlineKeyboardButton(f"▶️ {name}", callback_data=f"sch:pause:{tid}"),
+                            InlineKeyboardButton("🚫 Stop Tracking", callback_data=f"sch:dconf:{tid}"),
+                        ]
+                    )
+            rows.append([InlineKeyboardButton("➕ Add New Show", callback_data="sch:addnew")])
+            rows += self._nav_footer(back_data="menu:schedule", include_home=False)
+            await self._render_nav_ui(
+                user_id,
+                q.message,
+                "\n".join(lines),
+                reply_markup=InlineKeyboardMarkup(rows),
+                current_ui_message=q.message,
+            )
+            return
+
+        if data.startswith("sch:pause:"):
+            tid = data.split(":", 2)[2]
+            track = await asyncio.to_thread(self.store.get_schedule_track, user_id, tid)
+            if not track:
+                await self._render_nav_ui(
+                    user_id,
+                    q.message,
+                    "Track not found.",
+                    reply_markup=self._home_only_keyboard(),
+                    current_ui_message=q.message,
+                )
+                return
+            new_enabled = not track.get("enabled")
+            await asyncio.to_thread(self.store.update_schedule_track, tid, enabled=new_enabled)
+            show = dict(track.get("show_json") or {})
+            name = str(show.get("name") or track.get("show_name") or "Unknown")
+            action = "resumed" if new_enabled else "paused"
+            await q.answer(f"{name} {action}")
+            # Re-render My Shows list
+            tracks = await asyncio.to_thread(self.store.list_schedule_tracks, user_id, False, 50)
+            lines = [
+                "<b>📋 My Shows</b>",
+                "━━━━━━━━━━━━━━━━━━━━",
+                "<i>⏸ Pause or ▶️ Resume tracking. 🚫 Stop to remove a show.</i>",
+            ]
+            rows_list: list[list[InlineKeyboardButton]] = []
+            for t in tracks:
+                s = dict(t.get("show_json") or {})
+                n = str(s.get("name") or t.get("show_name") or "Unknown")
+                sn = int(t.get("season") or 1)
+                t_id = t["track_id"]
+                lines.append("")
+                if t.get("enabled"):
+                    lines.append(self._schedule_active_line(t))
+                    rows_list.append(
+                        [
+                            InlineKeyboardButton(f"⏸ {n}", callback_data=f"sch:pause:{t_id}"),
+                            InlineKeyboardButton("🚫 Stop Tracking", callback_data=f"sch:dconf:{t_id}"),
+                        ]
+                    )
+                else:
+                    lines.append(self._schedule_paused_line(n, sn))
+                    rows_list.append(
+                        [
+                            InlineKeyboardButton(f"▶️ {n}", callback_data=f"sch:pause:{t_id}"),
+                            InlineKeyboardButton("🚫 Stop Tracking", callback_data=f"sch:dconf:{t_id}"),
+                        ]
+                    )
+            rows_list.append([InlineKeyboardButton("➕ Add New Show", callback_data="sch:addnew")])
+            rows_list += self._nav_footer(back_data="menu:schedule", include_home=False)
+            await self._render_nav_ui(
+                user_id,
+                q.message,
+                "\n".join(lines),
+                reply_markup=InlineKeyboardMarkup(rows_list),
+                current_ui_message=q.message,
+            )
+            return
+
+        if data.startswith("sch:dconf:"):
+            tid = data.split(":", 2)[2]
+            track = await asyncio.to_thread(self.store.get_schedule_track, user_id, tid)
+            if not track:
+                await self._render_nav_ui(
+                    user_id,
+                    q.message,
+                    "Track not found.",
+                    reply_markup=self._home_only_keyboard(),
+                    current_ui_message=q.message,
+                )
+                return
+            show = dict(track.get("show_json") or {})
+            name = str(show.get("name") or track.get("show_name") or "Unknown")
+            season = int(track.get("season") or 1)
+            text = (
+                f"<b>🗑 Delete Tracking?</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"Stop tracking <b>{_h(name)}</b> S{season:02d}?\n\n"
+                f"<i>This removes the schedule entry. It won't delete any downloaded files.</i>"
+            )
+            kb = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton("Yes, delete", callback_data=f"sch:del:{tid}"),
+                        InlineKeyboardButton("Cancel", callback_data="sch:myshows"),
+                    ],
+                ]
+            )
+            await self._render_nav_ui(user_id, q.message, text, reply_markup=kb, current_ui_message=q.message)
+            return
+
+        if data.startswith("sch:del:"):
+            tid = data.split(":", 2)[2]
+            track = await asyncio.to_thread(self.store.get_schedule_track, user_id, tid)
+            show_name = "Unknown"
+            if track:
+                show = dict(track.get("show_json") or {})
+                show_name = str(show.get("name") or track.get("show_name") or "Unknown")
+            deleted = await asyncio.to_thread(self.store.delete_schedule_track, tid, user_id)
+            if deleted:
+                await q.answer(f"{show_name} removed")
+            # Re-render My Shows list (reuse sch:myshows logic)
+            tracks = await asyncio.to_thread(self.store.list_schedule_tracks, user_id, False, 50)
+            if not tracks:
+                await self._render_nav_ui(
+                    user_id,
+                    q.message,
+                    "<b>📋 My Shows</b>\n━━━━━━━━━━━━━━━━━━━━\n\nNo shows tracked yet.\nTap <b>Add New Show</b> to get started.",
+                    reply_markup=InlineKeyboardMarkup(
+                        [
+                            [InlineKeyboardButton("➕ Add New Show", callback_data="sch:addnew")],
+                        ]
+                        + self._nav_footer(back_data="menu:schedule", include_home=False)
+                    ),
+                    current_ui_message=q.message,
+                )
+                return
+            lines = [
+                "<b>📋 My Shows</b>",
+                "━━━━━━━━━━━━━━━━━━━━",
+                "<i>⏸ Pause or ▶️ Resume tracking. 🚫 Stop to remove a show.</i>",
+            ]
+            rows_del: list[list[InlineKeyboardButton]] = []
+            for t in tracks:
+                s = dict(t.get("show_json") or {})
+                n = str(s.get("name") or t.get("show_name") or "Unknown")
+                sn = int(t.get("season") or 1)
+                t_id = t["track_id"]
+                lines.append("")
+                if t.get("enabled"):
+                    lines.append(self._schedule_active_line(t))
+                    rows_del.append(
+                        [
+                            InlineKeyboardButton(f"⏸ {n}", callback_data=f"sch:pause:{t_id}"),
+                            InlineKeyboardButton("🚫 Stop Tracking", callback_data=f"sch:dconf:{t_id}"),
+                        ]
+                    )
+                else:
+                    lines.append(self._schedule_paused_line(n, sn))
+                    rows_del.append(
+                        [
+                            InlineKeyboardButton(f"▶️ {n}", callback_data=f"sch:pause:{t_id}"),
+                            InlineKeyboardButton("🚫 Stop Tracking", callback_data=f"sch:dconf:{t_id}"),
+                        ]
+                    )
+            rows_del.append([InlineKeyboardButton("➕ Add New Show", callback_data="sch:addnew")])
+            rows_del += self._nav_footer(back_data="menu:schedule", include_home=False)
+            await self._render_nav_ui(
+                user_id,
+                q.message,
+                "\n".join(lines),
+                reply_markup=InlineKeyboardMarkup(rows_del),
+                current_ui_message=q.message,
+            )
+            return
+
+        # Command center actions
+
+    async def _on_cb_menu(self, *, data: str, q: Any, user_id: int) -> None:
+        if data == "menu:movie":
+            self._set_flow(user_id, {"mode": "movie", "stage": "await_title"})
+            text = (
+                "<b>🎬 Movie Search</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "Send the movie title to search.\n\n"
+                "<i>Example: Dune Part Two</i>"
+            )
+            kb = InlineKeyboardMarkup(self._nav_footer(back_data="nav:home", include_home=False))
+            await self._render_nav_ui(user_id, q.message, text, reply_markup=kb, current_ui_message=q.message)
+            return
+
+        if data == "menu:tv":
+            flow = {"mode": "tv", "stage": "await_filter_choice", "season": None, "episode": None}
+            self._set_flow(user_id, flow)
+            await self._render_tv_ui(
+                user_id,
+                q.message,
+                flow,
+                self._tv_filter_choice_text(),
+                reply_markup=self._tv_filter_choice_keyboard(),
+                current_ui_message=q.message,
+            )
+            return
+
+        if data == "menu:schedule":
+            tracks = await asyncio.to_thread(self.store.list_schedule_tracks, user_id, False, 50)
+            if tracks:
+                enabled = [t for t in tracks if t.get("enabled")]
+                paused = [t for t in tracks if not t.get("enabled")]
+                text = (
+                    "<b>🗓️ Schedule</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "Monitors your Plex library and auto-queues missing episodes as they air.\n\n"
+                    f"<b>{len(enabled)}</b> active"
+                )
+                if paused:
+                    text += f" · <b>{len(paused)}</b> paused"
+                rows: list[list[InlineKeyboardButton]] = [
+                    [
+                        InlineKeyboardButton("➕ Add New Show", callback_data="sch:addnew"),
+                        InlineKeyboardButton(f"📋 My Shows ({len(tracks)})", callback_data="sch:myshows"),
+                    ],
+                ]
+                rows += self._nav_footer(back_data="nav:home", include_home=False)
+                kb = InlineKeyboardMarkup(rows)
+                await self._render_nav_ui(user_id, q.message, text, reply_markup=kb, current_ui_message=q.message)
+            else:
                 self._schedule_start_flow(user_id)
                 text = (
                     "<b>✏️ Type a show name to search</b>\n"
@@ -6486,141 +5543,144 @@ class BotApp:
                 )
                 kb = InlineKeyboardMarkup(self._nav_footer(back_data="nav:home", include_home=False))
                 await self._render_nav_ui(user_id, q.message, text, reply_markup=kb, current_ui_message=q.message)
-                return
+            return
 
-            if data == "menu:remove":
-                await self._open_remove_browse_root(user_id, q.message, current_ui_message=q.message)
-                return
+        if data == "menu:remove":
+            await self._open_remove_browse_root(user_id, q.message, current_ui_message=q.message)
+            return
 
-            if data == "flow:tv_filter_set":
-                flow = {"mode": "tv", "stage": "await_filter", "season": None, "episode": None}
-                self._set_flow(user_id, flow)
-                await self._render_tv_ui(
-                    user_id,
-                    q.message,
-                    flow,
-                    self._tv_filter_prompt_text(),
-                    reply_markup=InlineKeyboardMarkup(self._nav_footer(back_data="menu:tv")),
-                    current_ui_message=q.message,
-                )
-                return
+        if data == "menu:active":
+            await self._render_active_ui(user_id, q.message, n=10, current_ui_message=q.message)
+            return
 
-            if data == "flow:tv_filter_skip":
-                flow = {"mode": "tv", "stage": "await_title", "season": None, "episode": None}
-                self._set_flow(user_id, flow)
-                await self._render_tv_ui(
-                    user_id,
-                    q.message,
-                    flow,
-                    self._tv_title_prompt_text(),
-                    reply_markup=InlineKeyboardMarkup(self._nav_footer(back_data="menu:tv")),
-                    current_ui_message=q.message,
-                )
-                return
+        if data == "menu:storage":
+            await self._render_categories_ui(user_id, q.message, current_ui_message=q.message)
+            return
 
-            if data == "flow:tv_full_series":
-                flow = {"mode": "tv", "stage": "await_title", "season": None, "episode": None, "full_series": True}
-                self._set_flow(user_id, flow)
-                await self._render_tv_ui(
-                    user_id,
-                    q.message,
-                    flow,
-                    "<b>📺 TV Search — Full Series</b>\n\n"
-                    "Send the show title to search.\n"
-                    "Results will prioritize complete series downloads.\n\n"
-                    "<i>Example: Severance</i>",
-                    reply_markup=InlineKeyboardMarkup(self._nav_footer(back_data="menu:tv")),
-                    current_ui_message=q.message,
-                )
-                return
+        if data == "menu:plugins":
+            await self._render_plugins_ui(user_id, q.message, current_ui_message=q.message)
+            return
 
-            if data == "menu:active":
-                await self._render_active_ui(user_id, q.message, n=10, current_ui_message=q.message)
-                return
+        if data == "menu:profile":
+            d = self.store.get_defaults(user_id, self.cfg)
+            ok, reason = await asyncio.to_thread(self._storage_status)
+            transport_ok, transport_reason = await asyncio.to_thread(self._qbt_transport_status)
+            vpn_ok, vpn_reason = await asyncio.to_thread(self._vpn_ready_for_download)
+            plex_storage_usage = await asyncio.to_thread(self._plex_storage_display)
+            lines = [
+                "Current profile:",
+                f"• min_seeds: {d['default_min_seeds']}",
+                f"• sort/order: {d['default_sort']} {d['default_order']}",
+                f"• limit: {d['default_limit']}",
+                f"• quality default: {self.cfg.default_min_quality}p+",
+                f"• movies -> {self.cfg.movies_category} @ {self.cfg.movies_path}",
+                f"• tv -> {self.cfg.tv_category} @ {self.cfg.tv_path}",
+                f"• storage status: {'ready' if ok else 'not ready'} ({reason})",
+                f"• qB transport: {'ready' if transport_ok else 'blocked'} ({transport_reason})",
+                f"• plex storage: {plex_storage_usage}",
+                f"• vpn gate for downloads: {'ready' if vpn_ok else 'blocked'} ({vpn_reason})",
+            ]
+            text = "\n".join(lines)
+            kb = InlineKeyboardMarkup(self._nav_footer())
+            await self._render_nav_ui(user_id, q.message, text, reply_markup=kb, current_ui_message=q.message)
+            return
 
-            if data == "menu:storage":
-                await self._render_categories_ui(user_id, q.message, current_ui_message=q.message)
-                return
-
-            if data == "menu:plugins":
-                await self._render_plugins_ui(user_id, q.message, current_ui_message=q.message)
-                return
-
-            if data == "menu:profile":
-                d = self.store.get_defaults(user_id, self.cfg)
-                ok, reason = await asyncio.to_thread(self._storage_status)
-                transport_ok, transport_reason = await asyncio.to_thread(self._qbt_transport_status)
-                vpn_ok, vpn_reason = await asyncio.to_thread(self._vpn_ready_for_download)
-                plex_storage_usage = await asyncio.to_thread(self._plex_storage_display)
-                lines = [
-                    "Current profile:",
-                    f"• min_seeds: {d['default_min_seeds']}",
-                    f"• sort/order: {d['default_sort']} {d['default_order']}",
-                    f"• limit: {d['default_limit']}",
-                    f"• quality default: {self.cfg.default_min_quality}p+",
-                    f"• movies -> {self.cfg.movies_category} @ {self.cfg.movies_path}",
-                    f"• tv -> {self.cfg.tv_category} @ {self.cfg.tv_path}",
-                    f"• storage status: {'ready' if ok else 'not ready'} ({reason})",
-                    f"• qB transport: {'ready' if transport_ok else 'blocked'} ({transport_reason})",
-                    f"• plex storage: {plex_storage_usage}",
-                    f"• vpn gate for downloads: {'ready' if vpn_ok else 'blocked'} ({vpn_reason})",
-                ]
-                text = "\n".join(lines)
-                kb = InlineKeyboardMarkup(self._nav_footer())
-                await self._render_nav_ui(user_id, q.message, text, reply_markup=kb, current_ui_message=q.message)
-                return
-
-            if data == "menu:help":
-                text = self._help_text()
-                kb = InlineKeyboardMarkup(self._nav_footer())
-                await self._render_nav_ui(
-                    user_id,
-                    q.message,
-                    text,
-                    reply_markup=kb,
-                    disable_web_page_preview=True,
-                    current_ui_message=q.message,
-                )
-                return
-
-            if data.startswith("stop:"):
-                torrent_hash = data[5:]
-                key = (user_id, torrent_hash.lower())
-                task = self.progress_tasks.get(key)
-                if task and not task.done():
-                    task.cancel()
-                # Get category before deleting so we can offer the right restart button.
-                restart_cb = "menu:movie"
-                restart_label = "🎬 Restart Movie Search"
-                try:
-                    torrent_info = await asyncio.to_thread(self.qbt.get_torrent, torrent_hash)
-                    if torrent_info:
-                        cat = str(torrent_info.get("category") or "").strip()
-                        if cat.lower() == self.cfg.tv_category.lower():
-                            restart_cb = "menu:tv"
-                            restart_label = "📺 Restart TV Search"
-                except Exception:
-                    pass
-                try:
-                    await asyncio.to_thread(self.qbt.delete_torrent, torrent_hash, delete_files=True)
-                    stopped_kb = InlineKeyboardMarkup([[
-                        InlineKeyboardButton(restart_label, callback_data=restart_cb),
-                        InlineKeyboardButton("🏠 Home", callback_data="nav:home"),
-                    ]])
-                    await q.message.edit_text("<b>🛑 Download Stopped</b>\n<i>Torrent has been removed.</i>", reply_markup=stopped_kb, parse_mode=_PM)
-                except Exception as e:
-                    await q.message.edit_text(f"<b>⚠️ Stop Failed</b>\n<i>{_h(str(e))}</i>", reply_markup=None, parse_mode=_PM)
-                await q.answer()
-                return
-
-        except Exception as e:
+        if data == "menu:help":
+            text = self._help_text()
+            kb = InlineKeyboardMarkup(self._nav_footer())
             await self._render_nav_ui(
                 user_id,
                 q.message,
-                f"Action failed: {_h(str(e))}",
-                reply_markup=self._home_only_keyboard(),
+                text,
+                reply_markup=kb,
+                disable_web_page_preview=True,
                 current_ui_message=q.message,
             )
+            return
+
+    async def _on_cb_flow(self, *, data: str, q: Any, user_id: int) -> None:
+        if data == "flow:tv_filter_set":
+            flow = {"mode": "tv", "stage": "await_filter", "season": None, "episode": None}
+            self._set_flow(user_id, flow)
+            await self._render_tv_ui(
+                user_id,
+                q.message,
+                flow,
+                self._tv_filter_prompt_text(),
+                reply_markup=InlineKeyboardMarkup(self._nav_footer(back_data="menu:tv")),
+                current_ui_message=q.message,
+            )
+            return
+
+        if data == "flow:tv_filter_skip":
+            flow = {"mode": "tv", "stage": "await_title", "season": None, "episode": None}
+            self._set_flow(user_id, flow)
+            await self._render_tv_ui(
+                user_id,
+                q.message,
+                flow,
+                self._tv_title_prompt_text(),
+                reply_markup=InlineKeyboardMarkup(self._nav_footer(back_data="menu:tv")),
+                current_ui_message=q.message,
+            )
+            return
+
+        if data == "flow:tv_full_series":
+            flow = {"mode": "tv", "stage": "await_title", "season": None, "episode": None, "full_series": True}
+            self._set_flow(user_id, flow)
+            await self._render_tv_ui(
+                user_id,
+                q.message,
+                flow,
+                "<b>📺 TV Search — Full Series</b>\n\n"
+                "Send the show title to search.\n"
+                "Results will prioritize complete series downloads.\n\n"
+                "<i>Example: Severance</i>",
+                reply_markup=InlineKeyboardMarkup(self._nav_footer(back_data="menu:tv")),
+                current_ui_message=q.message,
+            )
+            return
+
+    async def _on_cb_stop(self, *, data: str, q: Any, user_id: int) -> None:
+        if data.startswith("stop:"):
+            torrent_hash = data[5:]
+            key = (user_id, torrent_hash.lower())
+            task = self.progress_tasks.get(key)
+            if task and not task.done():
+                task.cancel()
+            # Get category before deleting so we can offer the right restart button.
+            restart_cb = "menu:movie"
+            restart_label = "🎬 Restart Movie Search"
+            try:
+                torrent_info = await asyncio.to_thread(self.qbt.get_torrent, torrent_hash)
+                if torrent_info:
+                    cat = str(torrent_info.get("category") or "").strip()
+                    if cat.lower() == self.cfg.tv_category.lower():
+                        restart_cb = "menu:tv"
+                        restart_label = "📺 Restart TV Search"
+            except Exception:
+                pass
+            try:
+                await asyncio.to_thread(self.qbt.delete_torrent, torrent_hash, delete_files=True)
+                stopped_kb = InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(restart_label, callback_data=restart_cb),
+                            InlineKeyboardButton("🏠 Home", callback_data="nav:home"),
+                        ]
+                    ]
+                )
+                await q.message.edit_text(
+                    "<b>🛑 Download Stopped</b>\n<i>Torrent has been removed.</i>",
+                    reply_markup=stopped_kb,
+                    parse_mode=_PM,
+                )
+            except Exception as e:
+                await q.message.edit_text(
+                    f"<b>⚠️ Stop Failed</b>\n<i>{_h(str(e))}</i>", reply_markup=None, parse_mode=_PM
+                )
+            await q.answer()
+            return
 
     def build_application(self) -> Application:
         app = (
@@ -6668,4 +5728,3 @@ class BotApp:
         app.add_error_handler(self.on_error)
 
         return app
-

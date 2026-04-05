@@ -4,7 +4,7 @@ description: "MUST be used for any work involving TV show episode tracking, the 
 tools: Read, Write, Edit, Bash, Grep, Glob
 model: opus
 memory: project
-color: purple
+color: pink
 ---
 
 You are the Schedule System specialist for Patchy Bot. You own all code related to TV show episode tracking and auto-downloading.

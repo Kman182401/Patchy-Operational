@@ -8,9 +8,10 @@ import os
 import secrets
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
+from .quality import quality_label, score_torrent
 from .utils import now_ts
 
 LOG = logging.getLogger("qbtg")
@@ -42,7 +43,7 @@ class Store:
         try:
             with self._connect() as conn:
                 conn.executescript(
-                """
+                    """
                 PRAGMA journal_mode=WAL;
                 PRAGMA wal_autocheckpoint=1000;
 
@@ -184,12 +185,16 @@ class Store:
                 CREATE INDEX IF NOT EXISTS idx_schedule_user_enabled ON schedule_tracks(user_id, enabled, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_remove_jobs_due ON remove_jobs(status, next_retry_at);
                 """
-            )
+                )
+            results_cols = {row[1] for row in conn.execute("PRAGMA table_info(results)")}
+            if "quality_score" not in results_cols:
+                conn.execute("ALTER TABLE results ADD COLUMN quality_score INTEGER DEFAULT 0")
+            if "quality_json" not in results_cols:
+                conn.execute("ALTER TABLE results ADD COLUMN quality_json TEXT")
+
             schedule_track_cols = {row[1] for row in conn.execute("PRAGMA table_info(schedule_tracks)")}
             if "auto_state_json" not in schedule_track_cols:
-                conn.execute(
-                    "ALTER TABLE schedule_tracks ADD COLUMN auto_state_json TEXT NOT NULL DEFAULT '{}'"
-                )
+                conn.execute("ALTER TABLE schedule_tracks ADD COLUMN auto_state_json TEXT NOT NULL DEFAULT '{}'")
                 schedule_track_cols.add("auto_state_json")
             if "auto_state_json" in schedule_track_cols:
                 conn.execute(
@@ -258,8 +263,7 @@ class Store:
         cutoff = now_ts() - max_age_hours * 3600
         with self._lock, self._connect() as conn:
             old_ids = [
-                r[0]
-                for r in conn.execute("SELECT search_id FROM searches WHERE created_at < ?", (cutoff,)).fetchall()
+                r[0] for r in conn.execute("SELECT search_id FROM searches WHERE created_at < ?", (cutoff,)).fetchall()
             ]
             for sid in old_ids:
                 conn.execute("DELETE FROM results WHERE search_id = ?", (sid,))
@@ -274,23 +278,42 @@ class Store:
                 (search_id, user_id, now_ts(), query, json.dumps(options)),
             )
             for idx, row in enumerate(rows, start=1):
+                name = str(row.get("fileName") or row.get("name") or "unknown")
+                size = int(row.get("fileSize") or row.get("size") or 0)
+                seeds = int(row.get("nbSeeders") or row.get("seeders") or 0)
+                ts = score_torrent(name, size, seeds)
+                q_json = json.dumps(
+                    {
+                        "resolution": ts.parsed.resolution,
+                        "source": ts.parsed.quality,
+                        "codec": ts.parsed.codec,
+                        "audio": list(ts.parsed.audio or []),
+                        "hdr": list(ts.parsed.hdr or []),
+                        "group": ts.parsed.group,
+                        "tier": ts.resolution_tier,
+                        "label": quality_label(ts.parsed),
+                    }
+                )
                 conn.execute(
                     """
-                    INSERT INTO results(search_id, idx, name, size, seeds, leechers, site, url, file_url, descr_link, hash)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                    INSERT INTO results(search_id, idx, name, size, seeds, leechers, site, url, file_url, descr_link, hash,
+                                        quality_score, quality_json)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         search_id,
                         idx,
-                        str(row.get("fileName") or row.get("name") or "unknown"),
-                        int(row.get("fileSize") or row.get("size") or 0),
-                        int(row.get("nbSeeders") or row.get("seeders") or 0),
+                        name,
+                        size,
+                        seeds,
                         int(row.get("nbLeechers") or row.get("leechers") or 0),
                         str(row.get("siteUrl") or row.get("site") or ""),
                         str(row.get("fileUrl") or row.get("file_url") or row.get("url") or ""),
                         str(row.get("fileUrl") or row.get("file_url") or ""),
                         str(row.get("descrLink") or row.get("descr_link") or ""),
                         str(row.get("fileHash") or row.get("hash") or ""),
+                        ts.format_score,
+                        q_json,
                     ),
                 )
             conn.commit()
@@ -310,7 +333,9 @@ class Store:
 
     def get_result(self, user_id: int, search_id: str, idx: int) -> dict[str, Any] | None:
         with self._lock, self._connect() as conn:
-            s = conn.execute("SELECT 1 FROM searches WHERE search_id = ? AND user_id = ?", (search_id, user_id)).fetchone()
+            s = conn.execute(
+                "SELECT 1 FROM searches WHERE search_id = ? AND user_id = ?", (search_id, user_id)
+            ).fetchone()
             if not s:
                 return None
             row = conn.execute("SELECT * FROM results WHERE search_id = ? AND idx = ?", (search_id, idx)).fetchone()
@@ -321,7 +346,7 @@ class Store:
             row = conn.execute("SELECT * FROM user_defaults WHERE user_id = ?", (user_id,)).fetchone()
             if not row:
                 return {
-                    "default_min_seeds": 0,
+                    "default_min_seeds": cfg.default_min_seeds,
                     "default_sort": cfg.default_sort,
                     "default_order": cfg.default_order,
                     "default_limit": cfg.default_limit,
@@ -394,14 +419,14 @@ class Store:
 
     def is_auth_locked(self, user_id: int) -> bool:
         with self._lock, self._connect() as conn:
-            row = conn.execute(
-                "SELECT locked_until FROM auth_attempts WHERE user_id = ?", (user_id,)
-            ).fetchone()
+            row = conn.execute("SELECT locked_until FROM auth_attempts WHERE user_id = ?", (user_id,)).fetchone()
             if not row:
                 return False
             return int(row["locked_until"] or 0) > now_ts()
 
-    def record_auth_failure(self, user_id: int, max_attempts: int = 5, lockout_s: int = 900, window_s: int = 3600) -> bool:
+    def record_auth_failure(
+        self, user_id: int, max_attempts: int = 5, lockout_s: int = 900, window_s: int = 3600
+    ) -> bool:
         now_value = now_ts()
         with self._lock, self._connect() as conn:
             row = conn.execute(
@@ -572,9 +597,23 @@ class Store:
         if not fields:
             return
         allowed = {
-            "chat_id", "enabled", "show_name", "year", "season", "tvmaze_id", "tmdb_id", "imdb_id",
-            "show_json", "pending_json", "auto_state_json", "skipped_signature", "last_missing_signature", "last_probe_json",
-            "last_probe_at", "next_check_at", "next_air_ts",
+            "chat_id",
+            "enabled",
+            "show_name",
+            "year",
+            "season",
+            "tvmaze_id",
+            "tmdb_id",
+            "imdb_id",
+            "show_json",
+            "pending_json",
+            "auto_state_json",
+            "skipped_signature",
+            "last_missing_signature",
+            "last_probe_json",
+            "last_probe_at",
+            "next_check_at",
+            "next_air_ts",
         }
         json_fields = {"show_json", "pending_json", "auto_state_json", "last_probe_json"}
         parts: list[str] = []
@@ -596,6 +635,15 @@ class Store:
         with self._lock, self._connect() as conn:
             conn.execute(f"UPDATE schedule_tracks SET {', '.join(parts)} WHERE track_id = ?", values)
             conn.commit()
+
+    def delete_schedule_track(self, track_id: str, user_id: int) -> bool:
+        with self._lock, self._connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM schedule_tracks WHERE track_id = ? AND user_id = ?",
+                (track_id, int(user_id)),
+            )
+            conn.commit()
+            return cur.rowcount > 0
 
     def get_schedule_show_cache(self, tvmaze_id: int) -> dict[str, Any] | None:
         with self._lock, self._connect() as conn:
@@ -788,9 +836,24 @@ class Store:
         if not fields:
             return
         allowed = {
-            "item_name", "root_key", "root_label", "remove_kind", "target_path", "root_path", "scan_path",
-            "plex_section_key", "plex_rating_key", "plex_title", "verification_json", "disk_deleted_at",
-            "plex_cleanup_started_at", "verified_at", "next_retry_at", "retry_count", "status", "last_error_text",
+            "item_name",
+            "root_key",
+            "root_label",
+            "remove_kind",
+            "target_path",
+            "root_path",
+            "scan_path",
+            "plex_section_key",
+            "plex_rating_key",
+            "plex_title",
+            "verification_json",
+            "disk_deleted_at",
+            "plex_cleanup_started_at",
+            "verified_at",
+            "next_retry_at",
+            "retry_count",
+            "status",
+            "last_error_text",
         }
         json_fields = {"verification_json"}
         parts: list[str] = []
@@ -844,7 +907,7 @@ class Store:
         except OSError as e:
             raise RuntimeError(f"Cannot create backup directory {backup_dir}: {e}") from e
 
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         backup_path = os.path.join(backup_dir, f"state_{ts}.sqlite3")
 
         with self._lock:
@@ -879,4 +942,3 @@ class Store:
             pass
 
         return backup_path
-
