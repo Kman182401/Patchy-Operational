@@ -120,3 +120,10 @@ Claude Code has 9 custom subagents in `.claude/agents/`. Use them proactively:
 ## Implementation rules
 
 - Never read secrets or env files unless explicitly needed.
+
+## Git Policy — ~/Patchy_Bot
+MUST NOT run any git-write commands (add, commit, push, reset, rebase, merge, branch create/delete, tag, stash) in ~/Patchy_Bot unless the user explicitly requests it in the current message. Read-only git commands (status, log, diff, show, remote -v) are always allowed. Editing files is allowed — committing them is not.
+
+## Task Master AI Instructions
+**Import Task Master's development workflow commands and guidelines, treat as if import is in the main CLAUDE.md file.**
+@./.taskmaster/CLAUDE.md
