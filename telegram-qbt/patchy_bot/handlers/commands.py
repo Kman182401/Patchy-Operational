@@ -889,7 +889,13 @@ async def cmd_unlock(bot: Any, update: Update, context: ContextTypes.DEFAULT_TYP
         await msg.delete()
     except Exception:
         pass
-    await bot._send_command_center(msg)
+    # Recover CC location from DB if in-memory dict was lost (e.g. bot restart)
+    if not bot.user_nav_ui.get(uid):
+        db_cc = await asyncio.to_thread(bot.store.get_command_center, uid)
+        if db_cc:
+            bot.user_nav_ui[uid] = db_cc
+    has_remembered = bool(bot.user_nav_ui.get(uid))
+    await bot._render_command_center(msg, user_id=uid, use_remembered_ui=has_remembered)
 
 
 async def cmd_logout(bot: Any, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

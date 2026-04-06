@@ -11,7 +11,6 @@ import os
 import re
 import secrets
 import threading
-import time
 import urllib.parse
 from datetime import time as dt_time
 from typing import Any
@@ -41,7 +40,6 @@ from .handlers import download as download_handler
 from .handlers import remove as remove_handler
 from .handlers import schedule as schedule_handler
 from .handlers import search as search_handler
-from .plex_organizer import organize_download as _organize_download
 from .quality import score_torrent
 from .rate_limiter import RateLimiter
 from .store import Store
@@ -515,315 +513,30 @@ class BotApp:
         )
 
     def _start_progress_tracker(self, user_id: int, torrent_hash: str, tracker_msg: Any, title: str) -> None:
-        key = (user_id, torrent_hash.lower())
-        existing = self.progress_tasks.get(key)
-        if existing and not existing.done():
-            existing.cancel()
-
-        self._track_ephemeral_message(user_id, tracker_msg)
-        task = asyncio.create_task(self._track_download_progress(user_id, torrent_hash, tracker_msg, title))
-        self.progress_tasks[key] = task
+        download_handler.start_progress_tracker(self._ctx, user_id, torrent_hash, tracker_msg, title)
 
     def _start_pending_progress_tracker(self, user_id: int, title: str, category: str, base_msg: Any) -> None:
-        key = (user_id, category.lower(), title.strip().lower())
-        existing = self.pending_tracker_tasks.get(key)
-        if existing and not existing.done():
-            return
-
-        task = asyncio.create_task(self._attach_progress_tracker_when_ready(user_id, title, category, base_msg))
-        self.pending_tracker_tasks[key] = task
+        download_handler.start_pending_progress_tracker(self._ctx, user_id, title, category, base_msg)
 
     async def _attach_progress_tracker_when_ready(self, user_id: int, title: str, category: str, base_msg: Any) -> None:
-        key = (user_id, category.lower(), title.strip().lower())
-        try:
-            torrent_hash = await self._resolve_hash_by_name(title, category, wait_s=35)
-            if not torrent_hash:
-                return
-
-            tracker_msg = await base_msg.reply_text(
-                "<b>📡 Live Monitor Attached</b>\n<i>Tracking download progress…</i>",
-                reply_markup=self._stop_download_keyboard(torrent_hash),
-                parse_mode=_PM,
-            )
-            self._start_progress_tracker(user_id, torrent_hash, tracker_msg, title)
-        except Exception:
-            LOG.warning("Deferred live monitor attach failed", exc_info=True)
-        finally:
-            self.pending_tracker_tasks.pop(key, None)
+        await download_handler.attach_progress_tracker_when_ready(self._ctx, user_id, title, category, base_msg)
 
     def _stop_download_keyboard(self, torrent_hash: str) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton("🏠 Home", callback_data="nav:home"),
-                    InlineKeyboardButton("🛑 Stop & Delete Download", callback_data=f"stop:{torrent_hash}"),
-                ]
-            ]
-        )
+        return download_handler.stop_download_keyboard(torrent_hash)
 
     async def _tracker_send_fallback(self, tracker_msg: Any, text: str) -> None:
-        """Send a message directly to the chat when tracker_msg was deleted."""
-        chat_id = getattr(tracker_msg, "chat_id", None)
-        if not chat_id:
-            return
-        try:
-            bot = tracker_msg.get_bot()
-            sent = await bot.send_message(chat_id=chat_id, text=text, parse_mode=_PM)
-            self._track_ephemeral_message(int(chat_id), sent)
-        except Exception:
-            LOG.warning("Tracker fallback send_message also failed", exc_info=True)
+        await download_handler.tracker_send_fallback(self._ctx, tracker_msg, text)
 
     async def _safe_tracker_edit(self, tracker_msg: Any, text: str, reply_markup: Any = None) -> bool:
-        try:
-            await tracker_msg.edit_text(text, reply_markup=reply_markup, parse_mode=_PM)
-            return True
-        except Exception as e:
-            msg = str(e).lower()
-            if "message is not modified" in msg:
-                return True
-            if "timed out" in msg or "timeout" in msg or "retry after" in msg:
-                LOG.warning("Live monitor Telegram edit transient failure: %s", e)
-                return False
-            LOG.warning("Live monitor Telegram edit failed: %s", e)
-            return False
+        return await download_handler.safe_tracker_edit(tracker_msg, text, reply_markup)
 
     async def _track_download_progress(self, user_id: int, torrent_hash: str, tracker_msg: Any, title: str) -> None:
-        key = (user_id, torrent_hash.lower())
-        start = time.time()
-        tick = 0
-        edit_count = 0
-        last_text = ""
-        last_edit_at = 0.0
-        qbt_error_streak = 0
-        edit_error_streak = 0
-        stop_kb = self._stop_download_keyboard(torrent_hash)
-
-        smooth_progress_pct: float | None = None
-        smooth_dls: float | None = None
-        smooth_uls: float | None = None
-        alpha = self.cfg.progress_smoothing_alpha
-
-        try:
-            while True:
-                elapsed = time.time() - start
-                if elapsed > self.cfg.progress_track_timeout_s:
-                    timeout_text = (
-                        (last_text + "\n") if last_text else ""
-                    ) + "<b>⏱ Monitor Timed Out</b>\nUse <code>/active</code> for current status."
-                    if timeout_text != last_text:
-                        edited = await self._safe_tracker_edit(tracker_msg, timeout_text, reply_markup=None)
-                        if edited:
-                            last_text = timeout_text
-                        else:
-                            await self._tracker_send_fallback(
-                                tracker_msg, "<b>⏱ Monitor Timed Out</b>\nUse <code>/active</code> for current status."
-                            )
-                    break
-
-                try:
-                    info = await asyncio.to_thread(self.qbt.get_torrent, torrent_hash)
-                    qbt_error_streak = 0
-                except Exception:
-                    qbt_error_streak += 1
-                    LOG.warning("Live monitor qBittorrent poll failed (%d/5)", qbt_error_streak, exc_info=True)
-                    if qbt_error_streak >= 5:
-                        await self._tracker_send_fallback(
-                            tracker_msg,
-                            "<b>⚠️ Monitor Paused</b>\n<i>Repeated qBittorrent errors.</i> Use <code>/active</code> for status.",
-                        )
-                        break
-                    await asyncio.sleep(self.cfg.progress_refresh_s)
-                    tick += 1
-                    continue
-
-                if not info:
-                    if elapsed < 20:
-                        await asyncio.sleep(self.cfg.progress_refresh_s)
-                        tick += 1
-                        continue
-                    notice = "<b>⚠️ Torrent Not Found</b>\n<i>Could not locate torrent for tracking.</i> Use <code>/active</code>."
-                    edited = await self._safe_tracker_edit(tracker_msg, notice, reply_markup=None)
-                    if not edited:
-                        await self._tracker_send_fallback(tracker_msg, notice)
-                    break
-
-                raw_progress_pct = max(0.0, min(100.0, float(info.get("progress", 0.0) or 0.0) * 100.0))
-                raw_dls = max(0.0, float(int(info.get("dlspeed", 0) or 0)))
-                raw_uls = max(0.0, float(int(info.get("upspeed", 0) or 0)))
-
-                if smooth_progress_pct is None:
-                    smooth_progress_pct = raw_progress_pct
-                    smooth_dls = raw_dls
-                    smooth_uls = raw_uls
-                else:
-                    smooth_progress_pct = ((1.0 - alpha) * smooth_progress_pct) + (alpha * raw_progress_pct)
-                    smooth_dls = ((1.0 - alpha) * smooth_dls) + (alpha * raw_dls)
-                    smooth_uls = ((1.0 - alpha) * smooth_uls) + (alpha * raw_uls)
-
-                text = self._render_progress_text(
-                    title,
-                    info,
-                    edit_count,
-                    progress_pct=smooth_progress_pct,
-                    dls_bps=int(smooth_dls),
-                    uls_bps=int(smooth_uls),
-                )
-
-                now = time.time()
-                if text != last_text and (now - last_edit_at) >= self.cfg.progress_edit_min_s:
-                    edited = await self._safe_tracker_edit(tracker_msg, text, reply_markup=stop_kb)
-                    if edited:
-                        last_text = text
-                        last_edit_at = now
-                        edit_count += 1
-                        edit_error_streak = 0
-                    else:
-                        edit_error_streak += 1
-                        if edit_error_streak >= 5:
-                            await self._tracker_send_fallback(
-                                tracker_msg,
-                                "<b>⚠️ Monitor Paused</b>\n<i>Repeated Telegram timeouts.</i> Use <code>/active</code> for status.",
-                            )
-                            break
-
-                if self._is_complete_torrent(info):
-                    done_text = (
-                        self._render_progress_text(
-                            title,
-                            info,
-                            edit_count,
-                            progress_pct=100.0,
-                            dls_bps=int(raw_dls),
-                            uls_bps=int(raw_uls),
-                        )
-                        + "\n<b>✅ Download Complete</b>"
-                    )
-                    await self._safe_tracker_edit(tracker_msg, done_text, reply_markup=None)
-                    # Mark as notified so the background poller won't double-notify.
-                    await asyncio.to_thread(self.store.mark_completion_notified, torrent_hash, title)
-                    # Organize download into Plex-standard structure.
-                    media_path = str(info.get("content_path") or info.get("save_path") or "").strip()
-                    category = str(info.get("category") or "")
-                    org_result = await asyncio.to_thread(
-                        _organize_download,
-                        media_path,
-                        category,
-                        self.cfg.tv_path,
-                        self.cfg.movies_path,
-                    )
-                    if org_result.moved:
-                        media_path = org_result.new_path
-                    # Trigger a Plex library scan for the (possibly new) download path.
-                    plex_added = False
-                    if self.plex.ready() and media_path:
-                        try:
-                            plex_msg = await asyncio.to_thread(self.plex.refresh_for_path, media_path)
-                            LOG.info("Post-download Plex refresh: %s", plex_msg)
-                            plex_added = True
-                        except Exception:
-                            LOG.warning("Post-download Plex refresh failed for %s", media_path, exc_info=True)
-                    notif_text = f"<b>✅ Download Complete</b>\n<code>{_h(title)}</code>"
-                    if org_result.moved:
-                        notif_text += f"\n<b>📁 Organized:</b> {_h(org_result.summary)}"
-                    if plex_added:
-                        notif_text += "\n\n<b>📚 Added to Plex</b>"
-                    await self._tracker_send_fallback(tracker_msg, notif_text)
-                    break
-
-                tick += 1
-                await asyncio.sleep(self.cfg.progress_refresh_s)
-
-        except asyncio.CancelledError:
-            return
-        except Exception:
-            LOG.warning("Live progress tracker failed", exc_info=True)
-            await self._tracker_send_fallback(
-                tracker_msg, "<b>⚠️ Monitor Error</b>\n<i>Unexpected error.</i> Use <code>/active</code> for status."
-            )
-        finally:
-            self.progress_tasks.pop(key, None)
+        await download_handler.track_download_progress(self._ctx, user_id, torrent_hash, tracker_msg, title)
 
     # ---------- Background completion poller ----------
 
     async def _completion_poller_job(self, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Periodic job that checks ALL torrents for completions missed by the live monitor."""
-        if not self.app:
-            return
-        try:
-            torrents = await asyncio.to_thread(self.qbt.list_torrents, filter_name="completed", limit=200)
-        except Exception:
-            LOG.warning("Completion poller: failed to list torrents", exc_info=True)
-            return
-
-        for info in torrents:
-            torrent_hash = str(info.get("hash") or "").strip().lower()
-            if not torrent_hash:
-                continue
-
-            if not self._is_complete_torrent(info):
-                continue
-
-            already = await asyncio.to_thread(self.store.is_completion_notified, torrent_hash)
-            if already:
-                continue
-
-            name = str(info.get("name") or "Unknown")
-            size = int(info.get("size", 0) or info.get("total_size", 0) or 0)
-            category = str(info.get("category") or "")
-
-            # Mark notified FIRST to prevent duplicates if sending fails partway.
-            await asyncio.to_thread(self.store.mark_completion_notified, torrent_hash, name)
-
-            # Organize download into Plex-standard structure.
-            media_path = str(info.get("content_path") or info.get("save_path") or "").strip()
-            org_result = await asyncio.to_thread(
-                _organize_download,
-                media_path,
-                category,
-                self.cfg.tv_path,
-                self.cfg.movies_path,
-            )
-            if org_result.moved:
-                media_path = org_result.new_path
-
-            # Trigger Plex scan.
-            plex_added = False
-            if self.plex.ready() and media_path:
-                try:
-                    plex_msg = await asyncio.to_thread(self.plex.refresh_for_path, media_path)
-                    LOG.info("Completion poller Plex refresh: %s", plex_msg)
-                    plex_added = True
-                except Exception:
-                    LOG.warning("Completion poller Plex refresh failed for %s", media_path, exc_info=True)
-
-            # Build notification.
-            lines = ["<b>✅ Download Complete</b>", f"<code>{_h(name)}</code>"]
-            if category:
-                lines.append(f"Category: <b>{_h(category)}</b>")
-            if size > 0:
-                lines.append(f"Size: <b>{human_size(size)}</b>")
-            if org_result.moved:
-                lines.append(f"<b>📁 Organized:</b> {_h(org_result.summary)}")
-            if plex_added:
-                lines.append("")
-                lines.append("<b>📚 Added to Plex</b>")
-            text = "\n".join(lines)
-
-            # Send to all allowed users.
-            for uid in self.cfg.allowed_user_ids:
-                try:
-                    sent = await self.app.bot.send_message(chat_id=uid, text=text, parse_mode=_PM)
-                    self._track_ephemeral_message(uid, sent)
-                except Exception:
-                    LOG.warning("Completion poller: failed to notify user %s for %s", uid, name, exc_info=True)
-
-            LOG.info("Completion poller: notified for '%s' (hash=%s)", name, torrent_hash)
-
-        # Housekeeping: clean up old records once per run.
-        try:
-            await asyncio.to_thread(self.store.cleanup_old_completion_records)
-        except Exception:
-            pass
+        await download_handler.completion_poller_job(self._ctx, context)
 
     # ---------- UI ----------
 
@@ -3233,7 +2946,13 @@ class BotApp:
                     await msg.delete()
                 except Exception:
                     pass
-                await self._send_command_center(msg)
+                # Recover CC location from DB if in-memory dict was lost (e.g. bot restart)
+                if not self.user_nav_ui.get(user_id):
+                    db_cc = await asyncio.to_thread(self.store.get_command_center, user_id)
+                    if db_cc:
+                        self.user_nav_ui[user_id] = db_cc
+                has_remembered = bool(self.user_nav_ui.get(user_id))
+                await self._render_command_center(msg, user_id=user_id, use_remembered_ui=has_remembered)
                 return
             locked = self.store.record_auth_failure(user_id)
             if locked:
@@ -3248,10 +2967,20 @@ class BotApp:
             if low in {"cancel", "/cancel", "stop", "exit", "abort"}:
                 if flow.get("mode") == "remove":
                     self._clear_flow(user_id)
-                    await self._send_command_center(msg)
+                    if not self.user_nav_ui.get(user_id):
+                        db_cc = await asyncio.to_thread(self.store.get_command_center, user_id)
+                        if db_cc:
+                            self.user_nav_ui[user_id] = db_cc
+                    has_remembered = bool(self.user_nav_ui.get(user_id))
+                    await self._render_command_center(msg, user_id=user_id, use_remembered_ui=has_remembered)
                 elif flow.get("mode") == "schedule":
                     self._clear_flow(user_id)
-                    await self._send_command_center(msg)
+                    if not self.user_nav_ui.get(user_id):
+                        db_cc = await asyncio.to_thread(self.store.get_command_center, user_id)
+                        if db_cc:
+                            self.user_nav_ui[user_id] = db_cc
+                    has_remembered = bool(self.user_nav_ui.get(user_id))
+                    await self._render_command_center(msg, user_id=user_id, use_remembered_ui=has_remembered)
                 elif flow.get("mode") == "tv":
                     await self._cleanup_private_user_message(msg)
                     await self._render_tv_ui(
@@ -3666,129 +3395,13 @@ class BotApp:
         return None
 
     async def _resolve_hash_by_name(self, title: str, category: str, wait_s: int = 20) -> str | None:
-        deadline = time.time() + wait_s
-        want = title.strip().lower()
-        want_norm = normalize_title(title)
-        while time.time() < deadline:
-            try:
-                rows = await asyncio.to_thread(
-                    self.qbt.list_torrents,
-                    category=category,
-                    sort="added_on",
-                    reverse=True,
-                    limit=150,
-                )
-                candidates: list[tuple[float, str]] = []
-                for row in rows:
-                    name = str(row.get("name") or "").strip().lower()
-                    if not name:
-                        continue
-                    h = str(row.get("hash") or "").strip().lower()
-                    if not re.fullmatch(r"[a-f0-9]{40}", h):
-                        continue
-                    # Priority 1: exact match
-                    if name == want:
-                        return h
-                    # Priority 2: normalized title match
-                    name_norm = normalize_title(name)
-                    if want_norm and name_norm == want_norm:
-                        return h
-                    # Priority 3: want contained in name (with length ratio check)
-                    if want in name and len(want) >= len(name) * 0.4:
-                        candidates.append((len(want) / len(name), h))
-                    # Priority 4: name contained in want (unusual)
-                    elif name in want and len(name) >= len(want) * 0.6:
-                        candidates.append((len(name) / len(want) * 0.8, h))
-                if candidates:
-                    candidates.sort(key=lambda c: c[0], reverse=True)
-                    return candidates[0][1]
-            except Exception:
-                LOG.warning("Hash lookup by name failed", exc_info=True)
-            await asyncio.sleep(0.6)
-        return None
+        return await download_handler.resolve_hash_by_name(self._ctx, title, category, wait_s)
 
     def _vpn_ready_for_download(self) -> tuple[bool, str]:
         return _shared.vpn_ready_for_download(getattr(self, "_ctx", self))
 
     async def _do_add(self, user_id: int, search_id: str, idx: int, media_choice: str) -> dict[str, Any]:
-        payload = self.store.get_search(user_id, search_id)
-        if not payload:
-            raise RuntimeError("Search result not found")
-        _search_meta, _rows = payload
-
-        choice = self._normalize_media_choice(media_choice)
-        if choice not in {"movies", "tv"}:
-            raise RuntimeError("Media type must be Movies or TV")
-
-        row = self.store.get_result(user_id, search_id, idx)
-        if not row:
-            raise RuntimeError("Search result not found")
-
-        try:
-            cat_result = await asyncio.wait_for(asyncio.to_thread(self._ensure_media_categories), timeout=10.0)
-        except TimeoutError:
-            raise RuntimeError("Storage/category check timed out (10s). Check qBittorrent connectivity.")
-
-        try:
-            transport_result = await asyncio.wait_for(asyncio.to_thread(self._qbt_transport_status), timeout=10.0)
-        except TimeoutError:
-            raise RuntimeError("qBittorrent transport check timed out (10s). Is qBittorrent running?")
-
-        try:
-            vpn_result = await asyncio.wait_for(asyncio.to_thread(self._vpn_ready_for_download), timeout=10.0)
-        except TimeoutError:
-            raise RuntimeError("VPN status check timed out (10s). Check VPN connection.")
-
-        results = [cat_result, transport_result, vpn_result]
-        ok, reason = results[0]
-        transport_ok, transport_reason = results[1]
-        vpn_ok, vpn_reason = results[2]
-        if not ok:
-            raise RuntimeError(f"Storage/category routing not ready: {reason}")
-        if not transport_ok:
-            raise RuntimeError(f"qBittorrent transport is not ready: {transport_reason}")
-        if not vpn_ok:
-            raise RuntimeError(f"VPN safety check failed: {vpn_reason}")
-
-        target = self._targets()[choice]
-        free_ok, free_reason = self._check_free_space(target["path"])
-        if not free_ok:
-            raise RuntimeError(free_reason)
-        url = self._result_to_url(row)
-        torrent_hash = self._extract_hash(row, url)
-        try:
-            resp = await asyncio.wait_for(
-                asyncio.to_thread(
-                    self.qbt.add_url,
-                    url,
-                    category=target["category"],
-                    savepath=target["path"],
-                ),
-                timeout=15.0,
-            )
-        except TimeoutError:
-            raise RuntimeError("qBittorrent add_url timed out (15s). The torrent may still be added — check /active.")
-
-        hash_note = ""
-        if not torrent_hash:
-            hash_note = "\n⏳ Hash is still being assigned by qBittorrent — live monitor will auto-attach shortly."
-
-        summary = (
-            f"✅ Added #{idx}: {row['name']}\n"
-            f"Library: {target['label']}\n"
-            f"Category: {target['category']}\n"
-            f"Path: {target['path']}\n"
-            f"qBittorrent: {resp}"
-            f"{hash_note}"
-        )
-
-        return {
-            "summary": summary,
-            "name": str(row["name"]),
-            "category": str(target["category"]),
-            "hash": torrent_hash,
-            "path": str(target["path"]),
-        }
+        return await download_handler.do_add(self._ctx, user_id, search_id, idx, media_choice)
 
     async def cmd_add(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await commands_handler.cmd_add(self, update, context)

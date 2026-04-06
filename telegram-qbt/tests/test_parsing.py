@@ -1446,12 +1446,19 @@ def test_on_text_schedule_cancel_returns_to_command_center() -> None:
             self.effective_message = DummyMessage()
             self.effective_user = DummyUser()
 
+    class DummyStore:
+        @staticmethod
+        def get_command_center(_user_id: int) -> dict[str, object] | None:
+            return None
+
     class DummyBot:
         on_text = BotApp.on_text
 
         def __init__(self) -> None:
             self.cleared: list[int] = []
             self.command_center_calls: list[object] = []
+            self.user_nav_ui: dict[int, dict[str, object]] = {}
+            self.store = DummyStore()
 
         @staticmethod
         def _is_allowlisted(_update) -> bool:
@@ -1471,7 +1478,9 @@ def test_on_text_schedule_cancel_returns_to_command_center() -> None:
         def _clear_flow(self, user_id: int) -> None:
             self.cleared.append(user_id)
 
-        async def _send_command_center(self, msg: object) -> None:
+        async def _render_command_center(
+            self, msg: object, user_id: int | None = None, *, use_remembered_ui: bool = False
+        ) -> None:
             self.command_center_calls.append(msg)
 
     update = DummyUpdate()
