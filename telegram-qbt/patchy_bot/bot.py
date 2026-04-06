@@ -943,7 +943,11 @@ class BotApp:
     def _clean_download_name(self, name: str, category: str) -> str:
         tv_cat = self.cfg.tv_category.lower()
         if category.lower() == tv_cat:
-            return self._extract_show_name(name)
+            show = self._extract_show_name(name)
+            codes = sorted(extract_episode_codes(name))
+            if codes:
+                return f"{show} {codes[0]}"
+            return show
         return self._extract_movie_name(name)
 
     def _active_downloads_section(self) -> str:

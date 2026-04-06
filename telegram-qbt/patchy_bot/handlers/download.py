@@ -721,32 +721,38 @@ async def on_cb_stop(bot_app: Any, *, data: str, q: Any, user_id: int) -> None:
         task = ctx.progress_tasks.get(key)
         if task and not task.done():
             task.cancel()
-        restart_cb = "menu:movie"
-        restart_label = "\U0001f3ac Restart Movie Search"
+        torrent_name = "Download"
         try:
             torrent_info = await asyncio.to_thread(ctx.qbt.get_torrent, torrent_hash)
             if torrent_info:
-                cat = str(torrent_info.get("category") or "").strip()
-                if cat.lower() == ctx.cfg.tv_category.lower():
-                    restart_cb = "menu:tv"
-                    restart_label = "\U0001f4fa Restart TV Search"
+                torrent_name = torrent_info.get("name", "Download") or "Download"
         except Exception:
             pass
         try:
             await asyncio.to_thread(ctx.qbt.delete_torrent, torrent_hash, delete_files=True)
-            stopped_kb = InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton(restart_label, callback_data=restart_cb),
-                        InlineKeyboardButton("\U0001f3e0 Home", callback_data="nav:home"),
-                    ]
-                ]
-            )
-            await q.message.edit_text(
-                "<b>\U0001f6d1 Download Stopped</b>\n<i>Torrent has been removed.</i>",
-                reply_markup=stopped_kb,
+            # Navigate to Command Center (replicating nav:home logic)
+            bot_app._clear_flow(user_id)
+            bot_app._cancel_pending_trackers_for_user(user_id)
+            if not bot_app.user_nav_ui.get(user_id):
+                db_cc = await asyncio.to_thread(bot_app.store.get_command_center, user_id)
+                if db_cc:
+                    bot_app.user_nav_ui[user_id] = db_cc
+            has_remembered = bool(bot_app.user_nav_ui.get(user_id))
+            await bot_app._render_command_center(q.message, user_id=user_id, use_remembered_ui=has_remembered)
+            # Send self-deleting confirmation notice (no buttons)
+            notice = await q.message.chat.send_message(
+                f"\u2705 <b>{_h(torrent_name)}</b> removed and canceled.",
                 parse_mode=_PM,
             )
+
+            async def _auto_delete(bot, cid: int, mid: int) -> None:
+                await asyncio.sleep(10)
+                try:
+                    await bot.delete_message(chat_id=cid, message_id=mid)
+                except Exception:
+                    pass
+
+            asyncio.create_task(_auto_delete(q.get_bot(), q.message.chat_id, notice.message_id))
         except Exception as e:
             await q.message.edit_text(
                 f"<b>\u26a0\ufe0f Stop Failed</b>\n<i>{_h(str(e))}</i>", reply_markup=None, parse_mode=_PM

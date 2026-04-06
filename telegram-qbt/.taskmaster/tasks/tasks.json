@@ -9,21 +9,21 @@
         "dependencies": [],
         "priority": "high",
         "details": "HandlerContext bundles all shared state into one object so extracted handler modules have clean, explicit dependencies instead of reaching back into BotApp. The BaseHandler ABC defines register_callbacks() and register_commands() methods that each handler implements. Create patchy_bot/handlers/__init__.py as well.",
-        "testStrategy": "Import types.py and base.py, instantiate HandlerContext with dummy values, create a trivial BaseHandler subclass. Run existing test suite — must still pass with 162 tests.",
+        "testStrategy": "Import types.py and base.py, instantiate HandlerContext with dummy values, create a trivial BaseHandler subclass. Run existing test suite \u2014 must still pass with 162 tests.",
         "subtasks": [],
         "updatedAt": "2026-04-05T02:32:06.796Z"
       },
       {
         "id": "2",
         "title": "Build the callback dispatcher",
-        "description": "Create patchy_bot/dispatch.py with a CallbackDispatcher class supporting exact-match and prefix-match registration. Replace the on_callback 1,251-line if/elif chain in bot.py with a dispatcher that routes to the same existing methods (still on BotApp). This is a mechanical refactor — behavior does not change, only the dispatch mechanism.",
+        "description": "Create patchy_bot/dispatch.py with a CallbackDispatcher class supporting exact-match and prefix-match registration. Replace the on_callback 1,251-line if/elif chain in bot.py with a dispatcher that routes to the same existing methods (still on BotApp). This is a mechanical refactor \u2014 behavior does not change, only the dispatch mechanism.",
         "status": "done",
         "dependencies": [
           "1"
         ],
         "priority": "high",
         "details": "The dispatcher supports two registration modes: register_exact(data, handler) for exact string matches like 'nav:home', and register_prefix(prefix, handler) for prefix matches like 'rm:'. Prefixes are sorted by length descending for longest-match-first. In this task, all 53 existing prefixes are registered on the dispatcher but still call the same BotApp methods. The on_callback method shrinks to: auth check, answer query, dispatch call.",
-        "testStrategy": "Register all 53 current prefixes on the dispatcher. Unit test that each prefix routes to the correct method name. Run existing callback tests — all must pass. Deploy and verify all Telegram button flows work.",
+        "testStrategy": "Register all 53 current prefixes on the dispatcher. Unit test that each prefix routes to the correct method name. Run existing callback tests \u2014 all must pass. Deploy and verify all Telegram button flows work.",
         "subtasks": [
           {
             "id": 1,
@@ -123,7 +123,7 @@
           {
             "id": 5,
             "title": "Wire delegation stubs in bot.py and verify all UI tests pass",
-            "description": "Replace each extracted method in bot.py with a delegation to the new ui/ module. Run full test suite — 15+ UI tests must pass.",
+            "description": "Replace each extracted method in bot.py with a delegation to the new ui/ module. Run full test suite \u2014 15+ UI tests must pass.",
             "details": "",
             "status": "pending",
             "dependencies": [],
@@ -210,7 +210,7 @@
           {
             "id": 4,
             "title": "Extract schedule UI builders (keyboards + text)",
-            "description": "Move all _schedule_*_keyboard and _schedule_*_text methods (~L1904-2165) — already partially in ui/ from task 3, wire remaining schedule-specific ones.",
+            "description": "Move all _schedule_*_keyboard and _schedule_*_text methods (~L1904-2165) \u2014 already partially in ui/ from task 3, wire remaining schedule-specific ones.",
             "details": "",
             "status": "pending",
             "dependencies": [],
@@ -240,7 +240,7 @@
           {
             "id": 7,
             "title": "Wire schedule handler into bot.py and verify all schedule tests pass",
-            "description": "Replace bot.py schedule methods with delegation to the new handler. Run full test suite — 12+ schedule tests must pass. Deploy and test /schedule flow end to end.",
+            "description": "Replace bot.py schedule methods with delegation to the new handler. Run full test suite \u2014 12+ schedule tests must pass. Deploy and test /schedule flow end to end.",
             "details": "",
             "status": "pending",
             "dependencies": [],
@@ -276,7 +276,7 @@
           {
             "id": 2,
             "title": "Extract remove selection state management",
-            "description": "Move _remove_selected_path through _remove_effective_candidates (~L3394-3464) — toggle, count, total size, effective candidates.",
+            "description": "Move _remove_selected_path through _remove_effective_candidates (~L3394-3464) \u2014 toggle, count, total size, effective candidates.",
             "details": "",
             "status": "pending",
             "dependencies": [],
@@ -316,7 +316,7 @@
           {
             "id": 6,
             "title": "Wire remove handler and verify all delete-safety tests pass",
-            "description": "Replace bot.py remove methods with delegation. Run full test suite — all 20 delete-safety tests and remove UI tests must pass.",
+            "description": "Replace bot.py remove methods with delegation. Run full test suite \u2014 all 20 delete-safety tests and remove UI tests must pass.",
             "details": "",
             "status": "pending",
             "dependencies": [],
@@ -340,7 +340,7 @@
           "7"
         ],
         "priority": "medium",
-        "details": "This is the last major extraction. Command handlers are thin dispatchers — cmd_search sets up a flow and calls the search handler, cmd_schedule calls the schedule handler, etc. The main complexity is that many cmd_* methods reference other domain handlers. After tasks 4-7 extract those domains, the command handlers become simple delegation wrappers. Also includes: _health_report (~95 lines of system health checks), _speed_report (~50 lines), and the menu:* callback group which navigates between Command Center screens. The on_error method handles unhandled exceptions.",
+        "details": "This is the last major extraction. Command handlers are thin dispatchers \u2014 cmd_search sets up a flow and calls the search handler, cmd_schedule calls the schedule handler, etc. The main complexity is that many cmd_* methods reference other domain handlers. After tasks 4-7 extract those domains, the command handlers become simple delegation wrappers. Also includes: _health_report (~95 lines of system health checks), _speed_report (~50 lines), and the menu:* callback group which navigates between Command Center screens. The on_error method handles unhandled exceptions.",
         "testStrategy": "Add at least 3 new tests for _health_report and _speed_report. Deploy and verify every slash command works in Telegram. Test the Command Center menu flow end to end.",
         "subtasks": [],
         "updatedAt": "2026-04-05T06:01:00.817Z"
@@ -368,7 +368,7 @@
         "dependencies": [],
         "priority": "medium",
         "details": "plex_organizer.py (336 lines) currently lives outside the patchy_bot/ package at the telegram-qbt/ root. bot.py imports it via bare 'from plex_organizer import organize_download' which only works when the working directory is telegram-qbt/. Moving it into the package makes the import path-independent and consistent with the rest of the codebase. The file contains the organize_download function that moves completed downloads into the Plex folder structure (Movies/ or TV/ShowName/Season XX/).",
-        "testStrategy": "Run existing test suite — must pass. Import patchy_bot.plex_organizer from any directory and verify it loads without error. Deploy and verify a completed download gets organized into Plex folders.",
+        "testStrategy": "Run existing test suite \u2014 must pass. Import patchy_bot.plex_organizer from any directory and verify it loads without error. Deploy and verify a completed download gets organized into Plex folders.",
         "subtasks": [],
         "updatedAt": "2026-04-05T04:32:47.613Z"
       },
@@ -387,7 +387,7 @@
       {
         "id": "12",
         "title": "Test backfill for extracted modules",
-        "description": "Add targeted tests for the largest coverage gaps exposed during extraction. Minimum new tests: (1) handlers/search.py — _apply_filters with quality/size/seed filters, _sort_rows with various keys; (2) handlers/download.py — _progress_bar at 0/50/100%, _format_eta edge cases, _is_complete_torrent for various states; (3) handlers/commands.py — _health_report returns valid HTML, _speed_report formats correctly; (4) handlers/chat.py — _chat_needs_qbt_snapshot returns correct boolean. Target: +30 new tests minimum.",
+        "description": "Add targeted tests for the largest coverage gaps exposed during extraction. Minimum new tests: (1) handlers/search.py \u2014 _apply_filters with quality/size/seed filters, _sort_rows with various keys; (2) handlers/download.py \u2014 _progress_bar at 0/50/100%, _format_eta edge cases, _is_complete_torrent for various states; (3) handlers/commands.py \u2014 _health_report returns valid HTML, _speed_report formats correctly; (4) handlers/chat.py \u2014 _chat_needs_qbt_snapshot returns correct boolean. Target: +30 new tests minimum.",
         "status": "done",
         "dependencies": [
           "4",
@@ -405,8 +405,8 @@
       },
       {
         "id": "13",
-        "title": "Final cleanup — remove dead code from bot.py",
-        "description": "After all extractions are complete: (1) Remove all delegation stubs from bot.py that now just call handler methods — replace with direct handler references in build_application. (2) Remove orphaned imports. (3) Verify bot.py is under 1,000 lines. (4) Update the backward-compat shim in qbt_telegram_bot.py to re-export from new module locations if needed. (5) Update patchy_bot/__init__.py re-exports.",
+        "title": "Final cleanup \u2014 remove dead code from bot.py",
+        "description": "After all extractions are complete: (1) Remove all delegation stubs from bot.py that now just call handler methods \u2014 replace with direct handler references in build_application. (2) Remove orphaned imports. (3) Verify bot.py is under 1,000 lines. (4) Update the backward-compat shim in qbt_telegram_bot.py to re-export from new module locations if needed. (5) Update patchy_bot/__init__.py re-exports.",
         "status": "done",
         "dependencies": [
           "4",
@@ -419,9 +419,31 @@
         ],
         "priority": "low",
         "details": "This is the final task. After all domain extractions, bot.py should contain only: BotApp.__init__ (create clients, state, handler instances), build_application (register handlers via dispatcher), on_text (thin router delegating to handlers based on flow mode), shared state declarations, and _post_init/_post_stop lifecycle. Target: bot.py under 1,000 lines (down from 6,671). The backward-compat shim qbt_telegram_bot.py must continue to re-export all public names. Run the full test suite one final time to confirm zero regressions.",
-        "testStrategy": "Run full test suite — all 192+ tests must pass. Import from qbt_telegram_bot in a test script and verify all documented public names are still accessible. Deploy and verify complete end-to-end flow: /start -> search movie -> add -> monitor progress -> complete -> /schedule show -> /remove item. Verify wc -l patchy_bot/bot.py < 1000.",
+        "testStrategy": "Run full test suite \u2014 all 192+ tests must pass. Import from qbt_telegram_bot in a test script and verify all documented public names are still accessible. Deploy and verify complete end-to-end flow: /start -> search movie -> add -> monitor progress -> complete -> /schedule show -> /remove item. Verify wc -l patchy_bot/bot.py < 1000.",
         "subtasks": [],
         "updatedAt": "2026-04-05T06:06:02.070Z"
+      },
+      {
+        "id": "14",
+        "title": "Multi-episode premiere batch download fix",
+        "description": "Fix schedule system so multiple simultaneously-released episodes are all downloaded in one runner cycle instead of one-per-hour.",
+        "status": "done",
+        "priority": "high",
+        "dependencies": [],
+        "details": "Changed schedule_apply_tracking_mode (removed break after first episode), schedule_should_attempt_auto (return full candidate list), schedule_refresh_track (loop over all targets). Both handlers/schedule.py and bot.py updated. 7 new tests added.",
+        "testStrategy": "4 tests in test_parsing.py for multi-episode tracking mode, 3 tests in test_runners.py for batch auto-acquire behavior. All 462 tests pass.",
+        "subtasks": []
+      },
+      {
+        "id": "15",
+        "title": "Command Center manage downloads sub-page",
+        "description": "Replace individual per-download cancel buttons on Command Center with single Manage Downloads button linking to a dedicated sub-page.",
+        "status": "done",
+        "priority": "medium",
+        "dependencies": [],
+        "details": "Changed command_center_keyboard() to show count button. Added manage_downloads_keyboard() and dl:manage callback handler. Increased download tuple limit from 5 to 10. Updated 5 DummyBot classes in tests.",
+        "testStrategy": "All 462 existing tests pass after adding _on_cb_dl_manage to DummyBot classes.",
+        "subtasks": []
       }
     ],
     "metadata": {

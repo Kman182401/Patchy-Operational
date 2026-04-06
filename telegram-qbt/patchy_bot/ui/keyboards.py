@@ -88,7 +88,7 @@ def manage_downloads_keyboard(
         rows.append([InlineKeyboardButton(f"🛑 {label}", callback_data=f"stop:{torrent_hash}")])
     if not rows:
         rows.append([InlineKeyboardButton("📭 No active downloads", callback_data="nav:home")])
-    rows.extend(nav_footer(back_data="nav:home"))
+    rows.extend(nav_footer(back_data="nav:home", include_home=False))
     return InlineKeyboardMarkup(rows)
 
 

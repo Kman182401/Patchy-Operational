@@ -52,6 +52,13 @@ class FakeBotApp:
     def _clear_flow(self, user_id: int) -> None:
         self.flow.pop(user_id, None)
 
+    def _cancel_pending_trackers_for_user(self, user_id: int) -> None:
+        pass  # no-op for tests
+
+    # -- Nav UI tracking (Command Center location) --
+
+    user_nav_ui: dict[int, Any] = {}
+
     # -- Rendering stubs (record calls) --
 
     async def _render_nav_ui(self, *args: Any, **kwargs: Any) -> MagicMock:
@@ -338,7 +345,7 @@ async def test_cb_flow_tv_full_series(fake_app: FakeBotApp, query: MagicMock) ->
 
 @pytest.mark.asyncio
 async def test_cb_stop_cancels_task(fake_app: FakeBotApp, query: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
-    """stop:hash cancels the progress task and deletes the torrent."""
+    """stop:hash cancels the progress task, deletes the torrent, and navigates to CC."""
     torrent_hash = "a" * 40
 
     # Plant a fake progress task
@@ -347,7 +354,8 @@ async def test_cb_stop_cancels_task(fake_app: FakeBotApp, query: MagicMock, monk
     mock_task.cancel = MagicMock()
     fake_app.progress_tasks[(USER_ID, torrent_hash)] = mock_task
 
-    # asyncio.to_thread: first call = get_torrent (returns info), second = delete_torrent
+    # asyncio.to_thread: first call = get_torrent (returns info), second = delete_torrent,
+    # third = get_command_center (from CC nav logic)
     call_count = 0
     torrent_info = {"category": "Movies", "name": "Test Movie"}
 
@@ -356,15 +364,27 @@ async def test_cb_stop_cancels_task(fake_app: FakeBotApp, query: MagicMock, monk
         call_count += 1
         if call_count == 1:
             return torrent_info
-        return None  # delete_torrent returns nothing
+        if call_count == 2:
+            return None  # delete_torrent returns nothing
+        return None  # get_command_center fallback
 
     monkeypatch.setattr("patchy_bot.handlers.download.asyncio.to_thread", fake_to_thread)
+
+    # Stub send_message for confirmation notice
+    notice_mock = MagicMock()
+    notice_mock.message_id = 999
+    query.message.chat.send_message = AsyncMock(return_value=notice_mock)
 
     await on_cb_stop(fake_app, data=f"stop:{torrent_hash}", q=query, user_id=USER_ID)
 
     mock_task.cancel.assert_called_once()
-    query.message.edit_text.assert_called_once()
-    assert "Stopped" in query.message.edit_text.call_args[0][0]
+    # Should navigate to command center
+    assert any(name == "command_center" for name, _, _ in fake_app.render_calls)
+    # Should send a confirmation notice with no reply_markup
+    query.message.chat.send_message.assert_called_once()
+    sent_kwargs = query.message.chat.send_message.call_args
+    assert "reply_markup" not in (sent_kwargs.kwargs or {})
+    assert "Test Movie" in sent_kwargs[0][0]
     query.answer.assert_called_once()
 
 
@@ -392,10 +412,10 @@ async def test_cb_stop_delete_fails(fake_app: FakeBotApp, query: MagicMock, monk
 
 
 @pytest.mark.asyncio
-async def test_cb_stop_tv_category_restart_label(
+async def test_cb_stop_tv_category_navigates_to_cc(
     fake_app: FakeBotApp, query: MagicMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """stop:hash for a TV-category torrent uses TV restart label."""
+    """stop:hash for a TV-category torrent navigates to CC with confirmation."""
     torrent_hash = "c" * 40
 
     call_count = 0
@@ -405,20 +425,23 @@ async def test_cb_stop_tv_category_restart_label(
         call_count += 1
         if call_count == 1:
             return {"category": "TV", "name": "Test.Show.S01E01"}
-        return None
+        if call_count == 2:
+            return None  # delete_torrent
+        return None  # get_command_center
 
     monkeypatch.setattr("patchy_bot.handlers.download.asyncio.to_thread", fake_to_thread)
 
+    notice_mock = MagicMock()
+    notice_mock.message_id = 999
+    query.message.chat.send_message = AsyncMock(return_value=notice_mock)
+
     await on_cb_stop(fake_app, data=f"stop:{torrent_hash}", q=query, user_id=USER_ID)
 
-    edit_call = query.message.edit_text.call_args
-    # The reply_markup should contain a TV restart button
-    kb = edit_call[1].get("reply_markup") or edit_call.kwargs.get("reply_markup")
-    assert kb is not None
-    # Flatten the keyboard buttons and look for TV callback
-    buttons = [btn for row in kb.inline_keyboard for btn in row]
-    tv_buttons = [b for b in buttons if "menu:tv" in (b.callback_data or "")]
-    assert len(tv_buttons) >= 1
+    # Should navigate to command center
+    assert any(name == "command_center" for name, _, _ in fake_app.render_calls)
+    # Confirmation notice should mention the torrent name
+    query.message.chat.send_message.assert_called_once()
+    assert "Test.Show.S01E01" in query.message.chat.send_message.call_args[0][0]
 
 
 # ---------------------------------------------------------------------------
