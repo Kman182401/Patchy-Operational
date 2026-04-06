@@ -11,6 +11,7 @@ import os
 import subprocess
 
 from ..types import HandlerContext
+from ..utils import human_size
 
 LOG = logging.getLogger("qbtg")
 
@@ -159,3 +160,34 @@ def vpn_ready_for_download(ctx: HandlerContext) -> tuple[bool, str]:
             LOG.debug("VPN systemd service %s is not active (may be managed externally)", service)
 
     return True, f"vpn ready ({iface} up)"
+
+
+def normalize_media_choice(value: str | None) -> str | None:
+    """Map user input to canonical 'movies' or 'tv', or None if unrecognized."""
+    if value is None:
+        return None
+    raw = value.strip().lower()
+    if raw in {"m", "movie", "movies", "film", "films"}:
+        return "movies"
+    if raw in {"t", "tv", "show", "shows", "series", "episode", "episodes", "tvshow", "tvshows"}:
+        return "tv"
+    return None
+
+
+def check_free_space(
+    target_path: str, warn_bytes: int = 10 * 1024**3, block_bytes: int = 5 * 1024**3
+) -> tuple[bool, str]:
+    """Check available disk space at target_path. Block download if below threshold."""
+    try:
+        st = os.statvfs(target_path)
+        free = int(st.f_frsize * st.f_bfree)
+    except OSError as e:
+        return True, f"disk check skipped ({e})"
+    if free < block_bytes:
+        return (
+            False,
+            f"Not enough disk space ({human_size(free)} free). Need at least {human_size(block_bytes)} to start a download.",
+        )
+    if free < warn_bytes:
+        LOG.warning("Low disk space on %s: %s free", target_path, human_size(free))
+    return True, "ok"

@@ -244,14 +244,7 @@ class BotApp:
         return _shared.targets(getattr(self, "_ctx", self))
 
     def _normalize_media_choice(self, value: str | None) -> str | None:
-        if value is None:
-            return None
-        raw = value.strip().lower()
-        if raw in {"m", "movie", "movies", "film", "films"}:
-            return "movies"
-        if raw in {"t", "tv", "show", "shows", "series", "episode", "episodes", "tvshow", "tvshows"}:
-            return "tv"
-        return None
+        return _shared.normalize_media_choice(value)
 
     @staticmethod
     def _norm_path(value: str | None) -> str:
@@ -267,19 +260,7 @@ class BotApp:
     def _check_free_space(
         target_path: str, warn_bytes: int = 10 * 1024**3, block_bytes: int = 5 * 1024**3
     ) -> tuple[bool, str]:
-        try:
-            st = os.statvfs(target_path)
-            free = int(st.f_frsize * st.f_bfree)
-        except OSError as e:
-            return True, f"disk check skipped ({e})"
-        if free < block_bytes:
-            return (
-                False,
-                f"Not enough disk space ({human_size(free)} free). Need at least {human_size(block_bytes)} to start a download.",
-            )
-        if free < warn_bytes:
-            LOG.warning("Low disk space on %s: %s free", target_path, human_size(free))
-        return True, "ok"
+        return _shared.check_free_space(target_path, warn_bytes, block_bytes)
 
     def _qbt_transport_status(self) -> tuple[bool, str]:
         return _shared.qbt_transport_status(getattr(self, "_ctx", self))
@@ -675,10 +656,7 @@ class BotApp:
                     smooth_dls = raw_dls
                     smooth_uls = raw_uls
                 else:
-                    smooth_progress_pct = max(
-                        smooth_progress_pct,
-                        ((1.0 - alpha) * smooth_progress_pct) + (alpha * raw_progress_pct),
-                    )
+                    smooth_progress_pct = ((1.0 - alpha) * smooth_progress_pct) + (alpha * raw_progress_pct)
                     smooth_dls = ((1.0 - alpha) * smooth_dls) + (alpha * raw_dls)
                     smooth_uls = ((1.0 - alpha) * smooth_uls) + (alpha * raw_uls)
 
@@ -1030,6 +1008,8 @@ class BotApp:
         try:
             last_text = ""
             last_dl_hashes: list[str] = []
+            error_streak = 0
+            MAX_CONSECUTIVE_ERRORS = 5
             while True:
                 await asyncio.sleep(5)
                 remembered = self.user_nav_ui.get(user_id)
@@ -1061,11 +1041,33 @@ class BotApp:
                         reply_markup=kb,
                         parse_mode=_PM,
                     )
+                    error_streak = 0
                 except TelegramError as e:
-                    if "message is not modified" not in str(e).lower():
-                        break
-                except Exception:
+                    err_msg = str(e).lower()
+                    if "message is not modified" in err_msg:
+                        error_streak = 0
+                        continue
+                    if any(hint in err_msg for hint in ("timed out", "timeout", "retry after", "network")):
+                        error_streak += 1
+                        LOG.warning("CC refresh transient error (%d/%d): %s", error_streak, MAX_CONSECUTIVE_ERRORS, e)
+                        if error_streak >= MAX_CONSECUTIVE_ERRORS:
+                            LOG.warning(
+                                "CC refresh loop stopped after %d consecutive errors for user %d",
+                                MAX_CONSECUTIVE_ERRORS,
+                                user_id,
+                            )
+                            break
+                        continue
+                    LOG.warning("CC refresh loop stopping for user %d: %s", user_id, e)
                     break
+                except Exception:
+                    error_streak += 1
+                    LOG.warning(
+                        "CC refresh unexpected error (%d/%d)", error_streak, MAX_CONSECUTIVE_ERRORS, exc_info=True
+                    )
+                    if error_streak >= MAX_CONSECUTIVE_ERRORS:
+                        break
+                    continue
         except asyncio.CancelledError:
             return
         finally:
@@ -2288,7 +2290,7 @@ class BotApp:
         exact_episode = 1 if self._schedule_row_matches_episode(name, season, episode) else 0
         exact_show = 1 if normalize_title(show_name) in normalize_title(name) else 0
         ts = score_torrent(name, size, seeds, media_type="episode")
-        return (exact_episode, exact_show, ts.resolution_tier, ts.format_score)
+        return (exact_episode, exact_show, seeds, ts.format_score)
 
     async def _schedule_download_episode(self, track: dict[str, Any], code: str) -> dict[str, Any]:
         m = re.fullmatch(r"S(\d{2})E(\d{2})", code)
@@ -2335,6 +2337,14 @@ class BotApp:
                     f"Exact episode {code} was found, but every exact match failed the current TV filters"
                 )
             raise RuntimeError(f"No exact qBittorrent result matched episode {code}")
+        # 1080p-only filter: keep only resolution_tier == 3 (1080p)
+        exact_1080p = [row for row in exact if getattr(row.get("_quality_score"), "resolution_tier", 0) == 3]
+        if not exact_1080p:
+            raise RuntimeError(
+                f"No 1080p result found for {code} — "
+                f"found {len(exact)} result(s) at other resolutions (schedule requires 1080p only)"
+            )
+        exact = exact_1080p
         ranked = sorted(
             exact,
             key=lambda row: self._schedule_episode_rank_key(row, str(show.get("name") or ""), season, episode),
@@ -3002,8 +3012,8 @@ class BotApp:
         return f"⏸ <b>{_h(name)}</b>\n   Season {season} · <i>paused</i>"
 
     async def _send_active(self, msg: Any, n: int = 10, user_id: int | None = None) -> None:
-        items = await asyncio.to_thread(self.qbt.list_active, limit=max(n * 4, 50))
-        active_downloads = [t for t in items if not self._is_complete_torrent(t)][:n]
+        all_items = await asyncio.to_thread(self.qbt.list_torrents, filter_name="all", limit=50)
+        active_downloads = [t for t in all_items if str(t.get("state") or "") in _ACTIVE_DL_STATES][:n]
         schedule_tracks: list[dict[str, Any]] = []
         if user_id is not None:
             schedule_tracks = await asyncio.to_thread(
@@ -3042,8 +3052,8 @@ class BotApp:
     async def _render_active_ui(
         self, user_id: int, msg: Any, n: int = 10, current_ui_message: Any | None = None
     ) -> Any:
-        items = await asyncio.to_thread(self.qbt.list_active, limit=max(n * 4, 50))
-        active_downloads = [t for t in items if not self._is_complete_torrent(t)][:n]
+        all_items = await asyncio.to_thread(self.qbt.list_torrents, filter_name="all", limit=50)
+        active_downloads = [t for t in all_items if str(t.get("state") or "") in _ACTIVE_DL_STATES][:n]
         schedule_tracks = await asyncio.to_thread(
             self.store.list_schedule_tracks, int(user_id), True, max(5, min(20, n))
         )
@@ -3658,6 +3668,7 @@ class BotApp:
     async def _resolve_hash_by_name(self, title: str, category: str, wait_s: int = 20) -> str | None:
         deadline = time.time() + wait_s
         want = title.strip().lower()
+        want_norm = normalize_title(title)
         while time.time() < deadline:
             try:
                 rows = await asyncio.to_thread(
@@ -3667,14 +3678,30 @@ class BotApp:
                     reverse=True,
                     limit=150,
                 )
+                candidates: list[tuple[float, str]] = []
                 for row in rows:
                     name = str(row.get("name") or "").strip().lower()
                     if not name:
                         continue
-                    if name == want or want in name or name in want:
-                        h = str(row.get("hash") or "").strip().lower()
-                        if re.fullmatch(r"[a-f0-9]{40}", h):
-                            return h
+                    h = str(row.get("hash") or "").strip().lower()
+                    if not re.fullmatch(r"[a-f0-9]{40}", h):
+                        continue
+                    # Priority 1: exact match
+                    if name == want:
+                        return h
+                    # Priority 2: normalized title match
+                    name_norm = normalize_title(name)
+                    if want_norm and name_norm == want_norm:
+                        return h
+                    # Priority 3: want contained in name (with length ratio check)
+                    if want in name and len(want) >= len(name) * 0.4:
+                        candidates.append((len(want) / len(name), h))
+                    # Priority 4: name contained in want (unusual)
+                    elif name in want and len(name) >= len(want) * 0.6:
+                        candidates.append((len(name) / len(want) * 0.8, h))
+                if candidates:
+                    candidates.sort(key=lambda c: c[0], reverse=True)
+                    return candidates[0][1]
             except Exception:
                 LOG.warning("Hash lookup by name failed", exc_info=True)
             await asyncio.sleep(0.6)
@@ -3697,12 +3724,22 @@ class BotApp:
         if not row:
             raise RuntimeError("Search result not found")
 
-        tasks = [
-            asyncio.to_thread(self._ensure_media_categories),
-            asyncio.to_thread(self._qbt_transport_status),
-            asyncio.to_thread(self._vpn_ready_for_download),
-        ]
-        results = await asyncio.gather(*tasks)
+        try:
+            cat_result = await asyncio.wait_for(asyncio.to_thread(self._ensure_media_categories), timeout=10.0)
+        except TimeoutError:
+            raise RuntimeError("Storage/category check timed out (10s). Check qBittorrent connectivity.")
+
+        try:
+            transport_result = await asyncio.wait_for(asyncio.to_thread(self._qbt_transport_status), timeout=10.0)
+        except TimeoutError:
+            raise RuntimeError("qBittorrent transport check timed out (10s). Is qBittorrent running?")
+
+        try:
+            vpn_result = await asyncio.wait_for(asyncio.to_thread(self._vpn_ready_for_download), timeout=10.0)
+        except TimeoutError:
+            raise RuntimeError("VPN status check timed out (10s). Check VPN connection.")
+
+        results = [cat_result, transport_result, vpn_result]
         ok, reason = results[0]
         transport_ok, transport_reason = results[1]
         vpn_ok, vpn_reason = results[2]
@@ -3719,12 +3756,18 @@ class BotApp:
             raise RuntimeError(free_reason)
         url = self._result_to_url(row)
         torrent_hash = self._extract_hash(row, url)
-        resp = await asyncio.to_thread(
-            self.qbt.add_url,
-            url,
-            category=target["category"],
-            savepath=target["path"],
-        )
+        try:
+            resp = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.qbt.add_url,
+                    url,
+                    category=target["category"],
+                    savepath=target["path"],
+                ),
+                timeout=15.0,
+            )
+        except TimeoutError:
+            raise RuntimeError("qBittorrent add_url timed out (15s). The torrent may still be added — check /active.")
 
         hash_note = ""
         if not torrent_hash:

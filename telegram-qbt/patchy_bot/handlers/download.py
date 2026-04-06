@@ -20,8 +20,15 @@ from telegram.ext import ContextTypes
 
 from ..plex_organizer import organize_download as _organize_download
 from ..types import HandlerContext
-from ..utils import _PM, _h, human_size
-from ._shared import vpn_ready_for_download
+from ..utils import _PM, _h, human_size, normalize_title
+from ._shared import (
+    check_free_space,
+    ensure_media_categories,
+    normalize_media_choice,
+    qbt_transport_status,
+    targets,
+    vpn_ready_for_download,
+)
 
 LOG = logging.getLogger("qbtg")
 
@@ -361,10 +368,7 @@ async def track_download_progress(
                 smooth_dls = raw_dls
                 smooth_uls = raw_uls
             else:
-                smooth_progress_pct = max(
-                    smooth_progress_pct,
-                    ((1.0 - alpha) * smooth_progress_pct) + (alpha * raw_progress_pct),
-                )
+                smooth_progress_pct = ((1.0 - alpha) * smooth_progress_pct) + (alpha * raw_progress_pct)
                 smooth_dls = ((1.0 - alpha) * smooth_dls) + (alpha * raw_dls)
                 smooth_uls = ((1.0 - alpha) * smooth_uls) + (alpha * raw_uls)
 
@@ -608,6 +612,7 @@ async def resolve_hash_by_name(ctx: HandlerContext, title: str, category: str, w
     """Poll qBT until a torrent matching *title* appears, returning its hash."""
     deadline = time.time() + wait_s
     want = title.strip().lower()
+    want_norm = normalize_title(title)
     while time.time() < deadline:
         try:
             rows = await asyncio.to_thread(
@@ -617,14 +622,30 @@ async def resolve_hash_by_name(ctx: HandlerContext, title: str, category: str, w
                 reverse=True,
                 limit=150,
             )
+            candidates: list[tuple[float, str]] = []
             for row in rows:
                 name = str(row.get("name") or "").strip().lower()
                 if not name:
                     continue
-                if name == want or want in name or name in want:
-                    h = str(row.get("hash") or "").strip().lower()
-                    if re.fullmatch(r"[a-f0-9]{40}", h):
-                        return h
+                h = str(row.get("hash") or "").strip().lower()
+                if not re.fullmatch(r"[a-f0-9]{40}", h):
+                    continue
+                # Priority 1: exact match
+                if name == want:
+                    return h
+                # Priority 2: normalized title match
+                name_norm = normalize_title(name)
+                if want_norm and name_norm == want_norm:
+                    return h
+                # Priority 3: want contained in name (with length ratio check)
+                if want in name and len(want) >= len(name) * 0.4:
+                    candidates.append((len(want) / len(name), h))
+                # Priority 4: name contained in want (unusual)
+                elif name in want and len(name) >= len(want) * 0.6:
+                    candidates.append((len(name) / len(want) * 0.8, h))
+            if candidates:
+                candidates.sort(key=lambda c: c[0], reverse=True)
+                return candidates[0][1]
         except Exception:
             LOG.warning("Hash lookup by name failed", exc_info=True)
         await asyncio.sleep(0.6)
@@ -637,23 +658,13 @@ async def do_add(
     search_id: str,
     idx: int,
     media_choice: str,
-    *,
-    normalize_media_choice_fn: Any,
-    targets_fn: Any,
-    ensure_media_categories_fn: Any,
-    qbt_transport_status_fn: Any,
-    check_free_space_fn: Any,
 ) -> dict[str, Any]:
-    """Add a torrent to qBittorrent.
-
-    Callables that haven't been extracted yet are passed in so bot.py can
-    provide them while the rest of the refactor proceeds.
-    """
+    """Add a torrent to qBittorrent with pre-flight safety checks."""
     payload = ctx.store.get_search(user_id, search_id)
     if not payload:
         raise RuntimeError("Search result not found")
 
-    choice = normalize_media_choice_fn(media_choice)
+    choice = normalize_media_choice(media_choice)
     if choice not in {"movies", "tv"}:
         raise RuntimeError("Media type must be Movies or TV")
 
@@ -661,15 +672,24 @@ async def do_add(
     if not row:
         raise RuntimeError("Search result not found")
 
-    tasks = [
-        asyncio.to_thread(ensure_media_categories_fn),
-        asyncio.to_thread(qbt_transport_status_fn),
-        asyncio.to_thread(vpn_ready_for_download, ctx),
-    ]
-    results = await asyncio.gather(*tasks)
-    ok, reason = results[0]
-    transport_ok, transport_reason = results[1]
-    vpn_ok, vpn_reason = results[2]
+    try:
+        cat_result = await asyncio.wait_for(asyncio.to_thread(ensure_media_categories, ctx), timeout=10.0)
+    except TimeoutError:
+        raise RuntimeError("Storage/category check timed out (10s). Check qBittorrent connectivity.")
+
+    try:
+        transport_result = await asyncio.wait_for(asyncio.to_thread(qbt_transport_status, ctx), timeout=10.0)
+    except TimeoutError:
+        raise RuntimeError("qBittorrent transport check timed out (10s). Is qBittorrent running?")
+
+    try:
+        vpn_result = await asyncio.wait_for(asyncio.to_thread(vpn_ready_for_download, ctx), timeout=10.0)
+    except TimeoutError:
+        raise RuntimeError("VPN status check timed out (10s). Check VPN connection.")
+
+    ok, reason = cat_result
+    transport_ok, transport_reason = transport_result
+    vpn_ok, vpn_reason = vpn_result
     if not ok:
         raise RuntimeError(f"Storage/category routing not ready: {reason}")
     if not transport_ok:
@@ -677,18 +697,24 @@ async def do_add(
     if not vpn_ok:
         raise RuntimeError(f"VPN safety check failed: {vpn_reason}")
 
-    target = targets_fn()[choice]
-    free_ok, free_reason = check_free_space_fn(target["path"])
+    target = targets(ctx)[choice]
+    free_ok, free_reason = check_free_space(target["path"])
     if not free_ok:
         raise RuntimeError(free_reason)
     url = result_to_url(row)
     torrent_hash = extract_hash(row, url)
-    resp = await asyncio.to_thread(
-        ctx.qbt.add_url,
-        url,
-        category=target["category"],
-        savepath=target["path"],
-    )
+    try:
+        resp = await asyncio.wait_for(
+            asyncio.to_thread(
+                ctx.qbt.add_url,
+                url,
+                category=target["category"],
+                savepath=target["path"],
+            ),
+            timeout=15.0,
+        )
+    except TimeoutError:
+        raise RuntimeError("qBittorrent add_url timed out (15s). The torrent may still be added \u2014 check /active.")
 
     hash_note = ""
     if not torrent_hash:

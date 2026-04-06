@@ -457,13 +457,13 @@ def test_schedule_rank_key_includes_seed_tiebreaker() -> None:
     assert key_high > key_low  # higher seeds = higher rank tuple
 
 
-def test_schedule_rank_key_tuple_is_5_elements() -> None:
-    """The rank key tuple should have exactly 5 elements."""
+def test_schedule_rank_key_tuple_is_4_elements() -> None:
+    """The rank key tuple should have exactly 4 elements: (exact_episode, exact_show, seeds, format_score)."""
     from patchy_bot.handlers.schedule import schedule_episode_rank_key
 
     row = {"fileName": "Show.S01E01.1080p.WEB-DL.x264-GROUP", "nbSeeders": 50, "fileSize": 1_000_000_000}
     key = schedule_episode_rank_key(row, "Show", 1, 1)
-    assert len(key) == 5
+    assert len(key) == 4
 
 
 # ===================================================================

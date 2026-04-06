@@ -1101,20 +1101,7 @@ def schedule_episode_rank_key(row: dict[str, Any], show_name: str, season: int, 
     exact_episode = 1 if schedule_row_matches_episode(name, season, episode) else 0
     exact_show = 1 if normalize_title(show_name) in normalize_title(name) else 0
     ts = score_torrent(name, size, seeds, media_type="episode")
-    # Seed bucket as 5th element: quality-first with health tiebreaker
-    if seeds >= 50:
-        seed_tier = 5
-    elif seeds >= 25:
-        seed_tier = 4
-    elif seeds >= 10:
-        seed_tier = 3
-    elif seeds >= 5:
-        seed_tier = 2
-    elif seeds >= 1:
-        seed_tier = 1
-    else:
-        seed_tier = 0
-    return (exact_episode, exact_show, ts.resolution_tier, ts.format_score, seed_tier)
+    return (exact_episode, exact_show, seeds, ts.format_score)
 
 
 # ---------------------------------------------------------------------------
@@ -1170,6 +1157,14 @@ async def schedule_download_episode(
         if raw_exact:
             raise RuntimeError(f"Exact episode {code} was found, but every exact match failed the current TV filters")
         raise RuntimeError(f"No exact qBittorrent result matched episode {code}")
+    # 1080p-only filter: keep only resolution_tier == 3 (1080p)
+    exact_1080p = [row for row in exact if getattr(row.get("_quality_score"), "resolution_tier", 0) == 3]
+    if not exact_1080p:
+        raise RuntimeError(
+            f"No 1080p result found for {code} — "
+            f"found {len(exact)} result(s) at other resolutions (schedule requires 1080p only)"
+        )
+    exact = exact_1080p
     ranked = sorted(
         exact,
         key=lambda row: schedule_episode_rank_key(row, str(show.get("name") or ""), season, episode),
