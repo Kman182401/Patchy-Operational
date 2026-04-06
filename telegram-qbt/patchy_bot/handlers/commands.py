@@ -50,6 +50,7 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from ..types import HandlerContext
+from ..ui import text as text_mod
 from ..utils import (
     _PM,
     _h,
@@ -756,9 +757,16 @@ async def cmd_help(bot: Any, update: Update, context: ContextTypes.DEFAULT_TYPE)
     msg = update.effective_message
     if not msg:
         return
+    section_rows: list[list[InlineKeyboardButton]] = []
+    for i in range(1, 8, 2):
+        row = [InlineKeyboardButton(text_mod.HELP_LABELS[i], callback_data=f"menu:help:{i}")]
+        if i + 1 <= 7:
+            row.append(InlineKeyboardButton(text_mod.HELP_LABELS[i + 1], callback_data=f"menu:help:{i + 1}"))
+        section_rows.append(row)
+    section_rows.extend(bot._nav_footer())
     await msg.reply_text(
         bot._help_text(),
-        reply_markup=bot._command_center_keyboard(),
+        reply_markup=InlineKeyboardMarkup(section_rows),
         disable_web_page_preview=True,
         parse_mode=_PM,
     )
@@ -1000,7 +1008,36 @@ async def on_cb_menu(bot_app: Any, *, data: str, q: Any, user_id: int) -> None:
 
     if data == "menu:help":
         text = bot_app._help_text()
-        kb = InlineKeyboardMarkup(bot_app._nav_footer())
+        section_rows: list[list[InlineKeyboardButton]] = []
+        for i in range(1, 8, 2):
+            row = [InlineKeyboardButton(text_mod.HELP_LABELS[i], callback_data=f"menu:help:{i}")]
+            if i + 1 <= 7:
+                row.append(InlineKeyboardButton(text_mod.HELP_LABELS[i + 1], callback_data=f"menu:help:{i + 1}"))
+            section_rows.append(row)
+        section_rows.extend(bot_app._nav_footer())
+        kb = InlineKeyboardMarkup(section_rows)
+        await bot_app._render_nav_ui(
+            user_id,
+            q.message,
+            text,
+            reply_markup=kb,
+            disable_web_page_preview=True,
+            current_ui_message=q.message,
+        )
+        return
+
+    if data.startswith("menu:help:"):
+        try:
+            section = int(data.split(":")[2])
+        except (IndexError, ValueError):
+            return
+        if section not in text_mod.HELP_SECTIONS:
+            return
+        text = text_mod.help_section_text(section)
+        back_row = [InlineKeyboardButton("◀️ Back to Help", callback_data="menu:help")]
+        kb_rows: list[list[InlineKeyboardButton]] = [back_row]
+        kb_rows.extend(bot_app._nav_footer())
+        kb = InlineKeyboardMarkup(kb_rows)
         await bot_app._render_nav_ui(
             user_id,
             q.message,

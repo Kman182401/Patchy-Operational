@@ -84,32 +84,31 @@ def start_text(
 
 
 # ---------------------------------------------------------------------------
-# Help text
+# Help text — sectioned menu
 # ---------------------------------------------------------------------------
 
-
-def help_text() -> str:
-    """Full help/quick-start message."""
-    return (
-        "<b>ℹ️ Help &amp; Quick Start</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "\n"
-        "<b>1) First-time setup</b>\n"
+# Section data: {number: (title, body)}
+HELP_SECTIONS: dict[int, tuple[str, str]] = {
+    1: (
+        "First-time setup",
         "• If locked, send your password once in chat (or use <code>/unlock &lt;password&gt;</code>).\n"
-        "• Open <code>/start</code> to launch the command center.\n"
-        "\n"
-        "<b>2) Daily workflow</b>\n"
+        "• Open <code>/start</code> to launch the command center.",
+    ),
+    2: (
+        "Daily workflow",
         "• Tap Movie Search or TV Search.\n"
         "• Enter a title.\n"
         "• Select a result and choose Movies or TV.\n"
-        "• The bot enforces VPN + storage checks before adding downloads.\n"
-        "\n"
-        "<b>3) Natural language (Patchy chat)</b>\n"
+        "• The bot enforces VPN + storage checks before adding downloads.",
+    ),
+    3: (
+        "Natural language (Patchy chat)",
         '• Chat normally (example: "Hey Patchy!", "How\'s qBittorrent doing?").\n'
         '• Ask search explicitly (example: "find dune part two", "search movie interstellar", "tv severance s1e2").\n'
-        "• While the bot is waiting for a title/filter, your message is treated as input for that step.\n"
-        "\n"
-        "<b>4) Slash commands</b>\n"
+        "• While the bot is waiting for a title/filter, your message is treated as input for that step.",
+    ),
+    4: (
+        "Slash commands",
         "• <code>/start</code> — open command center\n"
         "• <code>/search &lt;query&gt; [options]</code> — advanced search\n"
         "• <code>/schedule</code> — track a show and auto-acquire new aired episodes\n"
@@ -120,15 +119,17 @@ def help_text() -> str:
         "• <code>/profile</code> — policy + routing + VPN gate status\n"
         "• <code>/categories</code> — category/path mapping\n"
         "• <code>/plugins</code> — installed qB search plugins\n"
-        "• <code>/unlock &lt;password&gt;</code> / <code>/logout</code> — access control\n"
-        "\n"
-        "<b>5) Schedule mode</b>\n"
+        "• <code>/unlock &lt;password&gt;</code> / <code>/logout</code> — access control",
+    ),
+    5: (
+        "Schedule mode",
         "• Use <code>/schedule</code> or tap 🗓️ Schedule in command center.\n"
         "• Enter a show name, confirm the right title, and let the bot inspect Plex/library inventory automatically.\n"
         "• The bot stores the show ids, tracks the current season, and checks for newly aired missing episodes in the background.\n"
-        "• <i>Automation: after release + grace, the bot retries qBittorrent hourly and auto-queues valid episode matches.</i>\n"
-        "\n"
-        "<b>6) Search options (advanced)</b>\n"
+        "• <i>Automation: after release + grace, the bot retries qBittorrent hourly and auto-queues valid episode matches.</i>",
+    ),
+    6: (
+        "Search options (advanced)",
         "<i>Use with <code>/search</code>:</i>\n"
         "• <code>--min-seeds N</code>\n"
         "• <code>--min-size 700MB</code>\n"
@@ -139,10 +140,10 @@ def help_text() -> str:
         "• <code>--limit 1-50</code>\n"
         "\n"
         "<i>Example:</i>\n"
-        "<code>/search dune part two --min-seeds 25 --min-quality 1080 --sort seeds --order desc --limit 10</code>"
-        "\n"
-        "\n"
-        "<b>7) Quality terms key</b>\n"
+        "<code>/search dune part two --min-seeds 25 --min-quality 1080 --sort seeds --order desc --limit 10</code>",
+    ),
+    7: (
+        "Quality terms key",
         "<b>Source (best → worst):</b>\n"
         "• <b>REMUX</b> — Full Blu-ray, no re-encoding. Best quality, largest.\n"
         "• <b>BluRay</b> — Re-encoded from Blu-ray disc. Great quality.\n"
@@ -158,5 +159,28 @@ def help_text() -> str:
         "• <b>DDP</b> — Dolby Digital Plus (streaming standard).\n"
         "• <b>DD5.1</b> — Dolby Digital 5.1 surround.\n"
         "• <b>TrueHD / Atmos</b> — Lossless Blu-ray audio (best).\n"
-        "• <b>DTS / DTS-HD</b> — Lossless surround alternative."
-    )
+        "• <b>DTS / DTS-HD</b> — Lossless surround alternative.",
+    ),
+}
+
+# Short button labels for the help menu
+HELP_LABELS: dict[int, str] = {
+    1: "🔐 Setup",
+    2: "📋 Workflow",
+    3: "💬 Chat",
+    4: "⌨️ Commands",
+    5: "🗓️ Schedule",
+    6: "🔍 Search Options",
+    7: "🎞 Quality Key",
+}
+
+
+def help_text() -> str:
+    """Help menu intro — shown with section navigation buttons."""
+    return "<b>ℹ️ Help &amp; Quick Start</b>\n━━━━━━━━━━━━━━━━━━━━\n\nTap a topic below to learn more."
+
+
+def help_section_text(section: int) -> str:
+    """Return formatted text for a single help section."""
+    title, body = HELP_SECTIONS[section]
+    return f"<b>ℹ️ Help — {title}</b>\n━━━━━━━━━━━━━━━━━━━━\n\n{body}"
