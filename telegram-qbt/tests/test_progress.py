@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock
 
 from patchy_bot.handlers.download import (
@@ -286,12 +285,7 @@ class TestSafeTrackerEdit:
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class FakeOrganizeResult:
-    moved: bool = False
-    new_path: str = ""
-    summary: str = ""
-    files_moved: int = 0
+from tests.helpers import FakeOrganizeResult
 
 
 class TestTrackDownloadProgress:

@@ -150,7 +150,7 @@ class Config:
             search_early_exit_idle_s=max(1.0, float(os.getenv("SEARCH_EARLY_EXIT_IDLE_SECONDS", "2.5"))),
             search_early_exit_max_wait_s=max(2.0, float(os.getenv("SEARCH_EARLY_EXIT_MAX_WAIT_SECONDS", "12.0"))),
             default_limit=max(1, min(50, int(os.getenv("DEFAULT_RESULT_LIMIT", "10")))),
-            default_sort=parse_env_text(os.getenv("DEFAULT_SORT"), "quality").lower(),
+            default_sort=parse_env_text(os.getenv("DEFAULT_SORT"), "seeds").lower(),
             default_order=parse_env_text(os.getenv("DEFAULT_ORDER"), "desc").lower(),
             default_min_quality=min_q,
             default_min_seeds=max(0, int(os.getenv("DEFAULT_MIN_SEEDS", "5"))),

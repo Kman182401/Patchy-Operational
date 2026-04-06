@@ -154,6 +154,8 @@ def mock_callback_query() -> MagicMock:
     """Mock Telegram CallbackQuery with async answer/edit/reply."""
     query = MagicMock()
     query.answer = AsyncMock()
+    query.from_user = MagicMock()
+    query.from_user.id = 12345
 
     reply_msg = MagicMock()
     reply_msg.chat_id = 12345
@@ -165,6 +167,7 @@ def mock_callback_query() -> MagicMock:
     query.message.delete = AsyncMock()
     query.message.chat_id = 12345
     query.message.message_id = 100
+    query.message.get_bot = MagicMock(return_value=MagicMock())
     return query
 
 
@@ -172,6 +175,8 @@ def mock_callback_query() -> MagicMock:
 def mock_message() -> MagicMock:
     """Mock Telegram Message with async reply_text, edit_text, delete."""
     msg = MagicMock()
+    msg.from_user = MagicMock()
+    msg.from_user.id = 12345
 
     reply_msg = MagicMock()
     reply_msg.chat_id = 12345
@@ -182,4 +187,5 @@ def mock_message() -> MagicMock:
     msg.delete = AsyncMock()
     msg.chat_id = 12345
     msg.message_id = 100
+    msg.get_bot = MagicMock(return_value=MagicMock())
     return msg

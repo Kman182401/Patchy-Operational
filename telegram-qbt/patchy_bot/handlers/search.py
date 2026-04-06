@@ -11,6 +11,7 @@ Functions
 - ``apply_filters``        -- filter search result rows
 - ``deduplicate_results``  -- deduplicate by info hash, keep best seeder
 - ``sort_rows``            -- sort result rows by key
+- ``prioritize_results``   -- pin best 4K at #1, then 1080p only
 - ``parse_tv_filter``      -- parse "S1E2" style filter text
 - ``build_tv_query``       -- build TV search query string
 - ``strip_patchy_name``    -- strip bot name prefix from text
@@ -99,6 +100,9 @@ def apply_filters(
         ts = score_torrent(name, size, seeds, media_type=media_type)
         if ts.is_rejected:
             continue
+        # Reject non-English results (empty = assumed English, or must contain 'en')
+        if ts.parsed.languages and "en" not in ts.parsed.languages:
+            continue
         # Attach score to the row for sorting
         r["_quality_score"] = ts
 
@@ -159,6 +163,38 @@ def sort_rows(rows: list[dict[str, Any]], key: str, order: str) -> list[dict[str
     if key == "leechers":
         return sorted(rows, key=lambda x: int(x.get("nbLeechers") or x.get("leechers") or 0), reverse=reverse)
     return sorted(rows, key=lambda x: str(x.get("fileName") or x.get("name") or "").lower(), reverse=reverse)
+
+
+def prioritize_results(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Pin the best 4K result at position #1, then 1080p-only for the rest.
+
+    Separates results into above-1080p and exactly-1080p buckets.
+    At most one above-1080p result (the highest-seeded) is kept and
+    placed first.  All remaining slots are filled with 1080p results
+    sorted by seed count descending.
+    """
+    above: list[dict[str, Any]] = []
+    at_1080: list[dict[str, Any]] = []
+
+    for r in rows:
+        name = str(r.get("name") or r.get("fileName") or "")
+        tier = quality_tier(name)
+        if tier > 1080:
+            above.append(r)
+        elif tier == 1080:
+            at_1080.append(r)
+
+    def _seeds(x: dict[str, Any]) -> int:
+        return int(x.get("nbSeeders") or x.get("seeders") or 0)
+
+    above.sort(key=_seeds, reverse=True)
+    at_1080.sort(key=_seeds, reverse=True)
+
+    result: list[dict[str, Any]] = []
+    if above:
+        result.append(above[0])
+    result.extend(at_1080)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -318,7 +354,6 @@ def render_page(
         idx = row["idx"]
         name = str(row["name"])
         seeds = int(row.get("seeds") or 0)
-        leech = int(row.get("leechers") or 0)
         size = human_size(int(row.get("size") or 0))
         site = str((row.get("site") or "?").replace("https://", "").replace("http://", ""))
         # Jackett wraps real tracker name in brackets at end of torrent name
@@ -326,24 +361,46 @@ def render_page(
         if bracket_match:
             site = bracket_match.group(1)
             name = name[: bracket_match.start()].rstrip()
-        # Build quality label from stored quality_json, or fall back to quality_tier
+        # Build shortened quality label and extract source type from quality_json
         q_raw = row.get("quality_json")
+        q_data = None
         if q_raw:
             try:
                 q_data = json.loads(q_raw) if isinstance(q_raw, str) else q_raw
-                qlbl = q_data.get("label", "?")
             except (json.JSONDecodeError, TypeError):
-                qlbl = f"{quality_tier(name)}p" if quality_tier(name) else "?"
-        else:
-            qv = quality_tier(name)
-            qlbl = f"{qv}p" if qv else "?"
+                q_data = None
 
-        q_score = int(row.get("quality_score") or 0)
-        score_display = f" ⭐{q_score}" if q_score > 0 else ""
+        source_type = str(q_data.get("source") or "").strip() if q_data else ""
+        parts: list[str] = []
+        res = str(q_data.get("resolution") or "").strip() if q_data else ""
+        if res and res != "unknown":
+            parts.append(res)
+        codec_raw = str(q_data.get("codec") or "").strip() if q_data else ""
+        codec_map = {"avc": "x264", "hevc": "x265", "av1": "AV1", "xvid": "XviD"}
+        if codec_raw:
+            parts.append(codec_map.get(codec_raw.lower(), codec_raw.upper()))
+        audio_map = {
+            "dolby digital plus": "DDP",
+            "dolby digital": "DD5.1",
+            "truehd": "TrueHD",
+            "dts lossy": "DTS",
+            "dts lossless": "DTS-HD",
+            "aac": "AAC",
+            "atmos": "Atmos",
+            "mp3": "MP3",
+        }
+        for a in (q_data.get("audio") or []) if q_data else []:
+            abbr = audio_map.get(a.lower(), a)
+            if abbr not in parts:
+                parts.append(abbr)
+        grp = str(q_data.get("group") or "").strip() if q_data else ""
+        if grp:
+            parts.append(f"[{grp}]")
+        short_qlbl = " ".join(parts) if parts else "Unknown"
 
         lines.append(f"<b>{idx}.</b> <code>{_h(name)}</code>")
         lines.append(
-            f"   🌱 <b>{seeds}</b> | 🧲 {leech} | 📦 <code>{size}</code> | 🎞 <code>{_h(qlbl)}</code>{score_display} | 🌐 <i>{_h(site)}</i>"
+            f"   🌱 <b>{seeds}</b> seeds | 📡 {_h(source_type) if source_type else 'Unknown'} | 🎞 <code>{_h(short_qlbl)}</code> | 📦 <code>{size}</code> | 🌐 <i>{_h(site)}</i>"
         )
         lines.append("")
 

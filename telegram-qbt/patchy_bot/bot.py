@@ -48,6 +48,7 @@ from .store import Store
 from .types import HandlerContext
 from .ui import flow as flow_mod
 from .ui import keyboards as kb_mod
+from .ui import rendering as render_mod
 from .ui import text as text_mod
 from .utils import (
     _ACTIVE_DL_STATES,
@@ -346,63 +347,29 @@ class BotApp:
         flow_mod.clear_flow(self._ctx, user_id)
 
     def _remember_nav_ui_message(self, user_id: int, message: Any) -> None:
-        chat_id = getattr(message, "chat_id", None)
-        message_id = getattr(message, "message_id", None)
-        if chat_id is None or message_id is None:
-            return
-        self.user_nav_ui[user_id] = {
-            "chat_id": int(chat_id),
-            "message_id": int(message_id),
-        }
-        # Persist to DB so the CC location survives bot restarts.
-        try:
-            self.store.save_command_center(user_id, int(chat_id), int(message_id))
-        except Exception:
-            LOG.warning("Failed to persist CC location to DB", exc_info=True)
+        render_mod.remember_nav_ui_message(getattr(self, "_ctx", self), user_id, message)
 
     def _track_ephemeral_message(self, user_id: int, message: Any) -> None:
-        chat_id = getattr(message, "chat_id", None)
-        message_id = getattr(message, "message_id", None)
-        if chat_id is None or message_id is None:
-            return
-        self.user_ephemeral_messages.setdefault(user_id, []).append(
-            {"chat_id": int(chat_id), "message_id": int(message_id)}
-        )
+        render_mod.track_ephemeral_message(getattr(self, "_ctx", self), user_id, message)
 
     def _cancel_pending_trackers_for_user(self, user_id: int) -> None:
         """Cancel pending tracker tasks for this user so they don't create monitor messages after home cleanup."""
-        to_cancel = [key for key in list(self.pending_tracker_tasks) if key[0] == user_id]
-        for key in to_cancel:
-            task = self.pending_tracker_tasks.pop(key, None)
-            if task and not task.done():
-                task.cancel()
+        render_mod.cancel_pending_trackers_for_user(self._ctx, user_id)
 
     async def _delete_old_nav_ui(self, user_id: int, bot: Any) -> None:
         """Delete the previous nav-UI message (e.g. old Command Center) so /start shows a clean chat."""
-        info = self.user_nav_ui.pop(user_id, None)
-        if not info:
-            return
-        try:
-            await bot.delete_message(chat_id=info["chat_id"], message_id=info["message_id"])
-        except TelegramError:
-            pass
+        await render_mod.delete_old_nav_ui(self._ctx, user_id, bot)
 
     async def _cleanup_ephemeral_messages(self, user_id: int, bot: Any) -> None:
-        msgs = self.user_ephemeral_messages.pop(user_id, [])
-        for m in msgs:
-            try:
-                await bot.delete_message(chat_id=m["chat_id"], message_id=m["message_id"])
-            except TelegramError:
-                pass
+        await render_mod.cleanup_ephemeral_messages(getattr(self, "_ctx", self), user_id, bot)
 
     async def _strip_old_keyboard(self, bot: Any, chat_id: int, message_id: int) -> None:
-        """Remove the inline keyboard from an old message so only one interactive bubble exists."""
-        if not chat_id or not message_id:
-            return
-        try:
-            await bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id, reply_markup=None)
-        except Exception:
-            pass  # Message may be deleted, too old, etc.
+        """Remove the inline keyboard from an old message so only one interactive bubble exists.
+
+        Logic lives in ui/rendering.py as ``strip_old_keyboard``; this method is
+        kept for backward compatibility with tests that reference BotApp._strip_old_keyboard.
+        """
+        await render_mod.strip_old_keyboard(bot, chat_id, message_id)
 
     async def _render_nav_ui(
         self,
@@ -414,54 +381,19 @@ class BotApp:
         disable_web_page_preview: bool = True,
         current_ui_message: Any | None = None,
     ) -> Any:
-        bot = anchor_message.get_bot()
-        remembered = self.user_nav_ui.get(user_id) or {}
-        target_chat_id = int(remembered.get("chat_id") or 0)
-        target_message_id = int(remembered.get("message_id") or 0)
-        if current_ui_message is not None:
-            target_chat_id = int(getattr(current_ui_message, "chat_id", 0) or 0)
-            target_message_id = int(getattr(current_ui_message, "message_id", 0) or 0)
-        if target_chat_id and target_message_id:
-            try:
-                rendered = await bot.edit_message_text(
-                    chat_id=target_chat_id,
-                    message_id=target_message_id,
-                    text=text,
-                    reply_markup=reply_markup,
-                    disable_web_page_preview=disable_web_page_preview,
-                    parse_mode=_PM,
-                )
-                target_message = rendered if hasattr(rendered, "message_id") else current_ui_message
-                if target_message is not None:
-                    self._remember_nav_ui_message(user_id, target_message)
-                    return target_message
-            except TelegramError as e:
-                if "message is not modified" in str(e).lower():
-                    target_message = current_ui_message
-                    if target_message is not None:
-                        self._remember_nav_ui_message(user_id, target_message)
-                        return target_message
-        await self._strip_old_keyboard(bot, target_chat_id, target_message_id)
-        rendered = await anchor_message.reply_text(
+        ctx = getattr(self, "_ctx", self)
+        return await render_mod.render_nav_ui(
+            ctx,
+            user_id,
+            anchor_message,
             text,
             reply_markup=reply_markup,
             disable_web_page_preview=disable_web_page_preview,
-            parse_mode=_PM,
+            current_ui_message=current_ui_message,
         )
-        self._remember_nav_ui_message(user_id, rendered)
-        return rendered
 
     def _remember_flow_ui_message(self, user_id: int, flow: dict[str, Any] | None, message: Any, flow_key: str) -> None:
-        if not isinstance(flow, dict):
-            return
-        chat_id = getattr(message, "chat_id", None)
-        message_id = getattr(message, "message_id", None)
-        if chat_id is None or message_id is None:
-            return
-        flow[f"{flow_key}_ui_chat_id"] = int(chat_id)
-        flow[f"{flow_key}_ui_message_id"] = int(message_id)
-        if str(flow.get("mode") or "") == flow_key:
-            self._set_flow(user_id, flow)
+        render_mod.remember_flow_ui_message(getattr(self, "_ctx", self), user_id, flow, message, flow_key)
 
     async def _render_flow_ui(
         self,
@@ -475,42 +407,18 @@ class BotApp:
         disable_web_page_preview: bool = True,
         current_ui_message: Any | None = None,
     ) -> Any:
-        flow = flow if isinstance(flow, dict) else None
-        bot = anchor_message.get_bot()
-        target_chat_id = int(flow.get(f"{flow_key}_ui_chat_id") or 0) if flow else 0
-        target_message_id = int(flow.get(f"{flow_key}_ui_message_id") or 0) if flow else 0
-        if current_ui_message is not None:
-            target_chat_id = int(getattr(current_ui_message, "chat_id", 0) or 0)
-            target_message_id = int(getattr(current_ui_message, "message_id", 0) or 0)
-        if target_chat_id and target_message_id:
-            try:
-                rendered = await bot.edit_message_text(
-                    chat_id=target_chat_id,
-                    message_id=target_message_id,
-                    text=text,
-                    reply_markup=reply_markup,
-                    disable_web_page_preview=disable_web_page_preview,
-                    parse_mode=_PM,
-                )
-                target_message = rendered if hasattr(rendered, "message_id") else current_ui_message
-                if target_message is not None:
-                    self._remember_flow_ui_message(user_id, flow, target_message, flow_key)
-                    return target_message
-            except TelegramError as e:
-                if "message is not modified" in str(e).lower():
-                    target_message = current_ui_message
-                    if target_message is not None:
-                        self._remember_flow_ui_message(user_id, flow, target_message, flow_key)
-                        return target_message
-        await self._strip_old_keyboard(bot, target_chat_id, target_message_id)
-        rendered = await anchor_message.reply_text(
+        ctx = getattr(self, "_ctx", self)
+        return await render_mod.render_flow_ui(
+            ctx,
+            user_id,
+            anchor_message,
+            flow,
             text,
+            flow_key=flow_key,
             reply_markup=reply_markup,
             disable_web_page_preview=disable_web_page_preview,
-            parse_mode=_PM,
+            current_ui_message=current_ui_message,
         )
-        self._remember_flow_ui_message(user_id, flow, rendered, flow_key)
-        return rendered
 
     async def _render_remove_ui(
         self,
@@ -523,12 +431,13 @@ class BotApp:
         disable_web_page_preview: bool = True,
         current_ui_message: Any | None = None,
     ) -> Any:
-        return await self._render_flow_ui(
+        ctx = getattr(self, "_ctx", self)
+        return await render_mod.render_remove_ui(
+            ctx,
             user_id,
             anchor_message,
             flow,
             text,
-            flow_key="remove",
             reply_markup=reply_markup,
             disable_web_page_preview=disable_web_page_preview,
             current_ui_message=current_ui_message,
@@ -545,12 +454,13 @@ class BotApp:
         disable_web_page_preview: bool = True,
         current_ui_message: Any | None = None,
     ) -> Any:
-        return await self._render_flow_ui(
+        ctx = getattr(self, "_ctx", self)
+        return await render_mod.render_schedule_ui(
+            ctx,
             user_id,
             anchor_message,
             flow,
             text,
-            flow_key="schedule",
             reply_markup=reply_markup,
             disable_web_page_preview=disable_web_page_preview,
             current_ui_message=current_ui_message,
@@ -567,28 +477,20 @@ class BotApp:
         disable_web_page_preview: bool = True,
         current_ui_message: Any | None = None,
     ) -> Any:
-        return await self._render_flow_ui(
+        ctx = getattr(self, "_ctx", self)
+        return await render_mod.render_tv_ui(
+            ctx,
             user_id,
             anchor_message,
             flow,
             text,
-            flow_key="tv",
             reply_markup=reply_markup,
             disable_web_page_preview=disable_web_page_preview,
             current_ui_message=current_ui_message,
         )
 
     async def _cleanup_private_user_message(self, message: Any) -> None:
-        chat = getattr(message, "chat", None)
-        chat_type = str(getattr(chat, "type", "") or "").lower()
-        if chat_type != "private":
-            return
-        try:
-            await message.delete()
-        except TelegramError:
-            return
-        except Exception:
-            return
+        await render_mod.cleanup_private_user_message(message)
 
     # ---------- Live progress (delegated to handlers.download) ----------
 
@@ -2825,6 +2727,7 @@ class BotApp:
             )
             filtered = self._deduplicate_results(filtered)
             ranked = self._sort_rows(filtered, key=sort_key, order=order)
+            ranked = search_handler.prioritize_results(ranked)
             final_rows = ranked[:limit]
 
             if not final_rows:

@@ -7,7 +7,6 @@ from handlers/download.py and handlers/remove.py.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -23,19 +22,11 @@ from patchy_bot.handlers.remove import (
     remove_runner_interval_s,
     remove_runner_job,
 )
-from tests.helpers import make_torrent_info
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-@dataclass
-class FakeOrganizeResult:
-    moved: bool = False
-    new_path: str = "/tmp/test"
-    summary: str = "skip"
-    files_moved: int = 0
+from tests.helpers import FakeOrganizeResult, make_torrent_info
 
 
 def _completed_torrent(**overrides: Any) -> dict[str, Any]:

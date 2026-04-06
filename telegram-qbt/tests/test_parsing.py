@@ -982,6 +982,9 @@ def test_render_remove_ui_falls_back_to_new_message_when_edit_fails() -> None:
             self.edit_calls.append(kwargs)
             raise TelegramError("message to edit not found")
 
+        async def edit_message_reply_markup(self, **kwargs: object):
+            pass
+
     class DummyMessage:
         def __init__(self, bot: DummyBotApi, chat_id: int, message_id: int) -> None:
             self._bot = bot
@@ -1075,6 +1078,9 @@ def test_promote_stale_inline_ui_reposts_keyboard_and_disables_old_message() -> 
         async def edit_message_text(self, **kwargs: object):
             self.edit_calls.append(kwargs)
             raise TelegramError("message to edit not found")
+
+        async def edit_message_reply_markup(self, **kwargs: object):
+            pass
 
     class DummyMessage:
         def __init__(self, bot: DummyBotApi, chat_id: int, message_id: int) -> None:
@@ -1948,6 +1954,9 @@ def test_render_nav_ui_falls_back_to_new_message_when_edit_fails() -> None:
             self.edit_calls.append(kwargs)
             raise TelegramError("message to edit not found")
 
+        async def edit_message_reply_markup(self, **kwargs: object):
+            pass
+
     class DummyMessage:
         def __init__(self, bot: DummyBotApi, chat_id: int, message_id: int) -> None:
             self._bot = bot
@@ -1990,6 +1999,9 @@ def test_render_schedule_ui_falls_back_to_new_message_when_edit_fails() -> None:
         async def edit_message_text(self, **kwargs: object):
             self.edit_calls.append(kwargs)
             raise TelegramError("message to edit not found")
+
+        async def edit_message_reply_markup(self, **kwargs: object):
+            pass
 
     class DummyMessage:
         def __init__(self, bot: DummyBotApi, chat_id: int, message_id: int) -> None:
@@ -2084,6 +2096,9 @@ def test_render_tv_ui_falls_back_to_new_message_when_edit_fails() -> None:
         async def edit_message_text(self, **kwargs: object):
             self.edit_calls.append(kwargs)
             raise TelegramError("message to edit not found")
+
+        async def edit_message_reply_markup(self, **kwargs: object):
+            pass
 
     class DummyMessage:
         def __init__(self, bot: DummyBotApi, chat_id: int, message_id: int) -> None:
@@ -3376,6 +3391,9 @@ def test_render_movie_ui_falls_back_to_new_message_when_edit_fails() -> None:
         async def edit_message_text(self, **kwargs: object):
             self.edit_calls.append(kwargs)
             raise TelegramError("message to edit not found")
+
+        async def edit_message_reply_markup(self, **kwargs: object):
+            pass
 
     class DummyMessage:
         def __init__(self, bot: DummyBotApi, chat_id: int, message_id: int) -> None:

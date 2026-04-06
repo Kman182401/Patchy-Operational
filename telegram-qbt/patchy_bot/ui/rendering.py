@@ -81,6 +81,26 @@ async def cleanup_ephemeral_messages(ctx: HandlerContext, user_id: int, bot: Any
 
 
 # ---------------------------------------------------------------------------
+# Keyboard-stripping helper
+# ---------------------------------------------------------------------------
+
+
+async def strip_old_keyboard(bot: Any, chat_id: int, message_id: int) -> None:
+    """Remove the inline keyboard from an old message.
+
+    Called before sending a replacement message so only one interactive
+    bubble is visible in chat.  Failures are silenced — the message may be
+    deleted, too old, or already stripped.
+    """
+    if not chat_id or not message_id:
+        return
+    try:
+        await bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id, reply_markup=None)
+    except TelegramError:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Nav-UI helpers
 # ---------------------------------------------------------------------------
 
@@ -172,6 +192,7 @@ async def render_nav_ui(
                 if target_message is not None:
                     remember_nav_ui_message(ctx, user_id, target_message)
                     return target_message
+    await strip_old_keyboard(bot, target_chat_id, target_message_id)
     rendered = await anchor_message.reply_text(
         text,
         reply_markup=reply_markup,
@@ -226,6 +247,7 @@ async def render_flow_ui(
                 if target_message is not None:
                     remember_flow_ui_message(ctx, user_id, flow, target_message, flow_key)
                     return target_message
+    await strip_old_keyboard(bot, target_chat_id, target_message_id)
     rendered = await anchor_message.reply_text(
         text,
         reply_markup=reply_markup,

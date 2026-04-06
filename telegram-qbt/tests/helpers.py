@@ -9,7 +9,18 @@ from __future__ import annotations
 
 import json
 import secrets
+from dataclasses import dataclass
 from typing import Any
+
+
+@dataclass
+class FakeOrganizeResult:
+    """Stub for plex_organizer.OrganizeResult used in tests that mock organize_download."""
+
+    moved: bool = False
+    new_path: str = ""
+    summary: str = ""
+    files_moved: int = 0
 
 
 def make_torrent_info(
