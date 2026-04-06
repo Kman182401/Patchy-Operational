@@ -49,23 +49,31 @@ def compact_action_rows(
 # ---------------------------------------------------------------------------
 
 
-def command_center_keyboard() -> InlineKeyboardMarkup:
-    """Main command-center keyboard shown on /start."""
-    return InlineKeyboardMarkup(
+def command_center_keyboard(
+    active_downloads: list[tuple[str, str]] | None = None,
+) -> InlineKeyboardMarkup:
+    """Main command-center keyboard shown on /start.
+
+    Args:
+        active_downloads: Optional list of ``(torrent_hash, display_name)``
+            tuples.  When non-empty a cancel button is shown for each (up to 3).
+    """
+    rows: list[list[InlineKeyboardButton]] = [
         [
-            [
-                InlineKeyboardButton("🎬 Movie Search", callback_data="menu:movie"),
-                InlineKeyboardButton("📺 TV Search", callback_data="menu:tv"),
-            ],
-            [
-                InlineKeyboardButton("🗓️ Schedule", callback_data="menu:schedule"),
-                InlineKeyboardButton("🗑️ Remove", callback_data="menu:remove"),
-            ],
-            [
-                InlineKeyboardButton("ℹ️ Help", callback_data="menu:help"),
-            ],
-        ]
-    )
+            InlineKeyboardButton("🎬 Movie Search", callback_data="menu:movie"),
+            InlineKeyboardButton("📺 TV Search", callback_data="menu:tv"),
+        ],
+        [
+            InlineKeyboardButton("🗓️ Schedule", callback_data="menu:schedule"),
+            InlineKeyboardButton("🗑️ Remove", callback_data="menu:remove"),
+        ],
+    ]
+    if active_downloads:
+        for torrent_hash, name in active_downloads[:3]:
+            label = name[:28] + "…" if len(name) > 29 else name
+            rows.append([InlineKeyboardButton(f"🛑 Cancel: {label}", callback_data=f"stop:{torrent_hash}")])
+    rows.append([InlineKeyboardButton("ℹ️ Help", callback_data="menu:help")])
+    return InlineKeyboardMarkup(rows)
 
 
 def tv_filter_choice_keyboard() -> InlineKeyboardMarkup:

@@ -1,0 +1,13 @@
+{
+  "venvPath": "telegram-qbt",
+  "venv": ".venv",
+  "pythonVersion": "3.12",
+  "include": ["telegram-qbt/patchy_bot", "telegram-qbt/tests"],
+  "executionEnvironments": [
+    {
+      "root": "telegram-qbt",
+      "pythonVersion": "3.12",
+      "extraPaths": ["."]
+    }
+  ]
+}

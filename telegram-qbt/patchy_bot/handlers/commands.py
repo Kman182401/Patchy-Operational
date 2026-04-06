@@ -304,7 +304,10 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     if isinstance(err, TelegramError):
         LOG.warning("Telegram API error: %s", err)
         return
-    LOG.error("Unhandled bot error: %s", err, exc_info=exception_tuple(err))
+    if err is not None:
+        LOG.error("Unhandled bot error: %s", err, exc_info=exception_tuple(err))
+    else:
+        LOG.error("Unhandled bot error: unknown (context.error was None)")
 
 
 # ---------------------------------------------------------------------------
@@ -425,7 +428,10 @@ async def cmd_schedule(bot: Any, update: Update, context: ContextTypes.DEFAULT_T
     msg = update.effective_message
     if not msg:
         return
-    uid = update.effective_user.id
+    user = update.effective_user
+    if not user:
+        return
+    uid = user.id
     tracks = await asyncio.to_thread(bot.store.list_schedule_tracks, uid, False, 50)
     if tracks:
         enabled = [t for t in tracks if t.get("enabled")]
@@ -475,7 +481,10 @@ async def cmd_remove(bot: Any, update: Update, context: ContextTypes.DEFAULT_TYP
     msg = update.effective_message
     if not msg:
         return
-    uid = update.effective_user.id
+    user = update.effective_user
+    if not user:
+        return
+    uid = user.id
     await bot._open_remove_search_prompt(uid, msg)
 
 
@@ -493,13 +502,17 @@ async def cmd_show(bot: Any, update: Update, context: ContextTypes.DEFAULT_TYPE)
     msg = update.effective_message
     if not msg:
         return
-    if len(context.args) < 1:
+    user = update.effective_user
+    if not user:
+        return
+    args = context.args or []
+    if len(args) < 1:
         await msg.reply_text("Usage: /show <search_id> [page]", parse_mode=_PM)
         return
 
-    sid = context.args[0].strip()
-    page = int(context.args[1]) if len(context.args) > 1 and context.args[1].isdigit() else 1
-    payload = bot.store.get_search(update.effective_user.id, sid)
+    sid = args[0].strip()
+    page = int(args[1]) if len(args) > 1 and args[1].isdigit() else 1
+    payload = bot.store.get_search(user.id, sid)
     if not payload:
         await msg.reply_text(
             "<b>⚠️ Search Expired</b>\nThis search session has expired.\n<i>Run a new search to continue.</i>",
@@ -526,24 +539,28 @@ async def cmd_add(bot: Any, update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not msg:
         return
 
-    if len(context.args) < 2:
+    user = update.effective_user
+    if not user:
+        return
+    args = context.args or []
+    if len(args) < 2:
         await msg.reply_text("Usage: /add <search_id> <index> <movies|tv>", parse_mode=_PM)
         return
 
-    sid = context.args[0].strip()
-    if not context.args[1].isdigit():
+    sid = args[0].strip()
+    if not args[1].isdigit():
         await msg.reply_text("Index must be numeric.", parse_mode=_PM)
         return
 
-    idx = int(context.args[1])
-    payload = bot.store.get_search(update.effective_user.id, sid)
+    idx = int(args[1])
+    payload = bot.store.get_search(user.id, sid)
     if not payload:
         await msg.reply_text(
             "<b>⚠️ Search Expired</b>\nThis search session has expired.\n<i>Run a new search to continue.</i>",
             parse_mode=_PM,
         )
         return
-    choice = bot._normalize_media_choice(context.args[2]) if len(context.args) >= 3 else None
+    choice = bot._normalize_media_choice(args[2]) if len(args) >= 3 else None
     if choice is None:
         await msg.reply_text(
             f"Select library for result #{idx}:",
@@ -554,7 +571,7 @@ async def cmd_add(bot: Any, update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     pending_msg = await msg.reply_text(f"⏳ Adding result #{idx} to {choice.title()}…", parse_mode=_PM)
     try:
-        out = await bot._do_add(update.effective_user.id, sid, idx, choice)
+        out = await bot._do_add(user.id, sid, idx, choice)
         await pending_msg.edit_text(out["summary"], parse_mode=_PM)
 
         if out.get("hash"):
@@ -563,9 +580,9 @@ async def cmd_add(bot: Any, update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 reply_markup=bot._stop_download_keyboard(out["hash"]),
                 parse_mode=_PM,
             )
-            bot._start_progress_tracker(update.effective_user.id, out["hash"], tracker_msg, out["name"])
+            bot._start_progress_tracker(user.id, out["hash"], tracker_msg, out["name"])
         else:
-            bot._start_pending_progress_tracker(update.effective_user.id, out["name"], out["category"], msg)
+            bot._start_pending_progress_tracker(user.id, out["name"], out["category"], msg)
             await msg.reply_text(
                 "⏳ Waiting for qBittorrent to assign hash… live monitor will auto-attach.", parse_mode=_PM
             )
@@ -608,11 +625,12 @@ async def cmd_mkcat(bot: Any, update: Update, context: ContextTypes.DEFAULT_TYPE
     msg = update.effective_message
     if not msg:
         return
-    if len(context.args) < 1:
+    args = context.args or []
+    if len(args) < 1:
         await msg.reply_text("Usage: /mkcat <name> [savepath]", parse_mode=_PM)
         return
-    name = context.args[0].strip()
-    save = context.args[1].strip() if len(context.args) > 1 else None
+    name = args[0].strip()
+    save = args[1].strip() if len(args) > 1 else None
     try:
         resp = await asyncio.to_thread(bot.qbt.create_category, name, save)
         await msg.reply_text(f"Category ready: {_h(name)}\nqBittorrent: {_h(str(resp))}", parse_mode=_PM)
@@ -634,11 +652,15 @@ async def cmd_setminseeds(bot: Any, update: Update, context: ContextTypes.DEFAUL
     msg = update.effective_message
     if not msg:
         return
-    if len(context.args) != 1 or not context.args[0].isdigit():
+    user = update.effective_user
+    if not user:
+        return
+    args = context.args or []
+    if len(args) != 1 or not args[0].isdigit():
         await msg.reply_text("Usage: /setminseeds <number>", parse_mode=_PM)
         return
-    value = int(context.args[0])
-    bot.store.set_defaults(update.effective_user.id, bot.cfg, default_min_seeds=value)
+    value = int(args[0])
+    bot.store.set_defaults(user.id, bot.cfg, default_min_seeds=value)
     await msg.reply_text(f"Default minimum seeds set to {value}", parse_mode=_PM)
 
 
@@ -656,11 +678,15 @@ async def cmd_setlimit(bot: Any, update: Update, context: ContextTypes.DEFAULT_T
     msg = update.effective_message
     if not msg:
         return
-    if len(context.args) != 1 or not context.args[0].isdigit():
+    user = update.effective_user
+    if not user:
+        return
+    args = context.args or []
+    if len(args) != 1 or not args[0].isdigit():
         await msg.reply_text("Usage: /setlimit <1-50>", parse_mode=_PM)
         return
-    value = max(1, min(50, int(context.args[0])))
-    bot.store.set_defaults(update.effective_user.id, bot.cfg, default_limit=value)
+    value = max(1, min(50, int(args[0])))
+    bot.store.set_defaults(user.id, bot.cfg, default_limit=value)
     await msg.reply_text(f"Default result limit set to {value}", parse_mode=_PM)
 
 
@@ -678,7 +704,10 @@ async def cmd_profile(bot: Any, update: Update, context: ContextTypes.DEFAULT_TY
     msg = update.effective_message
     if not msg:
         return
-    d = bot.store.get_defaults(update.effective_user.id, bot.cfg)
+    user = update.effective_user
+    if not user:
+        return
+    d = bot.store.get_defaults(user.id, bot.cfg)
     ok, reason = await asyncio.to_thread(bot._storage_status)
     transport_ok, transport_reason = await asyncio.to_thread(bot._qbt_transport_status)
     vpn_ok, vpn_reason = await asyncio.to_thread(bot._vpn_ready_for_download)
@@ -763,7 +792,7 @@ async def cmd_help(bot: Any, update: Update, context: ContextTypes.DEFAULT_TYPE)
         if i + 1 <= 7:
             row.append(InlineKeyboardButton(text_mod.HELP_LABELS[i + 1], callback_data=f"menu:help:{i + 1}"))
         section_rows.append(row)
-    section_rows.extend(bot._nav_footer())
+    section_rows.extend(bot._nav_footer(back_data="nav:home", include_home=False))
     await msg.reply_text(
         bot._help_text(),
         reply_markup=InlineKeyboardMarkup(section_rows),
@@ -829,16 +858,20 @@ async def cmd_unlock(bot: Any, update: Update, context: ContextTypes.DEFAULT_TYP
         await msg.reply_text("Password access control is disabled (allowlist-only mode).", parse_mode=_PM)
         return
 
-    if len(context.args) < 1:
+    user = update.effective_user
+    if not user:
+        return
+    args = context.args or []
+    if len(args) < 1:
         await msg.reply_text("Usage: /unlock <password>", parse_mode=_PM)
         return
 
-    uid = update.effective_user.id
+    uid = user.id
     if bot.store.is_auth_locked(uid):
         await msg.reply_text("🔒 Too many failed attempts. Try again in a few minutes.", parse_mode=_PM)
         return
 
-    provided = " ".join(context.args).strip()
+    provided = " ".join(args).strip()
     if not secrets.compare_digest(provided, bot.cfg.access_password):
         locked = bot.store.record_auth_failure(uid)
         if locked:
@@ -873,7 +906,10 @@ async def cmd_logout(bot: Any, update: Update, context: ContextTypes.DEFAULT_TYP
     msg = update.effective_message
     if not msg:
         return
-    uid = update.effective_user.id
+    user = update.effective_user
+    if not user:
+        return
+    uid = user.id
     bot.store.lock_user(uid)
     await msg.reply_text("<b>🔒 Session Locked</b>\n<i>Use /unlock &lt;password&gt; when needed.</i>", parse_mode=_PM)
 
@@ -1014,7 +1050,7 @@ async def on_cb_menu(bot_app: Any, *, data: str, q: Any, user_id: int) -> None:
             if i + 1 <= 7:
                 row.append(InlineKeyboardButton(text_mod.HELP_LABELS[i + 1], callback_data=f"menu:help:{i + 1}"))
             section_rows.append(row)
-        section_rows.extend(bot_app._nav_footer())
+        section_rows.extend(bot_app._nav_footer(back_data="nav:home", include_home=False))
         kb = InlineKeyboardMarkup(section_rows)
         await bot_app._render_nav_ui(
             user_id,

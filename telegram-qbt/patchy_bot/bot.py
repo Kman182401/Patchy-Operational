@@ -860,8 +860,25 @@ class BotApp:
     ) -> list[list[InlineKeyboardButton]]:
         return kb_mod.compact_action_rows(rows, max_buttons=max_buttons, columns=columns)
 
+    def _active_download_tuples(self) -> list[tuple[str, str]]:
+        """Return ``(hash, clean_name)`` for each active download (up to 5)."""
+        try:
+            items = self.qbt.list_torrents(filter_name="all", limit=20)
+        except Exception:
+            return []
+        active = [t for t in items if str(t.get("state") or "") in _ACTIVE_DL_STATES]
+        result: list[tuple[str, str]] = []
+        for t in active[:5]:
+            h = str(t.get("hash") or "")
+            raw_name = str(t.get("name") or "Unknown")
+            category = str(t.get("category") or "")
+            clean_name = self._clean_download_name(raw_name, category)
+            if h:
+                result.append((h, clean_name))
+        return result
+
     def _command_center_keyboard(self) -> InlineKeyboardMarkup:
-        return kb_mod.command_center_keyboard()
+        return kb_mod.command_center_keyboard(active_downloads=self._active_download_tuples())
 
     def _tv_filter_choice_keyboard(self) -> InlineKeyboardMarkup:
         return kb_mod.tv_filter_choice_keyboard()
@@ -1007,6 +1024,7 @@ class BotApp:
     async def _command_center_refresh_loop(self, user_id: int) -> None:
         try:
             last_text = ""
+            last_dl_hashes: list[str] = []
             while True:
                 await asyncio.sleep(5)
                 remembered = self.user_nav_ui.get(user_id)
@@ -1018,17 +1036,15 @@ class BotApp:
                     break
                 ok, reason = await asyncio.to_thread(self._ensure_media_categories)
                 text = await asyncio.to_thread(self._start_text, ok, reason)
-                if text == last_text:
-                    # Check if there are still active downloads; if not, stop
-                    try:
-                        items = await asyncio.to_thread(self.qbt.list_torrents, filter_name="all", limit=20)
-                        active = [t for t in items if str(t.get("state") or "") in _ACTIVE_DL_STATES]
-                    except Exception:
-                        active = []
-                    if not active:
+                dl_tuples = await asyncio.to_thread(self._active_download_tuples)
+                dl_hashes = [h for h, _ in dl_tuples]
+                if text == last_text and dl_hashes == last_dl_hashes:
+                    if not dl_hashes:
                         break
                     continue
                 last_text = text
+                last_dl_hashes = dl_hashes
+                kb = kb_mod.command_center_keyboard(active_downloads=dl_tuples)
                 try:
                     bot = self.app.bot if self.app else None
                     if not bot:
@@ -1037,7 +1053,7 @@ class BotApp:
                         chat_id=remembered["chat_id"],
                         message_id=remembered["message_id"],
                         text=text,
-                        reply_markup=self._command_center_keyboard(),
+                        reply_markup=kb,
                         parse_mode=_PM,
                     )
                 except TelegramError as e:
