@@ -17,13 +17,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import re
-import subprocess
 from typing import Any
 
 from ..types import HandlerContext
 from ..utils import _PM, _h, human_size
+from ._shared import (
+    qbt_transport_status as _qbt_transport_status,
+)
+from ._shared import (
+    storage_status as _storage_status,
+)
+from ._shared import (
+    vpn_ready_for_download as _vpn_ready_for_download,
+)
 
 LOG = logging.getLogger("qbtg")
 
@@ -59,119 +66,6 @@ def chat_needs_qbt_snapshot(text: str) -> bool:
         "vpn",
     }
     return any(k in low for k in keywords)
-
-
-# ---------------------------------------------------------------------------
-# qBT snapshot helpers (inlined from BotApp private methods)
-# ---------------------------------------------------------------------------
-
-
-def _qbt_transport_status(ctx: HandlerContext) -> tuple[bool, str]:
-    """Check qBT network transport health.
-
-    Inlined from ``BotApp._qbt_transport_status``.
-
-    Args:
-        ctx: Shared handler context.
-
-    Returns:
-        ``(ok, reason)`` tuple.
-    """
-    info = ctx.qbt.get_transfer_info()
-    prefs = ctx.qbt.get_preferences()
-
-    status = str(info.get("connection_status") or "unknown").strip().lower()
-    dht_nodes = int(info.get("dht_nodes") or 0)
-    iface = str(prefs.get("current_network_interface") or "").strip()
-    iface_addr = str(prefs.get("current_interface_address") or "").strip()
-    bind_label = iface or "any interface"
-
-    if iface:
-        iface_dir = f"/sys/class/net/{iface}"
-        if not os.path.exists(iface_dir):
-            return False, f"bound interface missing: {iface}"
-        try:
-            with open(f"{iface_dir}/operstate", encoding="utf-8") as f:
-                iface_state = f.read().strip().lower()
-        except OSError:
-            iface_state = "unknown"
-        if iface_state == "down":
-            return False, f"bound interface is down: {iface}"
-        bind_label = f"{iface} ({iface_state})"
-
-    if iface_addr:
-        bind_label = f"{bind_label} @ {iface_addr}"
-
-    summary = f"connection_status={status} via {bind_label}, dht_nodes={dht_nodes}"
-    if status == "disconnected":
-        return False, summary
-    return True, summary
-
-
-def _storage_status(ctx: HandlerContext) -> tuple[bool, str]:
-    """Check media library storage health.
-
-    Inlined from ``BotApp._storage_status``.
-
-    Args:
-        ctx: Shared handler context.
-
-    Returns:
-        ``(ok, reason)`` tuple.
-    """
-    cfg = ctx.cfg
-    if cfg.require_nvme_mount and not os.path.ismount(cfg.nvme_mount_path):
-        return False, f"NVMe mount missing at {cfg.nvme_mount_path}"
-
-    for path in (cfg.movies_path, cfg.tv_path):
-        os.makedirs(path, exist_ok=True)
-        if not os.path.isdir(path):
-            return False, f"Library path missing: {path}"
-
-    return True, "ready"
-
-
-def _vpn_ready_for_download(ctx: HandlerContext) -> tuple[bool, str]:
-    """Check VPN interface readiness.
-
-    Inlined from ``BotApp._vpn_ready_for_download``.
-
-    Args:
-        ctx: Shared handler context.
-
-    Returns:
-        ``(ok, reason)`` tuple.
-    """
-    cfg = ctx.cfg
-    if not cfg.vpn_required_for_downloads:
-        return True, "vpn check disabled"
-
-    iface = cfg.vpn_interface_name
-
-    if not os.path.exists(f"/sys/class/net/{iface}"):
-        return False, f"VPN interface missing: {iface}"
-
-    try:
-        with open(f"/sys/class/net/{iface}/operstate", encoding="utf-8") as f:
-            state = f.read().strip().lower()
-    except Exception:
-        state = "unknown"
-    if state == "down":
-        return False, f"VPN interface is down: {iface}"
-
-    try:
-        ip_result = subprocess.run(
-            ["ip", "-4", "addr", "show", "dev", iface],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if ip_result.returncode != 0 or "inet " not in (ip_result.stdout or ""):
-            return False, f"VPN interface {iface} has no IPv4 address"
-    except Exception as e:
-        return False, f"VPN check error: {e}"
-
-    return True, f"vpn interface {iface} ready"
 
 
 # ---------------------------------------------------------------------------

@@ -1166,3 +1166,851 @@ def delete_remove_candidates(
         if len(failures) > 12:
             lines.append(f"\u2022 \u2026and {len(failures) - 12} more failures")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# High-level async helpers (delegated from BotApp)
+# ---------------------------------------------------------------------------
+
+
+async def open_remove_search_prompt(
+    bot_app: Any, user_id: int, msg: Any, *, current_ui_message: Any | None = None
+) -> None:
+    """Open the remove search prompt UI.
+
+    Moved from ``BotApp._open_remove_search_prompt``.
+    """
+    flow = bot_app._get_flow(user_id) or {"mode": "remove", "selected_items": []}
+    flow["mode"] = "remove"
+    flow["stage"] = "await_query"
+    bot_app._set_flow(user_id, flow)
+    selected_count = remove_selection_count(flow)
+    await bot_app._render_remove_ui(
+        user_id,
+        msg,
+        flow,
+        "\U0001f5d1\ufe0f <b>Remove from Library</b>\n\nType the name of a movie or show to find it directly.\n\nOr tap <b>Browse Plex Library</b> to scroll through everything.",
+        reply_markup=remove_prompt_keyboard(selected_count),
+        current_ui_message=current_ui_message,
+    )
+
+
+async def open_remove_browse_root(
+    bot_app: Any, user_id: int, msg: Any, *, current_ui_message: Any | None = None
+) -> None:
+    """Open the remove browse root UI.
+
+    Moved from ``BotApp._open_remove_browse_root``.
+    """
+
+    ctx = getattr(bot_app, "_ctx", bot_app)
+    movie_items = await asyncio.to_thread(remove_library_items, ctx, "movies")
+    show_items = await asyncio.to_thread(remove_library_items, ctx, "tv")
+    flow = bot_app._get_flow(user_id) or {"mode": "remove", "selected_items": []}
+    flow["mode"] = "remove"
+    flow["stage"] = "browse_root"
+    bot_app._set_flow(user_id, flow)
+    await bot_app._render_remove_ui(
+        user_id,
+        msg,
+        flow,
+        "\U0001f4da <b>Browse Plex/library items</b>\n\nChoose a library to browse, or <b>type any movie or show name</b> and the bot will find it for you directly.",
+        reply_markup=remove_browse_root_keyboard(len(movie_items), len(show_items), remove_selection_count(flow)),
+        current_ui_message=current_ui_message,
+    )
+
+
+async def on_cb_remove(bot_app: Any, *, data: str, q: Any, user_id: int) -> None:
+    """Handle all ``rm:*`` callback queries.
+
+    Moved from ``BotApp._on_cb_remove``.  Receives the BotApp instance
+    so it can call rendering methods that still live there.
+    """
+    from ..ui import keyboards as _kb_mod
+
+    ctx = getattr(bot_app, "_ctx", bot_app)
+
+    if data == "rm:cancel":
+        bot_app._clear_flow(user_id)
+        await bot_app._render_command_center(q.message, user_id=user_id)
+        return
+
+    if data == "rm:browse":
+        await bot_app._open_remove_browse_root(user_id, q.message, current_ui_message=q.message)
+        return
+
+    if data.startswith("rm:browsecat:"):
+        category = data.split(":", 2)[2]
+        candidates = await asyncio.to_thread(remove_library_items, ctx, category)
+        if category == "tv":
+            candidates = remove_group_tv_items(candidates)
+        label = "Movies" if category == "movies" else "Shows"
+        if not candidates:
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                bot_app._get_flow(user_id) or {"mode": "remove", "selected_items": []},
+                f"No {label.lower()} were found in the configured library path.",
+                reply_markup=remove_browse_root_keyboard(
+                    len(await asyncio.to_thread(remove_library_items, ctx, "movies")),
+                    len(await asyncio.to_thread(remove_library_items, ctx, "tv")),
+                    remove_selection_count(bot_app._get_flow(user_id) or {}),
+                ),
+                current_ui_message=q.message,
+            )
+            return
+        flow = bot_app._get_flow(user_id) or {"mode": "remove", "selected_items": []}
+        flow["mode"] = "remove"
+        flow["stage"] = "choose_item"
+        flow["query"] = f"Browse {label}"
+        flow["candidates"] = candidates
+        flow["browse_category"] = category
+        bot_app._set_flow(user_id, flow)
+        selected_paths = remove_selected_paths(flow)
+        await bot_app._render_remove_ui(
+            user_id,
+            q.message,
+            flow,
+            remove_list_text(
+                f"\U0001f4da {label} in Plex/library",
+                candidates,
+                0,
+                hint="Tap items to toggle them, or page through the library.",
+                selected_paths=selected_paths,
+            ),
+            reply_markup=remove_paginated_keyboard(
+                candidates,
+                0,
+                item_prefix="rm:pick",
+                nav_prefix="rm:bpage",
+                back_callback="rm:browse",
+                selected_paths=selected_paths,
+            ),
+            current_ui_message=q.message,
+        )
+        return
+
+    if data.startswith("rm:bpage:"):
+        flow = bot_app._get_flow(user_id)
+        if not flow or flow.get("mode") != "remove":
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                {"mode": "remove", "selected_items": []},
+                "That remove flow has expired. Start /remove again.",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
+        candidates = list(flow.get("candidates") or [])
+        if not candidates:
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                "That library browse expired. Start /remove again.",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
+        page = int(data.split(":", 2)[2])
+        label = "Movies" if str(flow.get("browse_category") or "") == "movies" else "Shows"
+        selected_paths = remove_selected_paths(flow)
+        await bot_app._render_remove_ui(
+            user_id,
+            q.message,
+            flow,
+            remove_list_text(
+                f"\U0001f4da {label} in Plex/library",
+                candidates,
+                page,
+                hint="Tap items to toggle them, or page through the library.",
+                selected_paths=selected_paths,
+            ),
+            reply_markup=remove_paginated_keyboard(
+                candidates,
+                page,
+                item_prefix="rm:pick",
+                nav_prefix="rm:bpage",
+                back_callback="rm:browse",
+                selected_paths=selected_paths,
+            ),
+            current_ui_message=q.message,
+        )
+        return
+
+    if data.startswith("rm:pick:"):
+        flow = bot_app._get_flow(user_id)
+        if not flow or flow.get("mode") != "remove":
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                {"mode": "remove", "selected_items": []},
+                "That remove flow has expired. Start /remove again.",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
+        candidates = list(flow.get("candidates") or [])
+        idx = int(data.split(":", 2)[2])
+        if idx < 0 or idx >= len(candidates):
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                "That item is no longer available. Start /remove again.",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
+        selected = remove_enrich_candidate(dict(candidates[idx]))
+        flow["selected"] = selected
+        flow.pop("season_items", None)
+        flow.pop("episode_items", None)
+        if (
+            str(selected.get("root_key") or "") == "tv"
+            and str(selected.get("remove_kind") or "") == "show"
+            and bool(selected.get("is_dir"))
+        ):
+            series_selected = remove_group_any_selected(flow, selected)
+            flow["stage"] = "show_actions"
+            bot_app._set_flow(user_id, flow)
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                remove_show_actions_text(selected, series_selected),
+                reply_markup=remove_show_action_keyboard(series_selected, remove_selection_count(flow)),
+                current_ui_message=q.message,
+            )
+            return
+        remove_toggle_group(flow, selected)
+        flow["stage"] = "choose_item"
+        bot_app._set_flow(user_id, flow)
+        selected_paths = remove_selected_paths(flow)
+        if flow.get("browse_category"):
+            label = "Movies" if str(flow.get("browse_category") or "") == "movies" else "Shows"
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                remove_list_text(
+                    f"\U0001f4da {label} in Plex/library",
+                    candidates,
+                    0,
+                    hint="Tap items to toggle them, or page through the library.",
+                    selected_paths=selected_paths,
+                ),
+                reply_markup=remove_paginated_keyboard(
+                    candidates,
+                    0,
+                    item_prefix="rm:pick",
+                    nav_prefix="rm:bpage",
+                    back_callback="rm:browse",
+                    selected_paths=selected_paths,
+                ),
+                current_ui_message=q.message,
+            )
+        else:
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                remove_candidates_text(str(flow.get("query") or "Search"), candidates, selected_paths),
+                reply_markup=remove_candidate_keyboard(candidates, selected_paths),
+                current_ui_message=q.message,
+            )
+        return
+
+    if data == "rm:series":
+        flow = bot_app._get_flow(user_id)
+        if not flow or flow.get("mode") != "remove" or flow.get("stage") != "show_actions":
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                {"mode": "remove", "selected_items": []},
+                "That remove flow has expired. Start /remove again.",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
+        selected = dict(flow.get("selected") or {})
+        if not selected:
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                "That remove flow has expired. Start /remove again.",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
+        remove_toggle_group(flow, selected)
+        bot_app._set_flow(user_id, flow)
+        series_selected = remove_group_any_selected(flow, selected)
+        await bot_app._render_remove_ui(
+            user_id,
+            q.message,
+            flow,
+            remove_show_actions_text(selected, series_selected),
+            reply_markup=remove_show_action_keyboard(series_selected, remove_selection_count(flow)),
+            current_ui_message=q.message,
+        )
+        return
+
+    if data == "rm:seasons":
+        flow = bot_app._get_flow(user_id)
+        if not flow or flow.get("mode") != "remove" or flow.get("stage") != "show_actions":
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                {"mode": "remove", "selected_items": []},
+                "That remove flow has expired. Start /remove again.",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
+        selected = dict(flow.get("selected") or {})
+        group_items = selected.get("group_items")
+        if group_items:
+            season_items = await asyncio.to_thread(remove_show_group_children, group_items)
+        else:
+            season_items = await asyncio.to_thread(remove_show_children, selected)
+        if not season_items:
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                "No seasons or direct episode files were found inside that show folder.",
+                reply_markup=remove_show_action_keyboard(
+                    remove_group_any_selected(flow, selected), remove_selection_count(flow)
+                ),
+                current_ui_message=q.message,
+            )
+            return
+        flow["stage"] = "browse_children"
+        flow["season_items"] = season_items
+        bot_app._set_flow(user_id, flow)
+        selected_paths = remove_selected_paths(flow)
+        await bot_app._render_remove_ui(
+            user_id,
+            q.message,
+            flow,
+            remove_list_text(
+                f"\U0001f4c2 {selected.get('name')} seasons / episodes",
+                season_items,
+                0,
+                hint="Tap a season to inspect it, or toggle a direct episode file.",
+                selected_paths=selected_paths,
+            ),
+            reply_markup=remove_paginated_keyboard(
+                season_items,
+                0,
+                item_prefix="rm:child",
+                nav_prefix="rm:cpage",
+                back_callback="rm:back:show",
+                selected_paths=selected_paths,
+            ),
+            current_ui_message=q.message,
+        )
+        return
+
+    if data.startswith("rm:cpage:"):
+        flow = bot_app._get_flow(user_id)
+        if not flow or flow.get("mode") != "remove":
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                {"mode": "remove", "selected_items": []},
+                "That remove flow has expired. Start /remove again.",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
+        season_items = list(flow.get("season_items") or [])
+        selected = dict(flow.get("selected") or {})
+        if not season_items or not selected:
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                "That season browser expired. Start /remove again.",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
+        page = int(data.split(":", 2)[2])
+        selected_paths = remove_selected_paths(flow)
+        await bot_app._render_remove_ui(
+            user_id,
+            q.message,
+            flow,
+            remove_list_text(
+                f"\U0001f4c2 {selected.get('name')} seasons / episodes",
+                season_items,
+                page,
+                hint="Tap a season to inspect it, or toggle a direct episode file.",
+                selected_paths=selected_paths,
+            ),
+            reply_markup=remove_paginated_keyboard(
+                season_items,
+                page,
+                item_prefix="rm:child",
+                nav_prefix="rm:cpage",
+                back_callback="rm:back:show",
+                selected_paths=selected_paths,
+            ),
+            current_ui_message=q.message,
+        )
+        return
+
+    if data.startswith("rm:child:"):
+        flow = bot_app._get_flow(user_id)
+        if not flow or flow.get("mode") != "remove":
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                {"mode": "remove", "selected_items": []},
+                "That remove flow has expired. Start /remove again.",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
+        season_items = list(flow.get("season_items") or [])
+        idx = int(data.split(":", 2)[2])
+        if idx < 0 or idx >= len(season_items):
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                "That season/episode choice is no longer available. Start /remove again.",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
+        selected_child = remove_enrich_candidate(dict(season_items[idx]))
+        flow["selected_child"] = selected_child
+        if str(selected_child.get("remove_kind") or "") == "season" and bool(selected_child.get("is_dir")):
+            flow["stage"] = "season_actions"
+            bot_app._set_flow(user_id, flow)
+            selected_paths = remove_selected_paths(flow)
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                remove_season_actions_text(selected_child),
+                reply_markup=remove_season_action_keyboard(
+                    remove_selected_path(selected_child) in selected_paths,
+                    len(selected_paths),
+                ),
+                current_ui_message=q.message,
+            )
+            return
+        remove_toggle_candidate(flow, selected_child)
+        flow["stage"] = "browse_children"
+        bot_app._set_flow(user_id, flow)
+        selected_paths = remove_selected_paths(flow)
+        parent = dict(flow.get("selected") or {})
+        await bot_app._render_remove_ui(
+            user_id,
+            q.message,
+            flow,
+            remove_list_text(
+                f"\U0001f4c2 {parent.get('name')} seasons / episodes",
+                season_items,
+                0,
+                hint="Tap a season to inspect it, or toggle a direct episode file.",
+                selected_paths=selected_paths,
+            ),
+            reply_markup=remove_paginated_keyboard(
+                season_items,
+                0,
+                item_prefix="rm:child",
+                nav_prefix="rm:cpage",
+                back_callback="rm:back:show",
+                selected_paths=selected_paths,
+            ),
+            current_ui_message=q.message,
+        )
+        return
+
+    if data == "rm:seasondel":
+        flow = bot_app._get_flow(user_id)
+        if not flow or flow.get("mode") != "remove" or flow.get("stage") != "season_actions":
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                {"mode": "remove", "selected_items": []},
+                "That remove flow has expired. Start /remove again.",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
+        selected_child = dict(flow.get("selected_child") or {})
+        if not selected_child:
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                "That remove flow has expired. Start /remove again.",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
+        remove_toggle_candidate(flow, selected_child)
+        bot_app._set_flow(user_id, flow)
+        selected_paths = remove_selected_paths(flow)
+        await bot_app._render_remove_ui(
+            user_id,
+            q.message,
+            flow,
+            remove_season_actions_text(selected_child),
+            reply_markup=remove_season_action_keyboard(
+                remove_selected_path(selected_child) in selected_paths,
+                len(selected_paths),
+            ),
+            current_ui_message=q.message,
+        )
+        return
+
+    if data == "rm:episodes":
+        flow = bot_app._get_flow(user_id)
+        if not flow or flow.get("mode") != "remove" or flow.get("stage") != "season_actions":
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                {"mode": "remove", "selected_items": []},
+                "That remove flow has expired. Start /remove again.",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
+        selected_child = dict(flow.get("selected_child") or {})
+        episode_items = await asyncio.to_thread(remove_season_children, selected_child)
+        if not episode_items:
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                "No direct episode files were found inside that season folder.",
+                reply_markup=remove_season_action_keyboard(
+                    remove_selected_path(selected_child) in remove_selected_paths(flow),
+                    remove_selection_count(flow),
+                ),
+                current_ui_message=q.message,
+            )
+            return
+        flow["stage"] = "browse_episodes"
+        flow["episode_items"] = episode_items
+        bot_app._set_flow(user_id, flow)
+        selected_paths = remove_selected_paths(flow)
+        await bot_app._render_remove_ui(
+            user_id,
+            q.message,
+            flow,
+            remove_list_text(
+                f"\U0001f39e {selected_child.get('show_name')} \u2014 {selected_child.get('name')}",
+                episode_items,
+                0,
+                hint="Tap episode files to toggle them into the delete batch.",
+                selected_paths=selected_paths,
+            ),
+            reply_markup=remove_paginated_keyboard(
+                episode_items,
+                0,
+                item_prefix="rm:episode",
+                nav_prefix="rm:epage",
+                back_callback="rm:back:season",
+                selected_paths=selected_paths,
+            ),
+            current_ui_message=q.message,
+        )
+        return
+
+    if data.startswith("rm:epage:"):
+        flow = bot_app._get_flow(user_id)
+        if not flow or flow.get("mode") != "remove":
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                {"mode": "remove", "selected_items": []},
+                "That remove flow has expired. Start /remove again.",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
+        episode_items = list(flow.get("episode_items") or [])
+        selected_child = dict(flow.get("selected_child") or {})
+        if not episode_items or not selected_child:
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                "That episode browser expired. Start /remove again.",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
+        page = int(data.split(":", 2)[2])
+        selected_paths = remove_selected_paths(flow)
+        await bot_app._render_remove_ui(
+            user_id,
+            q.message,
+            flow,
+            remove_list_text(
+                f"\U0001f39e {selected_child.get('show_name')} \u2014 {selected_child.get('name')}",
+                episode_items,
+                page,
+                hint="Tap episode files to toggle them into the delete batch.",
+                selected_paths=selected_paths,
+            ),
+            reply_markup=remove_paginated_keyboard(
+                episode_items,
+                page,
+                item_prefix="rm:episode",
+                nav_prefix="rm:epage",
+                back_callback="rm:back:season",
+                selected_paths=selected_paths,
+            ),
+            current_ui_message=q.message,
+        )
+        return
+
+    if data.startswith("rm:episode:"):
+        flow = bot_app._get_flow(user_id)
+        if not flow or flow.get("mode") != "remove":
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                {"mode": "remove", "selected_items": []},
+                "That remove flow has expired. Start /remove again.",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
+        episode_items = list(flow.get("episode_items") or [])
+        idx = int(data.split(":", 2)[2])
+        if idx < 0 or idx >= len(episode_items):
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                "That episode choice is no longer available. Start /remove again.",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
+        selected_episode = remove_enrich_candidate(dict(episode_items[idx]))
+        remove_toggle_candidate(flow, selected_episode)
+        flow["stage"] = "browse_episodes"
+        bot_app._set_flow(user_id, flow)
+        selected_paths = remove_selected_paths(flow)
+        selected_child = dict(flow.get("selected_child") or {})
+        await bot_app._render_remove_ui(
+            user_id,
+            q.message,
+            flow,
+            remove_list_text(
+                f"\U0001f39e {selected_child.get('show_name')} \u2014 {selected_child.get('name')}",
+                episode_items,
+                0,
+                hint="Tap episode files to toggle them into the delete batch.",
+                selected_paths=selected_paths,
+            ),
+            reply_markup=remove_paginated_keyboard(
+                episode_items,
+                0,
+                item_prefix="rm:episode",
+                nav_prefix="rm:epage",
+                back_callback="rm:back:season",
+                selected_paths=selected_paths,
+            ),
+            current_ui_message=q.message,
+        )
+        return
+
+    if data == "rm:back:show":
+        flow = bot_app._get_flow(user_id)
+        if not flow or flow.get("mode") != "remove":
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                {"mode": "remove", "selected_items": []},
+                "That remove flow has expired. Start /remove again.",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
+        selected = dict(flow.get("selected") or {})
+        if not selected:
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                "That remove flow has expired. Start /remove again.",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
+        flow["stage"] = "show_actions"
+        bot_app._set_flow(user_id, flow)
+        selected_paths = remove_selected_paths(flow)
+        series_selected = remove_group_any_selected(flow, selected)
+        await bot_app._render_remove_ui(
+            user_id,
+            q.message,
+            flow,
+            remove_show_actions_text(selected, series_selected),
+            reply_markup=remove_show_action_keyboard(series_selected, len(selected_paths)),
+            current_ui_message=q.message,
+        )
+        return
+
+    if data == "rm:back:season":
+        flow = bot_app._get_flow(user_id)
+        if not flow or flow.get("mode") != "remove":
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                {"mode": "remove", "selected_items": []},
+                "That remove flow has expired. Start /remove again.",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
+        selected_child = dict(flow.get("selected_child") or {})
+        if not selected_child:
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                "That remove flow has expired. Start /remove again.",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
+        flow["stage"] = "season_actions"
+        bot_app._set_flow(user_id, flow)
+        selected_paths = remove_selected_paths(flow)
+        await bot_app._render_remove_ui(
+            user_id,
+            q.message,
+            flow,
+            remove_season_actions_text(selected_child),
+            reply_markup=remove_season_action_keyboard(
+                remove_selected_path(selected_child) in selected_paths,
+                len(selected_paths),
+            ),
+            current_ui_message=q.message,
+        )
+        return
+
+    if data == "rm:review":
+        flow = bot_app._get_flow(user_id)
+        if not flow or flow.get("mode") != "remove":
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                {"mode": "remove", "selected_items": []},
+                "That remove flow has expired. Start /remove again.",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
+        selected_items = remove_selection_items(flow)
+        effective = remove_effective_candidates(selected_items)
+        if not effective:
+            return
+        flow["stage"] = "confirm_delete"
+        bot_app._set_flow(user_id, flow)
+        await bot_app._render_remove_ui(
+            user_id,
+            q.message,
+            flow,
+            remove_confirm_text(effective),
+            reply_markup=remove_confirm_keyboard(len(effective)),
+            current_ui_message=q.message,
+        )
+        return
+
+    if data == "rm:clear":
+        flow = bot_app._get_flow(user_id)
+        if not flow or flow.get("mode") != "remove":
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                {"mode": "remove", "selected_items": []},
+                "That remove flow has expired. Start /remove again.",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
+        flow["selected_items"] = []
+        flow.pop("selected", None)
+        flow.pop("selected_child", None)
+        flow.pop("season_items", None)
+        flow.pop("episode_items", None)
+        bot_app._set_flow(user_id, flow)
+        await bot_app._open_remove_browse_root(user_id, q.message, current_ui_message=q.message)
+        return
+
+    if data == "rm:confirm":
+        flow = bot_app._get_flow(user_id)
+        if not flow or flow.get("mode") != "remove" or flow.get("stage") != "confirm_delete":
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                {"mode": "remove", "selected_items": []},
+                "That remove confirmation expired. Start /remove again.",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
+        selected_items = remove_selection_items(flow)
+        effective = remove_effective_candidates(selected_items)
+        if not effective:
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                "That remove confirmation expired. Start /remove again.",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
+        await bot_app._render_remove_ui(
+            user_id,
+            q.message,
+            flow,
+            f"\U0001f5d1 Deleting {len(effective)} selected item(s) from disk\u2026",
+            reply_markup=None,
+            current_ui_message=q.message,
+        )
+        try:
+            result_text = await asyncio.to_thread(
+                delete_remove_candidates,
+                ctx,
+                effective,
+                user_id=user_id,
+                chat_id=getattr(q.message, "chat_id", 0) if q.message else 0,
+            )
+        except Exception as e:
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                f"Delete failed: {e}",
+                reply_markup=_kb_mod.home_only_keyboard(),
+                current_ui_message=q.message,
+            )
+            return
+        await bot_app._render_remove_ui(
+            user_id,
+            q.message,
+            flow,
+            result_text,
+            reply_markup=_kb_mod.home_only_keyboard(),
+            current_ui_message=q.message,
+        )
+        bot_app._clear_flow(user_id)
+        return

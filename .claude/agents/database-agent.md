@@ -2,8 +2,10 @@
 name: database-agent
 description: "MUST be used for any work involving the SQLite database, the Store class, table schemas, database migrations, CRUD methods, backup operations, or data integrity. Use proactively when the task mentions database, store, SQLite, tables, queries, migrations, or data."
 tools: Read, Write, Edit, Bash, Grep, Glob
-model: opus
+model: sonnet
+maxTurns: 15
 memory: project
+effort: medium
 color: blue
 ---
 

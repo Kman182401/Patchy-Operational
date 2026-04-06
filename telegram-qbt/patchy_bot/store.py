@@ -21,31 +21,38 @@ class Store:
     def __init__(self, path: str):
         self.path = path
         self._lock = threading.Lock()
-        self._init_db()
-        # Lock down permissions on pre-existing database files too
-        try:
-            os.chmod(self.path, 0o600)
-        except OSError:
-            pass  # Path may not exist yet (e.g. :memory: during tests)
+        self._closed = False
+        if path == ":memory:":
+            # For in-memory DBs, schema must live on the same connection
+            old_mask = os.umask(0o177)
+            try:
+                self._conn = self._create_connection()
+                self._run_schema(self._conn)
+            finally:
+                os.umask(old_mask)
+        else:
+            self._init_db()
+            # Lock down permissions on pre-existing database files too
+            try:
+                os.chmod(self.path, 0o600)
+            except OSError:
+                pass
+            self._conn = self._create_connection()
 
-    def _connect(self) -> sqlite3.Connection:
+    def _create_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, check_same_thread=False, timeout=5.0)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA busy_timeout=5000;")
         conn.execute("PRAGMA foreign_keys=ON;")
         return conn
 
-    def _init_db(self) -> None:
-        # Ensure the database file is created with owner-only permissions (0600).
-        # sqlite3.connect() creates the file with mode 0666 modified by umask;
-        # temporarily set umask=0o177 so the result is 0600.
-        old_mask = os.umask(0o177)
-        try:
-            with self._connect() as conn:
-                conn.executescript(
-                    """
-                PRAGMA journal_mode=WAL;
-                PRAGMA wal_autocheckpoint=1000;
+    def _run_schema(self, conn: sqlite3.Connection) -> None:
+        """Bootstrap all tables, indexes, and migrations on *conn*."""
+        conn.executescript(
+            """
+            PRAGMA journal_mode=WAL;
+            PRAGMA wal_autocheckpoint=1000;
 
                 CREATE TABLE IF NOT EXISTS searches (
                     search_id TEXT PRIMARY KEY,
@@ -185,39 +192,56 @@ class Store:
                 CREATE INDEX IF NOT EXISTS idx_schedule_user_enabled ON schedule_tracks(user_id, enabled, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_remove_jobs_due ON remove_jobs(status, next_retry_at);
                 """
-                )
-            results_cols = {row[1] for row in conn.execute("PRAGMA table_info(results)")}
-            if "quality_score" not in results_cols:
-                conn.execute("ALTER TABLE results ADD COLUMN quality_score INTEGER DEFAULT 0")
-            if "quality_json" not in results_cols:
-                conn.execute("ALTER TABLE results ADD COLUMN quality_json TEXT")
+        )
+        results_cols = {row[1] for row in conn.execute("PRAGMA table_info(results)")}
+        if "quality_score" not in results_cols:
+            conn.execute("ALTER TABLE results ADD COLUMN quality_score INTEGER DEFAULT 0")
+        if "quality_json" not in results_cols:
+            conn.execute("ALTER TABLE results ADD COLUMN quality_json TEXT")
 
-            schedule_track_cols = {row[1] for row in conn.execute("PRAGMA table_info(schedule_tracks)")}
-            if "auto_state_json" not in schedule_track_cols:
-                conn.execute("ALTER TABLE schedule_tracks ADD COLUMN auto_state_json TEXT NOT NULL DEFAULT '{}'")
-                schedule_track_cols.add("auto_state_json")
-            if "auto_state_json" in schedule_track_cols:
-                conn.execute(
-                    "UPDATE schedule_tracks SET auto_state_json = '{}' WHERE auto_state_json IS NULL OR trim(auto_state_json) = ''"
-                )
-            now_value = now_ts()
+        schedule_track_cols = {row[1] for row in conn.execute("PRAGMA table_info(schedule_tracks)")}
+        if "auto_state_json" not in schedule_track_cols:
+            conn.execute("ALTER TABLE schedule_tracks ADD COLUMN auto_state_json TEXT NOT NULL DEFAULT '{}'")
+            schedule_track_cols.add("auto_state_json")
+        if "auto_state_json" in schedule_track_cols:
             conn.execute(
-                """
-                INSERT INTO schedule_runner_status(
-                    status_id, created_at, updated_at, last_due_count, last_processed_count,
-                    metadata_source_health_json, inventory_source_health_json
-                ) VALUES(1, ?, ?, 0, 0, '{}', '{}')
-                ON CONFLICT(status_id) DO NOTHING
-                """,
-                (now_value, now_value),
+                "UPDATE schedule_tracks SET auto_state_json = '{}' WHERE auto_state_json IS NULL OR trim(auto_state_json) = ''"
             )
-            conn.execute("PRAGMA optimize;")
-            conn.commit()
+        now_value = now_ts()
+        conn.execute(
+            """
+            INSERT INTO schedule_runner_status(
+                status_id, created_at, updated_at, last_due_count, last_processed_count,
+                metadata_source_health_json, inventory_source_health_json
+            ) VALUES(1, ?, ?, 0, 0, '{}', '{}')
+            ON CONFLICT(status_id) DO NOTHING
+            """,
+            (now_value, now_value),
+        )
+        conn.execute("PRAGMA optimize;")
+        conn.commit()
+
+    def _init_db(self) -> None:
+        """Bootstrap schema using a temporary connection (file-based DBs only)."""
+        old_mask = os.umask(0o177)
+        conn = self._create_connection()
+        try:
+            self._run_schema(conn)
         finally:
+            conn.close()
             os.umask(old_mask)
 
+    def close(self) -> None:
+        with self._lock:
+            if not self._closed and self._conn:
+                self._conn.close()
+                self._closed = True
+
     def is_completion_notified(self, torrent_hash: str) -> bool:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             row = conn.execute(
                 "SELECT 1 FROM notified_completions WHERE torrent_hash = ?",
                 (torrent_hash.lower(),),
@@ -225,7 +249,10 @@ class Store:
             return row is not None
 
     def mark_completion_notified(self, torrent_hash: str, name: str) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             conn.execute(
                 "INSERT OR IGNORE INTO notified_completions(torrent_hash, name, notified_at) VALUES(?, ?, ?)",
                 (torrent_hash.lower(), name, now_ts()),
@@ -233,7 +260,10 @@ class Store:
             conn.commit()
 
     def get_command_center(self, user_id: int) -> dict[str, int] | None:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             row = conn.execute(
                 "SELECT chat_id, message_id FROM command_center_ui WHERE user_id = ?",
                 (user_id,),
@@ -243,7 +273,10 @@ class Store:
             return {"chat_id": int(row["chat_id"]), "message_id": int(row["message_id"])}
 
     def save_command_center(self, user_id: int, chat_id: int, message_id: int) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             conn.execute(
                 "INSERT INTO command_center_ui(user_id, chat_id, message_id, updated_at) "
                 "VALUES(?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET "
@@ -255,13 +288,19 @@ class Store:
     def cleanup_old_completion_records(self, max_age_hours: int = 168) -> None:
         """Remove completion records older than 7 days to prevent table bloat."""
         cutoff = now_ts() - max_age_hours * 3600
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             conn.execute("DELETE FROM notified_completions WHERE notified_at < ?", (cutoff,))
             conn.commit()
 
     def cleanup(self, max_age_hours: int = 24) -> None:
         cutoff = now_ts() - max_age_hours * 3600
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             old_ids = [
                 r[0] for r in conn.execute("SELECT search_id FROM searches WHERE created_at < ?", (cutoff,)).fetchall()
             ]
@@ -270,9 +309,20 @@ class Store:
                 conn.execute("DELETE FROM searches WHERE search_id = ?", (sid,))
             conn.commit()
 
-    def save_search(self, user_id: int, query: str, options: dict[str, Any], rows: list[dict[str, Any]]) -> str:
+    def save_search(
+        self,
+        user_id: int,
+        query: str,
+        options: dict[str, Any],
+        rows: list[dict[str, Any]],
+        *,
+        media_type: str = "movie",
+    ) -> str:
         search_id = secrets.token_hex(8)
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             conn.execute(
                 "INSERT INTO searches(search_id, user_id, created_at, query, options_json) VALUES(?,?,?,?,?)",
                 (search_id, user_id, now_ts(), query, json.dumps(options)),
@@ -281,7 +331,7 @@ class Store:
                 name = str(row.get("fileName") or row.get("name") or "unknown")
                 size = int(row.get("fileSize") or row.get("size") or 0)
                 seeds = int(row.get("nbSeeders") or row.get("seeders") or 0)
-                ts = score_torrent(name, size, seeds)
+                ts = score_torrent(name, size, seeds, media_type=media_type)
                 q_json = json.dumps(
                     {
                         "resolution": ts.parsed.resolution,
@@ -320,7 +370,10 @@ class Store:
         return search_id
 
     def get_search(self, user_id: int, search_id: str) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             s = conn.execute(
                 "SELECT search_id, query, options_json FROM searches WHERE search_id = ? AND user_id = ?",
                 (search_id, user_id),
@@ -332,7 +385,10 @@ class Store:
             return ({"search_id": s["search_id"], "query": s["query"], "options": opts}, [dict(r) for r in rows])
 
     def get_result(self, user_id: int, search_id: str, idx: int) -> dict[str, Any] | None:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             s = conn.execute(
                 "SELECT 1 FROM searches WHERE search_id = ? AND user_id = ?", (search_id, user_id)
             ).fetchone()
@@ -342,7 +398,10 @@ class Store:
             return dict(row) if row else None
 
     def get_defaults(self, user_id: int, cfg: Config) -> dict[str, Any]:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             row = conn.execute("SELECT * FROM user_defaults WHERE user_id = ?", (user_id,)).fetchone()
             if not row:
                 return {
@@ -359,9 +418,26 @@ class Store:
             }
 
     def set_defaults(self, user_id: int, cfg: Config, **kwargs: Any) -> None:
-        current = self.get_defaults(user_id, cfg)
-        current.update(kwargs)
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
+            row = conn.execute("SELECT * FROM user_defaults WHERE user_id = ?", (user_id,)).fetchone()
+            if not row:
+                current = {
+                    "default_min_seeds": cfg.default_min_seeds,
+                    "default_sort": cfg.default_sort,
+                    "default_order": cfg.default_order,
+                    "default_limit": cfg.default_limit,
+                }
+            else:
+                current = {
+                    "default_min_seeds": int(row["default_min_seeds"] or 0),
+                    "default_sort": row["default_sort"] or cfg.default_sort,
+                    "default_order": row["default_order"] or cfg.default_order,
+                    "default_limit": int(row["default_limit"] or cfg.default_limit),
+                }
+            current.update(kwargs)
             conn.execute(
                 """
                 INSERT INTO user_defaults(user_id, default_min_seeds, default_sort, default_order, default_limit)
@@ -383,7 +459,10 @@ class Store:
             conn.commit()
 
     def is_unlocked(self, user_id: int) -> bool:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             row = conn.execute(
                 "SELECT unlocked_until FROM user_auth WHERE user_id = ?",
                 (user_id,),
@@ -398,7 +477,10 @@ class Store:
     def unlock_user(self, user_id: int, ttl_s: int) -> int:
         ttl = int(ttl_s)
         until = 0 if ttl <= 0 else now_ts() + max(60, ttl)
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             conn.execute(
                 """
                 INSERT INTO user_auth(user_id, unlocked_until, updated_at)
@@ -413,12 +495,18 @@ class Store:
         return until
 
     def lock_user(self, user_id: int) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             conn.execute("DELETE FROM user_auth WHERE user_id = ?", (user_id,))
             conn.commit()
 
     def is_auth_locked(self, user_id: int) -> bool:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             row = conn.execute("SELECT locked_until FROM auth_attempts WHERE user_id = ?", (user_id,)).fetchone()
             if not row:
                 return False
@@ -428,7 +516,10 @@ class Store:
         self, user_id: int, max_attempts: int = 5, lockout_s: int = 900, window_s: int = 3600
     ) -> bool:
         now_value = now_ts()
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             row = conn.execute(
                 "SELECT fail_count, first_fail_at, locked_until FROM auth_attempts WHERE user_id = ?",
                 (user_id,),
@@ -457,7 +548,10 @@ class Store:
             return locked_until > 0
 
     def clear_auth_failures(self, user_id: int) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             conn.execute("DELETE FROM auth_attempts WHERE user_id = ?", (user_id,))
             conn.commit()
 
@@ -495,7 +589,10 @@ class Store:
         next_check_at: int,
         initial_auto_state: dict[str, Any] | None = None,
     ) -> tuple[bool, dict[str, Any]]:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             existing = conn.execute(
                 "SELECT * FROM schedule_tracks WHERE user_id = ? AND tvmaze_id = ? AND season = ?",
                 (user_id, int(show.get("id") or 0), int(season)),
@@ -545,7 +642,10 @@ class Store:
             return True, self._schedule_row(row)
 
     def get_schedule_track(self, user_id: int, track_id: str) -> dict[str, Any] | None:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             row = conn.execute(
                 "SELECT * FROM schedule_tracks WHERE track_id = ? AND user_id = ?",
                 (track_id, int(user_id)),
@@ -553,12 +653,18 @@ class Store:
             return self._schedule_row(row) if row else None
 
     def get_schedule_track_any(self, track_id: str) -> dict[str, Any] | None:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             row = conn.execute("SELECT * FROM schedule_tracks WHERE track_id = ?", (track_id,)).fetchone()
             return self._schedule_row(row) if row else None
 
     def list_due_schedule_tracks(self, due_ts: int, limit: int = 10) -> list[dict[str, Any]]:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             rows = conn.execute(
                 "SELECT * FROM schedule_tracks WHERE enabled = 1 AND next_check_at <= ? ORDER BY next_check_at ASC LIMIT ?",
                 (int(due_ts), int(limit)),
@@ -566,7 +672,10 @@ class Store:
             return [self._schedule_row(row) for row in rows]
 
     def list_schedule_tracks(self, user_id: int, enabled_only: bool = True, limit: int = 20) -> list[dict[str, Any]]:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             query = "SELECT * FROM schedule_tracks WHERE user_id = ?"
             params: list[Any] = [int(user_id)]
             if enabled_only:
@@ -577,7 +686,10 @@ class Store:
             return [self._schedule_row(row) for row in rows]
 
     def list_all_schedule_tracks(self, enabled_only: bool = True) -> list[dict[str, Any]]:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             query = "SELECT * FROM schedule_tracks"
             if enabled_only:
                 query += " WHERE enabled = 1"
@@ -586,7 +698,10 @@ class Store:
             return [self._schedule_row(row) for row in rows]
 
     def count_due_schedule_tracks(self, due_ts: int) -> int:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             row = conn.execute(
                 "SELECT COUNT(*) AS c FROM schedule_tracks WHERE enabled = 1 AND next_check_at <= ?",
                 (int(due_ts),),
@@ -632,12 +747,18 @@ class Store:
         parts.append("updated_at = ?")
         values.append(now_ts())
         values.append(track_id)
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             conn.execute(f"UPDATE schedule_tracks SET {', '.join(parts)} WHERE track_id = ?", values)
             conn.commit()
 
     def delete_schedule_track(self, track_id: str, user_id: int) -> bool:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             cur = conn.execute(
                 "DELETE FROM schedule_tracks WHERE track_id = ? AND user_id = ?",
                 (track_id, int(user_id)),
@@ -646,7 +767,10 @@ class Store:
             return cur.rowcount > 0
 
     def get_schedule_show_cache(self, tvmaze_id: int) -> dict[str, Any] | None:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             row = conn.execute(
                 "SELECT * FROM schedule_show_cache WHERE tvmaze_id = ?",
                 (int(tvmaze_id),),
@@ -667,7 +791,10 @@ class Store:
         last_error_at: int | None = None,
         last_error_text: str | None = None,
     ) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             conn.execute(
                 """
                 INSERT INTO schedule_show_cache(
@@ -694,7 +821,10 @@ class Store:
             conn.commit()
 
     def get_schedule_runner_status(self) -> dict[str, Any]:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             row = conn.execute("SELECT * FROM schedule_runner_status WHERE status_id = 1").fetchone()
             if not row:
                 return {
@@ -736,7 +866,10 @@ class Store:
         parts.append("updated_at = ?")
         updated_at = now_ts()
         values.append(updated_at)
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             conn.execute(
                 """
                 INSERT INTO schedule_runner_status(status_id, created_at, updated_at)
@@ -772,7 +905,10 @@ class Store:
     ) -> dict[str, Any]:
         job_id = secrets.token_hex(8)
         now_value = now_ts()
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             conn.execute(
                 """
                 INSERT INTO remove_jobs(
@@ -815,12 +951,18 @@ class Store:
             return self._remove_job_row(row)
 
     def get_remove_job(self, job_id: str) -> dict[str, Any] | None:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             row = conn.execute("SELECT * FROM remove_jobs WHERE job_id = ?", (str(job_id),)).fetchone()
             return self._remove_job_row(row) if row else None
 
     def list_due_remove_jobs(self, due_ts: int, limit: int = 10) -> list[dict[str, Any]]:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             rows = conn.execute(
                 """
                 SELECT * FROM remove_jobs
@@ -870,12 +1012,18 @@ class Store:
         parts.append("updated_at = ?")
         values.append(now_ts())
         values.append(str(job_id))
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             conn.execute(f"UPDATE remove_jobs SET {', '.join(parts)} WHERE job_id = ?", values)
             conn.commit()
 
     def db_diagnostics(self) -> dict[str, Any]:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
             journal_mode = conn.execute("PRAGMA journal_mode;").fetchone()[0]
             busy_timeout = int(conn.execute("PRAGMA busy_timeout;").fetchone()[0] or 0)
             return {
@@ -911,15 +1059,13 @@ class Store:
         backup_path = os.path.join(backup_dir, f"state_{ts}.sqlite3")
 
         with self._lock:
-            src = self._connect()
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            dst = _sqlite3.connect(backup_path)
             try:
-                dst = _sqlite3.connect(backup_path)
-                try:
-                    src.backup(dst)
-                finally:
-                    dst.close()
+                self._conn.backup(dst)
             finally:
-                src.close()
+                dst.close()
 
         # Set restrictive permissions on backup file
         try:

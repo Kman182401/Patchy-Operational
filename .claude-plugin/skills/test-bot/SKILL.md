@@ -9,6 +9,13 @@ Run all three code quality tools against the Patchy Bot codebase and report a un
 
 All commands run from `/home/karson/Patchy_Bot/telegram-qbt` using the project venv.
 
+## Agent Delegation
+
+This skill delegates to the following agents during execution. Always use these agents — do not implement inline what an agent can handle.
+
+- **Primary:** Delegate test execution, lint checks, and failure diagnosis to the `test-agent`.
+- **On failure:** If tests fail, delegate root cause analysis to the `error-detective` agent with the pytest output.
+
 ## Step 1 — Run all three checks in parallel
 
 Run these three commands simultaneously:

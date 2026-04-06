@@ -2,8 +2,10 @@
 name: security-agent
 description: "MUST be used for any work involving authentication, authorization, rate limiting, password handling, brute-force protection, input validation, path safety, secrets management, or security review. Use proactively when the task mentions security, auth, passwords, rate limits, validation, or when reviewing code for vulnerabilities."
 tools: Read, Grep, Glob, Bash
-model: opus
+model: sonnet
+maxTurns: 10
 memory: project
+effort: high
 color: red
 ---
 

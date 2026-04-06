@@ -7,6 +7,12 @@ description: Decides where each interaction lives (bot chat vs. Mini App) and ho
 
 Your job is to decide **where** an interaction belongs and **how** to structure it — before any code gets written. A clear architecture decision here prevents expensive rewrites later.
 
+## Agent Delegation
+
+This skill delegates to the following agents during execution. Always use these agents — do not implement inline what an agent can handle.
+
+- **Primary:** After architecture decisions are made, delegate implementation of keyboards, message flows, and callback routing to the `ui-agent`.
+
 ## Chat vs. Mini App: the decision rule
 
 Use **bot chat** when the interaction is:

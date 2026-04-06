@@ -13,10 +13,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-import pytest
-
 from qbt_telegram_bot import RateLimiter, Store, now_ts
-
 
 # ---------------------------------------------------------------------------
 # RateLimiter tests
@@ -24,7 +21,6 @@ from qbt_telegram_bot import RateLimiter, Store, now_ts
 
 
 class TestRateLimiter:
-
     def test_allows_requests_under_limit(self) -> None:
         rl = RateLimiter(limit=5, window_s=60.0)
         for _ in range(5):
@@ -90,7 +86,6 @@ class TestRateLimiter:
 
 
 class TestStoreAuthSessions:
-
     def test_unlock_then_is_unlocked(self, tmp_path: Any) -> None:
         store = Store(str(tmp_path / "auth.sqlite3"))
         assert store.is_unlocked(99) is False
@@ -108,7 +103,7 @@ class TestStoreAuthSessions:
         """A session with unlocked_until in the past should return False."""
         store = Store(str(tmp_path / "auth.sqlite3"))
         # Directly insert an already-expired record
-        with store._connect() as conn:
+        with store._create_connection() as conn:
             expired_ts = now_ts() - 1
             conn.execute(
                 "INSERT INTO user_auth(user_id, unlocked_until, updated_at) VALUES(?,?,?)",
@@ -136,7 +131,6 @@ class TestStoreAuthSessions:
 
 
 class TestStoreBruteForce:
-
     def test_failures_below_max_do_not_lock(self, tmp_path: Any) -> None:
         store = Store(str(tmp_path / "auth.sqlite3"))
         for _ in range(4):
@@ -174,7 +168,7 @@ class TestStoreBruteForce:
         """Failures older than window_s should not count toward lockout."""
         store = Store(str(tmp_path / "auth.sqlite3"))
         # Insert 4 failures with first_fail_at far in the past
-        with store._connect() as conn:
+        with store._create_connection() as conn:
             old_ts = now_ts() - 7200  # 2 hours ago — outside default 1h window
             conn.execute(
                 "INSERT INTO auth_attempts(user_id, fail_count, first_fail_at, locked_until) VALUES(?,?,?,?)",
@@ -190,7 +184,7 @@ class TestStoreBruteForce:
         """Failures within the time window should still accumulate to lockout."""
         store = Store(str(tmp_path / "auth.sqlite3"))
         # Insert 4 failures with first_fail_at within the window
-        with store._connect() as conn:
+        with store._create_connection() as conn:
             recent_ts = now_ts() - 60  # 1 minute ago — inside default 1h window
             conn.execute(
                 "INSERT INTO auth_attempts(user_id, fail_count, first_fail_at, locked_until) VALUES(?,?,?,?)",

@@ -7,6 +7,13 @@ description: Diagnose TV show schedule issues by inspecting database state, runn
 
 Inspect the full state of the TV schedule system and report what's happening, what's stuck, and what needs attention.
 
+## Agent Delegation
+
+This skill delegates to the following agents during execution. Always use these agents — do not implement inline what an agent can handle.
+
+- **Primary:** Delegate schedule state inspection, runner health analysis, and diagnosis to the `schedule-agent` (sequential with database queries).
+- **Secondary:** Delegate SQLite queries (Steps 1-2) to the `database-agent` if the schedule-agent needs raw query support.
+
 ## Step 1 — Read the schedule database tables
 
 Run these SQLite queries against `/home/karson/Patchy_Bot/telegram-qbt/state.sqlite3`:

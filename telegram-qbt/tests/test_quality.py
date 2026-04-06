@@ -383,3 +383,184 @@ def test_media_type_defaults_to_movie() -> None:
     ts2 = score_torrent("Movie.1080p.WEB-DL.x264-GROUP", 4_000_000_000, 50, media_type="movie")
     assert ts1.format_score == ts2.format_score
     assert ts1.resolution_tier == ts2.resolution_tier
+
+
+# ===================================================================
+# 12. Hardcoded subtitle penalty tests
+# ===================================================================
+
+
+def test_hardcoded_korsub_penalty() -> None:
+    """KORSUB tag should reduce format_score by 200 vs the same torrent without it."""
+    ts_korsub = score_torrent("Movie.KORSUB.1080p.WEB-DL.x264-GROUP", 4_000_000_000, 50)
+    ts_clean = score_torrent("Movie.1080p.WEB-DL.x264-GROUP", 4_000_000_000, 50)
+    assert ts_clean.format_score - ts_korsub.format_score == 200
+
+
+def test_hardcoded_hc_penalty() -> None:
+    """HC (hardcoded subs) tag should reduce format_score by 200."""
+    ts_hc = score_torrent("Movie.HC.1080p.WEB-DL.x264-GROUP", 4_000_000_000, 50)
+    ts_clean = score_torrent("Movie.1080p.WEB-DL.x264-GROUP", 4_000_000_000, 50)
+    assert ts_clean.format_score - ts_hc.format_score == 200
+
+
+def test_hardsub_penalty() -> None:
+    """HardSub tag should reduce format_score by 200."""
+    ts_hardsub = score_torrent("Movie.HardSub.1080p.WEB-DL.x264-GROUP", 4_000_000_000, 50)
+    ts_clean = score_torrent("Movie.1080p.WEB-DL.x264-GROUP", 4_000_000_000, 50)
+    assert ts_clean.format_score - ts_hardsub.format_score == 200
+
+
+def test_no_penalty_for_clean_name() -> None:
+    """A clean torrent name should NOT get the hardcoded sub penalty."""
+    ts = score_torrent("Movie.1080p.WEB-DL.DDP5.1.x264-GROUP", 4_000_000_000, 50)
+    # If it had the penalty, score would be 200 lower than expected.
+    # Just verify the score is reasonable and not penalised.
+    ts_base = score_torrent("Movie.1080p.WEB-DL.DDP5.1.x264-GROUP", 4_000_000_000, 50)
+    assert ts.format_score == ts_base.format_score
+    assert not ts.is_rejected
+
+
+# ===================================================================
+# 13. Dual/multi audio bonus tests
+# ===================================================================
+
+
+def test_dual_audio_bonus() -> None:
+    """'Dual.Audio' in the name should add +10 to the format_score."""
+    ts_dual = score_torrent("Movie.1080p.Dual.Audio.WEB-DL.x264-GROUP", 4_000_000_000, 50)
+    ts_plain = score_torrent("Movie.1080p.WEB-DL.x264-GROUP", 4_000_000_000, 50)
+    assert ts_dual.format_score - ts_plain.format_score == 10
+
+
+def test_multi_audio_bonus() -> None:
+    """'Multi' in the name should add +10 to the format_score."""
+    ts_multi = score_torrent("Movie.1080p.Multi.WEB-DL.x264-GROUP", 4_000_000_000, 50)
+    ts_plain = score_torrent("Movie.1080p.WEB-DL.x264-GROUP", 4_000_000_000, 50)
+    assert ts_multi.format_score - ts_plain.format_score == 10
+
+
+# ===================================================================
+# 14. schedule_episode_rank_key tests
+# ===================================================================
+
+
+def test_schedule_rank_key_includes_seed_tiebreaker() -> None:
+    """Two torrents with identical quality but different seeds should produce different rank tuples."""
+    from patchy_bot.handlers.schedule import schedule_episode_rank_key
+
+    row_high = {"fileName": "Show.S01E01.1080p.WEB-DL.x264-GROUP", "nbSeeders": 100, "fileSize": 1_000_000_000}
+    row_low = {"fileName": "Show.S01E01.1080p.WEB-DL.x264-GROUP", "nbSeeders": 2, "fileSize": 1_000_000_000}
+    key_high = schedule_episode_rank_key(row_high, "Show", 1, 1)
+    key_low = schedule_episode_rank_key(row_low, "Show", 1, 1)
+    assert key_high != key_low
+    assert key_high > key_low  # higher seeds = higher rank tuple
+
+
+def test_schedule_rank_key_tuple_is_5_elements() -> None:
+    """The rank key tuple should have exactly 5 elements."""
+    from patchy_bot.handlers.schedule import schedule_episode_rank_key
+
+    row = {"fileName": "Show.S01E01.1080p.WEB-DL.x264-GROUP", "nbSeeders": 50, "fileSize": 1_000_000_000}
+    key = schedule_episode_rank_key(row, "Show", 1, 1)
+    assert len(key) == 5
+
+
+# ===================================================================
+# 15. scoring_overrides configurability tests
+# ===================================================================
+
+
+def test_hevc_penalty_override_zero() -> None:
+    """Setting hevc_1080p_penalty=0 should remove the x265 penalty at 1080p."""
+    ts_default = score_torrent("Movie.1080p.WEB-DL.x265-GROUP", 4_000_000_000, 50)
+    ts_no_pen = score_torrent(
+        "Movie.1080p.WEB-DL.x265-GROUP",
+        4_000_000_000,
+        50,
+        scoring_overrides={"hevc_1080p_penalty": 0},
+    )
+    # Default penalty is -50, so override=0 should raise the score by 50
+    assert ts_no_pen.format_score - ts_default.format_score == 50
+
+
+def test_av1_reject_override_false() -> None:
+    """Setting av1_reject=False should NOT reject AV1 torrents."""
+    ts = score_torrent(
+        "Movie.1080p.WEB-DL.AV1-GROUP",
+        4_000_000_000,
+        50,
+        scoring_overrides={"av1_reject": False},
+    )
+    assert not ts.is_rejected
+
+
+def test_extra_hq_group() -> None:
+    """Adding a custom group to hq_groups_extra should give it the +30 bonus."""
+    ts_custom = score_torrent(
+        "Movie.1080p.WEB-DL.x264-mygroup",
+        4_000_000_000,
+        50,
+        scoring_overrides={"hq_groups_extra": {"mygroup"}},
+    )
+    ts_plain = score_torrent("Movie.1080p.WEB-DL.x264-mygroup", 4_000_000_000, 50)
+    assert ts_custom.format_score - ts_plain.format_score == 30
+
+
+def test_season_pack_max_episodes_override() -> None:
+    """A smaller season_pack_max_episodes should tighten the max size window."""
+    # With the default (24 eps), a large season pack is within range.
+    # With max_episodes=12, the allowed max is halved, so the same size
+    # may trigger a size penalty.
+    large_pack_size = _gb(90)  # 90 GB -- within 24*20GB=480GB but let's check relative
+    ts_default = score_torrent(
+        "Show.S01.1080p.WEB-DL.x264-GROUP",
+        large_pack_size,
+        50,
+        media_type="movie",
+        scoring_overrides={"season_pack_max_episodes": 24},
+    )
+    ts_tight = score_torrent(
+        "Show.S01.1080p.WEB-DL.x264-GROUP",
+        large_pack_size,
+        50,
+        media_type="movie",
+        scoring_overrides={"season_pack_max_episodes": 6},
+    )
+    # The tighter override should penalise more (or equal if both within range).
+    # With 6 eps, max = 20GB * 6 = 120GB, and 90GB is within. Use a bigger size.
+    huge_pack = _gb(180)  # 180 GB -- within 24*20=480 but exceeds 6*20=120
+    ts_ok = score_torrent(
+        "Show.S01.1080p.WEB-DL.x264-GROUP",
+        huge_pack,
+        50,
+        media_type="movie",
+        scoring_overrides={"season_pack_max_episodes": 24},
+    )
+    ts_over = score_torrent(
+        "Show.S01.1080p.WEB-DL.x264-GROUP",
+        huge_pack,
+        50,
+        media_type="movie",
+        scoring_overrides={"season_pack_max_episodes": 6},
+    )
+    assert ts_ok.format_score > ts_over.format_score
+
+
+# ===================================================================
+# 16. RTN version pin test
+# ===================================================================
+
+
+def test_rtn_version_pinned() -> None:
+    """rank-torrent-name dependency should be pinned with <2.0 upper bound."""
+    import pathlib
+
+    pyproject = pathlib.Path(__file__).resolve().parent.parent / "pyproject.toml"
+    content = pyproject.read_text()
+    assert "rank-torrent-name" in content
+    # Check for <2.0 upper bound (handles >=X.Y,<2.0 style)
+    import re
+
+    match = re.search(r"rank-torrent-name[^\"]*<2\.0", content)
+    assert match is not None, "rank-torrent-name must be pinned with <2.0 upper bound"

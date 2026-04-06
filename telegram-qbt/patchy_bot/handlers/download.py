@@ -9,9 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import re
-import subprocess
 import time
 import urllib.parse
 from typing import Any
@@ -23,6 +21,7 @@ from telegram.ext import ContextTypes
 from ..plex_organizer import organize_download as _organize_download
 from ..types import HandlerContext
 from ..utils import _PM, _h, human_size
+from ._shared import vpn_ready_for_download
 
 LOG = logging.getLogger("qbtg")
 
@@ -71,7 +70,8 @@ def is_complete_torrent(info: dict[str, Any]) -> bool:
         progress = 0.0
 
     total_bytes = int(info.get("size", 0) or info.get("total_size", 0) or 0)
-    amount_left = int(info.get("amount_left", -1) or -1)
+    _raw_left = info.get("amount_left")
+    amount_left = int(_raw_left) if _raw_left is not None else -1
     completed_b = completed_bytes(info)
 
     if progress >= 0.999:
@@ -130,7 +130,8 @@ def eta_label(info: dict[str, Any]) -> str:
         return "metadata"
     if state in {"checkingDL", "checkingResumeData", "moving"}:
         return state.replace("DL", "").replace("ResumeData", " resume data").lower()
-    eta = int(info.get("eta", -1) or -1)
+    _raw_eta = info.get("eta")
+    eta = int(_raw_eta) if _raw_eta is not None else -1
     return format_eta(eta)
 
 
@@ -630,50 +631,6 @@ async def resolve_hash_by_name(ctx: HandlerContext, title: str, category: str, w
     return None
 
 
-def vpn_ready_for_download(ctx: HandlerContext) -> tuple[bool, str]:
-    """Check that the VPN interface is up and has an IP before allowing downloads."""
-    if not ctx.cfg.vpn_required_for_downloads:
-        return True, "vpn check disabled"
-
-    service = ctx.cfg.vpn_service_name
-    iface = ctx.cfg.vpn_interface_name
-
-    # Check 1: VPN interface must exist.
-    if not os.path.exists(f"/sys/class/net/{iface}"):
-        return False, f"VPN interface missing: {iface}"
-
-    # Check 2: Interface must not be down.
-    try:
-        with open(f"/sys/class/net/{iface}/operstate", encoding="utf-8") as f:
-            state = f.read().strip().lower()
-    except Exception:
-        state = "unknown"
-    if state == "down":
-        return False, f"VPN interface is down: {iface}"
-
-    # Check 3: Interface must have an IP address assigned.
-    try:
-        ip_result = subprocess.run(
-            ["ip", "-4", "addr", "show", "dev", iface],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if ip_result.returncode != 0 or "inet " not in (ip_result.stdout or ""):
-            return False, f"VPN interface {iface} has no IPv4 address"
-    except Exception as e:
-        return False, f"VPN interface IP check failed: {e}"
-
-    # Check 4 (optional): If a systemd service is configured, verify it's active.
-    if service:
-        svc = subprocess.run(["systemctl", "is-active", "--quiet", service], capture_output=True)
-        if svc.returncode != 0:
-            # Not a hard failure -- Surfshark Flatpak doesn't use systemd.
-            LOG.debug("VPN systemd service %s is not active (may be managed externally)", service)
-
-    return True, f"vpn ready ({iface} up)"
-
-
 async def do_add(
     ctx: HandlerContext,
     user_id: int,
@@ -753,3 +710,46 @@ async def do_add(
         "hash": torrent_hash,
         "path": str(target["path"]),
     }
+
+
+async def on_cb_stop(bot_app: Any, *, data: str, q: Any, user_id: int) -> None:
+    """Handle ``stop:*`` callback queries — cancel download and delete torrent."""
+    ctx = getattr(bot_app, "_ctx", bot_app)
+    if data.startswith("stop:"):
+        torrent_hash = data[5:]
+        key = (user_id, torrent_hash.lower())
+        task = ctx.progress_tasks.get(key)
+        if task and not task.done():
+            task.cancel()
+        restart_cb = "menu:movie"
+        restart_label = "\U0001f3ac Restart Movie Search"
+        try:
+            torrent_info = await asyncio.to_thread(ctx.qbt.get_torrent, torrent_hash)
+            if torrent_info:
+                cat = str(torrent_info.get("category") or "").strip()
+                if cat.lower() == ctx.cfg.tv_category.lower():
+                    restart_cb = "menu:tv"
+                    restart_label = "\U0001f4fa Restart TV Search"
+        except Exception:
+            pass
+        try:
+            await asyncio.to_thread(ctx.qbt.delete_torrent, torrent_hash, delete_files=True)
+            stopped_kb = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(restart_label, callback_data=restart_cb),
+                        InlineKeyboardButton("\U0001f3e0 Home", callback_data="nav:home"),
+                    ]
+                ]
+            )
+            await q.message.edit_text(
+                "<b>\U0001f6d1 Download Stopped</b>\n<i>Torrent has been removed.</i>",
+                reply_markup=stopped_kb,
+                parse_mode=_PM,
+            )
+        except Exception as e:
+            await q.message.edit_text(
+                f"<b>\u26a0\ufe0f Stop Failed</b>\n<i>{_h(str(e))}</i>", reply_markup=None, parse_mode=_PM
+            )
+        await q.answer()
+        return

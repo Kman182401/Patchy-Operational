@@ -7,6 +7,12 @@ description: Refines Telegram bot chat UI — message text, button labels, keybo
 
 The goal is a bot that feels immediate, clear, and native to Telegram — not like a web form squeezed into a chat window.
 
+## Agent Delegation
+
+This skill delegates to the following agents during execution. Always use these agents — do not implement inline what an agent can handle.
+
+- **Primary:** Delegate all Telegram message text, button label, keyboard layout, and callback routing changes to the `ui-agent`.
+
 ## The edit-first principle
 
 Sending a new message for every navigation step creates a chat that fills with stale messages. **Edit the existing message instead.**

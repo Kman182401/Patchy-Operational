@@ -2908,10 +2908,10 @@ def test_skip_reply_text_explains_re_notification_conditions() -> None:
     # Verify the skip confirmation text content by searching for it in the source
     import inspect
 
-    from qbt_telegram_bot import BotApp
+    from patchy_bot.handlers.schedule import on_cb_schedule
 
     # Get the source of the callback handler that handles sch:skip
-    source = inspect.getsource(BotApp._on_cb_schedule)
+    source = inspect.getsource(on_cb_schedule)
     # The new text must be present
     assert "I'll alert you again if new episodes air or the missing count changes" in source
     # The old vague text must NOT be present
@@ -3245,7 +3245,7 @@ def test_store_is_unlocked_treats_past_timestamp_as_locked(tmp_path):
 
     # Directly insert an already-expired record
     expired_ts = now_ts() - 1  # 1 second in the past
-    with s._connect() as conn:
+    with s._create_connection() as conn:
         conn.execute(
             "INSERT INTO user_auth(user_id, unlocked_until, updated_at) VALUES(?,?,?)",
             (7, expired_ts, now_ts()),
@@ -3290,7 +3290,7 @@ def test_store_auth_attempts_cleanup_prunes_stale_rows(tmp_path):
     locked_until_future = now_ts() + 900
 
     # Insert a stale row that is no longer locked (locked_until = 0)
-    with s._connect() as conn:
+    with s._create_connection() as conn:
         conn.execute(
             "INSERT INTO auth_attempts(user_id, fail_count, first_fail_at, locked_until) VALUES(?,?,?,?)",
             (101, 3, old_ts, 0),
@@ -3304,7 +3304,7 @@ def test_store_auth_attempts_cleanup_prunes_stale_rows(tmp_path):
 
     # Prune stale unlocked rows (first_fail_at older than 24h AND not currently locked)
     cutoff = now_ts() - 24 * 3600
-    with s._connect() as conn:
+    with s._create_connection() as conn:
         conn.execute(
             "DELETE FROM auth_attempts WHERE first_fail_at < ? AND locked_until <= ?",
             (cutoff, now_ts()),
@@ -3312,12 +3312,12 @@ def test_store_auth_attempts_cleanup_prunes_stale_rows(tmp_path):
         conn.commit()
 
     # Stale unlocked row should be gone
-    with s._connect() as conn:
+    with s._create_connection() as conn:
         row = conn.execute("SELECT 1 FROM auth_attempts WHERE user_id = 101").fetchone()
         assert row is None
 
     # Still-locked row must remain
-    with s._connect() as conn:
+    with s._create_connection() as conn:
         row = conn.execute("SELECT 1 FROM auth_attempts WHERE user_id = 102").fetchone()
         assert row is not None
 

@@ -10,6 +10,15 @@ Fetch open issues from the Patchy-Operational repo, route each to the correct do
 
 **Git policy override:** Invoking this skill is explicit permission to run git-write commands (branch, add, commit, push) in `~/Patchy_Bot` for the duration of this skill's execution. All changes go on isolated `fix/issue-<number>` branches — never on `main`.
 
+## Agent Delegation
+
+This skill delegates to the following agents during execution. Always use these agents — do not implement inline what an agent can handle.
+
+- **Primary:** Route each issue to the matching domain agent per the Agent Routing Table below (sequential — one issue at a time to avoid file conflicts).
+- **Review:** After each fix, delegate test verification to the `test-agent`.
+- **Security issues:** The `security-agent` is read-only — it produces analysis only. Delegate implementation of its recommendations to a general-purpose agent.
+- **On failure:** If an agent's fix breaks tests, give it ONE retry with the error output before abandoning the issue.
+
 ## Usage
 
 ```

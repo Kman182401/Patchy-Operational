@@ -41,7 +41,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import secrets
 import shlex
 from typing import TYPE_CHECKING, Any
@@ -60,117 +59,20 @@ from ..utils import (
     parse_size_to_bytes,
 )
 from . import download as download_handler
+from ._shared import (
+    ensure_media_categories as _ensure_media_categories,
+)
+from ._shared import (
+    qbt_category_aliases as _qbt_category_aliases,
+)
+from ._shared import (
+    qbt_transport_status as _qbt_transport_status,
+)
 
 if TYPE_CHECKING:
     pass  # BotApp is referenced via Any to avoid circular imports
 
 LOG = logging.getLogger("qbtg")
-
-
-# ---------------------------------------------------------------------------
-# Inline helpers — inlined from BotApp so this module is ctx-portable
-# ---------------------------------------------------------------------------
-
-
-def _targets(ctx: HandlerContext) -> dict[str, dict[str, str]]:
-    """Return the movies/tv target dict from config."""
-    return {
-        "movies": {
-            "category": ctx.cfg.movies_category,
-            "path": ctx.cfg.movies_path,
-            "label": "Movies",
-            "emoji": "🎬",
-        },
-        "tv": {
-            "category": ctx.cfg.tv_category,
-            "path": ctx.cfg.tv_path,
-            "label": "TV",
-            "emoji": "📺",
-        },
-    }
-
-
-def _norm_path(value: str | None) -> str:
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-    return os.path.normpath(raw.rstrip("/"))
-
-
-def _storage_status(ctx: HandlerContext) -> tuple[bool, str]:
-    """Check NVMe mount + library paths."""
-    if ctx.cfg.require_nvme_mount and not os.path.ismount(ctx.cfg.nvme_mount_path):
-        return False, f"NVMe mount missing at {ctx.cfg.nvme_mount_path}"
-    for key in ("movies", "tv"):
-        t = _targets(ctx)[key]
-        os.makedirs(t["path"], exist_ok=True)
-        if not os.path.isdir(t["path"]):
-            return False, f"Library path missing: {t['path']}"
-    return True, "ready"
-
-
-def _ensure_media_categories(ctx: HandlerContext) -> tuple[bool, str]:
-    """Ensure qBittorrent categories exist for movies + tv paths."""
-    ok, reason = _storage_status(ctx)
-    if not ok:
-        return False, reason
-    try:
-        for t in _targets(ctx).values():
-            ctx.qbt.ensure_category(t["category"], t["path"])
-        return True, "ready"
-    except Exception as e:
-        return False, f"qBittorrent category sync failed: {e}"
-
-
-def _qbt_transport_status(ctx: HandlerContext) -> tuple[bool, str]:
-    """Check qBittorrent connection status and bound network interface."""
-    info = ctx.qbt.get_transfer_info()
-    prefs = ctx.qbt.get_preferences()
-
-    status = str(info.get("connection_status") or "unknown").strip().lower()
-    dht_nodes = int(info.get("dht_nodes") or 0)
-    iface = str(prefs.get("current_network_interface") or "").strip()
-    iface_addr = str(prefs.get("current_interface_address") or "").strip()
-    bind_label = iface or "any interface"
-
-    if iface:
-        iface_dir = f"/sys/class/net/{iface}"
-        if not os.path.exists(iface_dir):
-            return False, f"bound interface missing: {iface}"
-        try:
-            with open(f"{iface_dir}/operstate", encoding="utf-8") as f:
-                iface_state = f.read().strip().lower()
-        except OSError:
-            iface_state = "unknown"
-        if iface_state == "down":
-            return False, f"bound interface is down: {iface}"
-        bind_label = f"{iface} ({iface_state})"
-
-    if iface_addr:
-        bind_label = f"{bind_label} @ {iface_addr}"
-
-    summary = f"connection_status={status} via {bind_label}, dht_nodes={dht_nodes}"
-    if status == "disconnected":
-        return False, summary
-    return True, summary
-
-
-def _qbt_category_aliases(ctx: HandlerContext, primary_category: str, save_path: str) -> set[str]:
-    """Return all qBittorrent category names mapped to the same save path."""
-    aliases: set[str] = {str(primary_category or "").strip()} if primary_category else set()
-    want_path = _norm_path(save_path)
-    if not want_path:
-        return aliases
-    try:
-        categories = ctx.qbt.list_categories()
-    except Exception:
-        LOG.warning("Failed to inspect qBittorrent category aliases", exc_info=True)
-        return aliases
-    for name, meta in categories.items():
-        current_path = _norm_path(str((meta or {}).get("savePath") or ""))
-        if current_path and current_path == want_path:
-            aliases.add(str(name).strip())
-    return {name for name in aliases if name}
 
 
 # ---------------------------------------------------------------------------
@@ -986,4 +888,170 @@ async def cmd_text_fallback(bot: Any, update: Update, context: ContextTypes.DEFA
         return
     if raw.startswith("/help"):
         await cmd_help(bot, update, context)
+        return
+
+
+# ---------------------------------------------------------------------------
+# Callback handlers: menu and flow
+# ---------------------------------------------------------------------------
+
+
+async def on_cb_menu(bot_app: Any, *, data: str, q: Any, user_id: int) -> None:
+    """Handle ``menu:*`` callback queries — Command Center navigation."""
+    ctx = getattr(bot_app, "_ctx", bot_app)
+    if data == "menu:movie":
+        bot_app._set_flow(user_id, {"mode": "movie", "stage": "await_title"})
+        text = (
+            "<b>\U0001f3ac Movie Search</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Send the movie title to search.\n\n"
+            "<i>Example: Dune Part Two</i>"
+        )
+        kb = InlineKeyboardMarkup(bot_app._nav_footer(back_data="nav:home", include_home=False))
+        await bot_app._render_nav_ui(user_id, q.message, text, reply_markup=kb, current_ui_message=q.message)
+        return
+
+    if data == "menu:tv":
+        flow = {"mode": "tv", "stage": "await_filter_choice", "season": None, "episode": None}
+        bot_app._set_flow(user_id, flow)
+        await bot_app._render_tv_ui(
+            user_id,
+            q.message,
+            flow,
+            bot_app._tv_filter_choice_text(),
+            reply_markup=bot_app._tv_filter_choice_keyboard(),
+            current_ui_message=q.message,
+        )
+        return
+
+    if data == "menu:schedule":
+        tracks = await asyncio.to_thread(ctx.store.list_schedule_tracks, user_id, False, 50)
+        if tracks:
+            enabled = [t for t in tracks if t.get("enabled")]
+            paused = [t for t in tracks if not t.get("enabled")]
+            text = (
+                "<b>\U0001f5d3\ufe0f Schedule</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "Monitors your Plex library and auto-queues missing episodes as they air.\n\n"
+                f"<b>{len(enabled)}</b> active"
+            )
+            if paused:
+                text += f" \u00b7 <b>{len(paused)}</b> paused"
+            rows: list[list[InlineKeyboardButton]] = [
+                [
+                    InlineKeyboardButton("\u2795 Add New Show", callback_data="sch:addnew"),
+                    InlineKeyboardButton(f"\U0001f4cb My Shows ({len(tracks)})", callback_data="sch:myshows"),
+                ],
+            ]
+            rows += bot_app._nav_footer(back_data="nav:home", include_home=False)
+            kb = InlineKeyboardMarkup(rows)
+            await bot_app._render_nav_ui(user_id, q.message, text, reply_markup=kb, current_ui_message=q.message)
+        else:
+            bot_app._schedule_start_flow(user_id)
+            text = (
+                "<b>\u270f\ufe0f Type a show name to search</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "Monitors your Plex library and auto-queues missing episodes as they air.\n\n"
+                "<i>Example: Severance</i>"
+            )
+            kb = InlineKeyboardMarkup(bot_app._nav_footer(back_data="nav:home", include_home=False))
+            await bot_app._render_nav_ui(user_id, q.message, text, reply_markup=kb, current_ui_message=q.message)
+        return
+
+    if data == "menu:remove":
+        await bot_app._open_remove_browse_root(user_id, q.message, current_ui_message=q.message)
+        return
+
+    if data == "menu:active":
+        await bot_app._render_active_ui(user_id, q.message, n=10, current_ui_message=q.message)
+        return
+
+    if data == "menu:storage":
+        await bot_app._render_categories_ui(user_id, q.message, current_ui_message=q.message)
+        return
+
+    if data == "menu:plugins":
+        await bot_app._render_plugins_ui(user_id, q.message, current_ui_message=q.message)
+        return
+
+    if data == "menu:profile":
+        d = ctx.store.get_defaults(user_id, ctx.cfg)
+        ok, reason = await asyncio.to_thread(bot_app._storage_status)
+        transport_ok, transport_reason = await asyncio.to_thread(bot_app._qbt_transport_status)
+        vpn_ok, vpn_reason = await asyncio.to_thread(bot_app._vpn_ready_for_download)
+        plex_storage_usage = await asyncio.to_thread(bot_app._plex_storage_display)
+        lines = [
+            "Current profile:",
+            f"\u2022 min_seeds: {d['default_min_seeds']}",
+            f"\u2022 sort/order: {d['default_sort']} {d['default_order']}",
+            f"\u2022 limit: {d['default_limit']}",
+            f"\u2022 quality default: {ctx.cfg.default_min_quality}p+",
+            f"\u2022 movies -> {ctx.cfg.movies_category} @ {ctx.cfg.movies_path}",
+            f"\u2022 tv -> {ctx.cfg.tv_category} @ {ctx.cfg.tv_path}",
+            f"\u2022 storage status: {'ready' if ok else 'not ready'} ({reason})",
+            f"\u2022 qB transport: {'ready' if transport_ok else 'blocked'} ({transport_reason})",
+            f"\u2022 plex storage: {plex_storage_usage}",
+            f"\u2022 vpn gate for downloads: {'ready' if vpn_ok else 'blocked'} ({vpn_reason})",
+        ]
+        text = "\n".join(lines)
+        kb = InlineKeyboardMarkup(bot_app._nav_footer())
+        await bot_app._render_nav_ui(user_id, q.message, text, reply_markup=kb, current_ui_message=q.message)
+        return
+
+    if data == "menu:help":
+        text = bot_app._help_text()
+        kb = InlineKeyboardMarkup(bot_app._nav_footer())
+        await bot_app._render_nav_ui(
+            user_id,
+            q.message,
+            text,
+            reply_markup=kb,
+            disable_web_page_preview=True,
+            current_ui_message=q.message,
+        )
+        return
+
+
+async def on_cb_flow(bot_app: Any, *, data: str, q: Any, user_id: int) -> None:
+    """Handle ``flow:*`` callback queries — TV search flow transitions."""
+    if data == "flow:tv_filter_set":
+        flow = {"mode": "tv", "stage": "await_filter", "season": None, "episode": None}
+        bot_app._set_flow(user_id, flow)
+        await bot_app._render_tv_ui(
+            user_id,
+            q.message,
+            flow,
+            bot_app._tv_filter_prompt_text(),
+            reply_markup=InlineKeyboardMarkup(bot_app._nav_footer(back_data="menu:tv")),
+            current_ui_message=q.message,
+        )
+        return
+
+    if data == "flow:tv_filter_skip":
+        flow = {"mode": "tv", "stage": "await_title", "season": None, "episode": None}
+        bot_app._set_flow(user_id, flow)
+        await bot_app._render_tv_ui(
+            user_id,
+            q.message,
+            flow,
+            bot_app._tv_title_prompt_text(),
+            reply_markup=InlineKeyboardMarkup(bot_app._nav_footer(back_data="menu:tv")),
+            current_ui_message=q.message,
+        )
+        return
+
+    if data == "flow:tv_full_series":
+        flow = {"mode": "tv", "stage": "await_title", "season": None, "episode": None, "full_series": True}
+        bot_app._set_flow(user_id, flow)
+        await bot_app._render_tv_ui(
+            user_id,
+            q.message,
+            flow,
+            "<b>\U0001f4fa TV Search \u2014 Full Series</b>\n\n"
+            "Send the show title to search.\n"
+            "Results will prioritize complete series downloads.\n\n"
+            "<i>Example: Severance</i>",
+            reply_markup=InlineKeyboardMarkup(bot_app._nav_footer(back_data="menu:tv")),
+            current_ui_message=q.message,
+        )
         return

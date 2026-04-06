@@ -2,8 +2,10 @@
 name: config-infra-agent
 description: "MUST be used for any work involving configuration, environment variables, the startup sequence, systemd service management, logging, the .env file structure, VPN configuration, or infrastructure changes. Use proactively when the task mentions config, env vars, startup, service, systemd, logging, or deployment."
 tools: Read, Write, Edit, Bash, Grep, Glob
-model: opus
+model: sonnet
+maxTurns: 15
 memory: project
+effort: medium
 color: yellow
 ---
 

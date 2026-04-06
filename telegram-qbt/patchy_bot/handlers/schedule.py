@@ -28,7 +28,6 @@ from ..utils import (
     format_local_ts,
     normalize_title,
     now_ts,
-    quality_tier,
 )
 
 LOG = logging.getLogger("qbtg")
@@ -1086,18 +1085,28 @@ def schedule_row_matches_episode(name: str, season: int, episode: int) -> bool:
 
 
 def schedule_episode_rank_key(row: dict[str, Any], show_name: str, season: int, episode: int) -> tuple[int, ...]:
+    from ..quality import score_torrent
+
     name = str(row.get("fileName") or row.get("name") or "")
-    low = name.lower()
-    exact_episode = 1 if schedule_row_matches_episode(name, season, episode) else 0
-    exact_show = 1 if normalize_title(show_name) in normalize_title(name) else 0
-    quality = quality_tier(name)
-    hevc = 1 if any(token in low for token in ("x265", "h265", "hevc")) else 0
-    web = 1 if any(token in low for token in ("web-dl", "webdl", "webrip", "amzn", "nf", "dsnp", "hmax")) else 0
-    proper = 1 if any(token in low for token in ("proper", "repack")) else 0
     seeds = int(row.get("nbSeeders") or row.get("seeders") or 0)
     size = int(row.get("fileSize") or row.get("size") or 0)
-    size_ok = 1 if size >= 200 * 1024 * 1024 else 0
-    return (exact_episode, exact_show, quality, hevc, web, proper, seeds, size_ok)
+    exact_episode = 1 if schedule_row_matches_episode(name, season, episode) else 0
+    exact_show = 1 if normalize_title(show_name) in normalize_title(name) else 0
+    ts = score_torrent(name, size, seeds, media_type="episode")
+    # Seed bucket as 5th element: quality-first with health tiebreaker
+    if seeds >= 50:
+        seed_tier = 5
+    elif seeds >= 25:
+        seed_tier = 4
+    elif seeds >= 10:
+        seed_tier = 3
+    elif seeds >= 5:
+        seed_tier = 2
+    elif seeds >= 1:
+        seed_tier = 1
+    else:
+        seed_tier = 0
+    return (exact_episode, exact_show, ts.resolution_tier, ts.format_score, seed_tier)
 
 
 # ---------------------------------------------------------------------------
@@ -1502,3 +1511,630 @@ def schedule_active_line(track: dict[str, Any]) -> str:
 
 def schedule_paused_line(name: str, season: int) -> str:
     return f"\u23f8 <b>{_h(name)}</b>\n   Season {season} \u00b7 <i>paused</i>"
+
+
+# ---------------------------------------------------------------------------
+# Callback handler — extracted from BotApp._on_cb_schedule
+# ---------------------------------------------------------------------------
+
+
+async def on_cb_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> None:  # noqa: C901
+    """Handle all ``sch:*`` callback-query prefixes.
+
+    *bot_app* is either the real ``BotApp`` instance or a test ``DummyBot``.
+    All flow/rendering calls go through ``bot_app._method()`` so that tests
+    can override them.
+    """
+    ctx = getattr(bot_app, "_ctx", bot_app)
+
+    if data == "sch:cancel":
+        bot_app._clear_flow(user_id)
+        await bot_app._render_command_center(q.message, user_id=user_id)
+        return
+
+    if data.startswith("sch:pick:"):
+        idx = int(data.split(":", 2)[2])
+        await bot_app._schedule_pick_candidate(q.message, user_id, idx)
+        return
+
+    if data == "sch:change":
+        bot_app._schedule_start_flow(user_id)
+        flow = bot_app._get_flow(user_id) or {"mode": "schedule", "stage": "await_show"}
+        await bot_app._render_schedule_ui(
+            user_id,
+            q.message,
+            flow,
+            "<b>\u270f\ufe0f Type a show name to search</b>\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\nMonitors your Plex library and auto-queues missing episodes as they air.\n\n<i>Example: Severance</i>",
+            reply_markup=None,
+            current_ui_message=q.message,
+        )
+        return
+
+    if data == "sch:season":
+        flow = bot_app._get_flow(user_id)
+        if not flow or flow.get("mode") != "schedule" or flow.get("stage") != "confirm":
+            await bot_app._render_schedule_ui(
+                user_id,
+                q.message,
+                {"mode": "schedule", "stage": "await_show"},
+                "<b>\u23f0 Session Expired</b>\nThat schedule setup is no longer active.\n<i>Start /schedule again.</i>",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
+        available = list(
+            (flow.get("probe") or {}).get("available_seasons")
+            or flow.get("selected_show", {}).get("available_seasons")
+            or []
+        )
+        flow["stage"] = "await_season_pick"
+        bot_app._set_flow(user_id, flow)
+        await bot_app._render_schedule_ui(
+            user_id,
+            q.message,
+            flow,
+            "Send the season number to track. Available seasons: " + ", ".join(str(x) for x in available),
+            reply_markup=None,
+            current_ui_message=q.message,
+        )
+        return
+
+    if data == "sch:confirm:all":
+        flow = bot_app._get_flow(user_id)
+        if not flow or flow.get("stage") != "confirm":
+            await bot_app._schedule_confirm_selection(q.message, user_id, int(q.message.chat_id), post_action="all")
+            return
+        probe = dict(flow.get("probe") or {})
+        codes = list(probe.get("actionable_missing_codes") or probe.get("missing_codes") or [])
+        if not codes:
+            await bot_app._schedule_confirm_selection(q.message, user_id, int(q.message.chat_id), post_action=None)
+            return
+        flow["stage"] = "dl_confirm"
+        flow["dl_confirm_codes"] = codes
+        flow["dl_confirm_post_action"] = "all"
+        flow["dl_confirm_from"] = "confirm"
+        bot_app._set_flow(user_id, flow)
+        await bot_app._render_schedule_ui(
+            user_id,
+            q.message,
+            flow,
+            bot_app._schedule_dl_confirm_text(flow),
+            reply_markup=bot_app._schedule_dl_confirm_keyboard(),
+            current_ui_message=q.message,
+        )
+        return
+
+    if data == "sch:confirm:series":
+        flow = bot_app._get_flow(user_id)
+        if not flow or flow.get("stage") != "confirm":
+            await bot_app._schedule_confirm_selection(q.message, user_id, int(q.message.chat_id), post_action="series")
+            return
+        probe = dict(flow.get("probe") or {})
+        codes = list(probe.get("series_actionable_all") or probe.get("actionable_missing_codes") or [])
+        if not codes:
+            await bot_app._schedule_confirm_selection(q.message, user_id, int(q.message.chat_id), post_action=None)
+            return
+        flow["stage"] = "dl_confirm"
+        flow["dl_confirm_codes"] = codes
+        flow["dl_confirm_post_action"] = "series"
+        flow["dl_confirm_from"] = "confirm"
+        bot_app._set_flow(user_id, flow)
+        await bot_app._render_schedule_ui(
+            user_id,
+            q.message,
+            flow,
+            bot_app._schedule_dl_confirm_text(flow),
+            reply_markup=bot_app._schedule_dl_confirm_keyboard(),
+            current_ui_message=q.message,
+        )
+        return
+
+    if data == "sch:confirm:pick":
+        await bot_app._schedule_confirm_selection(q.message, user_id, int(q.message.chat_id), post_action="pick")
+        return
+
+    if data == "sch:confirm":
+        await bot_app._schedule_confirm_selection(q.message, user_id, int(q.message.chat_id))
+        return
+
+    if data.startswith("sch:all:"):
+        track_id = data.split(":", 2)[2]
+        track = await asyncio.to_thread(ctx.store.get_schedule_track, user_id, track_id)
+        if not track:
+            await bot_app._render_nav_ui(
+                user_id,
+                q.message,
+                "That schedule entry was not found.",
+                reply_markup=bot_app._home_only_keyboard(),
+                current_ui_message=q.message,
+            )
+            return
+        probe = dict(track.get("last_probe_json") or {})
+        codes = list(probe.get("actionable_missing_codes") or probe.get("missing_codes") or [])
+        await bot_app._schedule_download_requested(q.message, track, codes)
+        return
+
+    if data.startswith("sch:pickeps:"):
+        track_id = data.split(":", 2)[2]
+        track = await asyncio.to_thread(ctx.store.get_schedule_track, user_id, track_id)
+        if not track:
+            await bot_app._render_nav_ui(
+                user_id,
+                q.message,
+                "That schedule entry was not found.",
+                reply_markup=bot_app._home_only_keyboard(),
+                current_ui_message=q.message,
+            )
+            return
+        probe = dict(track.get("last_probe_json") or {})
+        current_season = int(track.get("season") or 1)
+        current_missing = list(probe.get("actionable_missing_codes") or probe.get("missing_codes") or [])
+        all_missing = bot_app._schedule_picker_all_missing(probe, current_season, current_missing)
+        if not any(all_missing.values()):
+            await bot_app._render_nav_ui(
+                user_id,
+                q.message,
+                "There are no current missing episodes to pick from.",
+                reply_markup=bot_app._home_only_keyboard(),
+                current_ui_message=q.message,
+            )
+            return
+        picker_flow: dict[str, Any] = {
+            "mode": "schedule",
+            "stage": "picker",
+            "picker_selected": [],
+            "picker_season": current_season,
+            "picker_all_missing": all_missing,
+            "picker_has_preview": False,
+            "picker_track_id": track_id,
+            "picker_show": dict(track.get("show_json") or {}),
+        }
+        bot_app._set_flow(user_id, picker_flow)
+        await bot_app._render_schedule_ui(
+            user_id,
+            q.message,
+            picker_flow,
+            bot_app._schedule_picker_text(picker_flow),
+            reply_markup=bot_app._schedule_picker_keyboard(picker_flow),
+            current_ui_message=q.message,
+        )
+        return
+
+    if data.startswith("sch:pktog:"):
+        code = data[len("sch:pktog:") :]
+        flow = bot_app._get_flow(user_id)
+        if not flow or flow.get("stage") != "picker":
+            await q.answer("Session expired \u2014 start over.", show_alert=True)
+            return
+        selected_list: list[str] = list(flow.get("picker_selected") or [])
+        if code in selected_list:
+            selected_list.remove(code)
+        else:
+            selected_list.append(code)
+        flow["picker_selected"] = selected_list
+        bot_app._set_flow(user_id, flow)
+        await bot_app._render_schedule_ui(
+            user_id,
+            q.message,
+            flow,
+            bot_app._schedule_picker_text(flow),
+            reply_markup=bot_app._schedule_picker_keyboard(flow),
+            current_ui_message=q.message,
+        )
+        return
+
+    if data.startswith("sch:pkseason:"):
+        new_season = int(data.split(":", 2)[2])
+        flow = bot_app._get_flow(user_id)
+        if not flow or flow.get("stage") != "picker":
+            await q.answer("Session expired \u2014 start over.", show_alert=True)
+            return
+        flow["picker_season"] = new_season
+        bot_app._set_flow(user_id, flow)
+        await bot_app._render_schedule_ui(
+            user_id,
+            q.message,
+            flow,
+            bot_app._schedule_picker_text(flow),
+            reply_markup=bot_app._schedule_picker_keyboard(flow),
+            current_ui_message=q.message,
+        )
+        return
+
+    if data == "sch:pkconfirm":
+        flow = bot_app._get_flow(user_id)
+        if not flow or flow.get("stage") != "picker":
+            await q.answer("Session expired \u2014 start over.", show_alert=True)
+            return
+        selected_codes = list(flow.get("picker_selected") or [])
+        if not selected_codes:
+            await q.answer("No episodes selected.", show_alert=True)
+            return
+        flow["stage"] = "dl_confirm"
+        flow["dl_confirm_codes"] = selected_codes
+        flow["dl_confirm_post_action"] = "pick"
+        flow["dl_confirm_from"] = "picker"
+        bot_app._set_flow(user_id, flow)
+        await bot_app._render_schedule_ui(
+            user_id,
+            q.message,
+            flow,
+            bot_app._schedule_dl_confirm_text(flow),
+            reply_markup=bot_app._schedule_dl_confirm_keyboard(),
+            current_ui_message=q.message,
+        )
+        return
+
+    if data == "sch:pkback":
+        flow = bot_app._get_flow(user_id)
+        if not flow or flow.get("stage") != "picker":
+            await q.answer("Session expired.", show_alert=True)
+            return
+        if flow.get("picker_has_preview"):
+            probe = dict(flow.get("probe") or {})
+            flow["stage"] = "confirm"
+            bot_app._set_flow(user_id, flow)
+            await bot_app._render_schedule_ui(
+                user_id,
+                q.message,
+                flow,
+                bot_app._schedule_preview_text(probe),
+                reply_markup=bot_app._schedule_preview_keyboard(probe),
+                current_ui_message=q.message,
+            )
+        else:
+            bot_app._clear_flow(user_id)
+            await bot_app._render_nav_ui(
+                user_id,
+                q.message,
+                "<b>\u21a9\ufe0f Cancelled</b>",
+                reply_markup=bot_app._home_only_keyboard(),
+                current_ui_message=q.message,
+            )
+        return
+
+    if data == "sch:dlgo":
+        flow = bot_app._get_flow(user_id)
+        if not flow or flow.get("stage") != "dl_confirm":
+            await q.answer("Session expired \u2014 start over.", show_alert=True)
+            return
+        post_action = str(flow.get("dl_confirm_post_action") or "all")
+        dl_from = str(flow.get("dl_confirm_from") or "confirm")
+        if dl_from == "picker":
+            selected_codes = list(flow.get("dl_confirm_codes") or [])
+            pk_track_id = str(flow.get("picker_track_id") or "")
+            pk_track = await asyncio.to_thread(ctx.store.get_schedule_track, user_id, pk_track_id)
+            if not pk_track:
+                await bot_app._render_schedule_ui(
+                    user_id,
+                    q.message,
+                    flow,
+                    "That schedule entry was not found.",
+                    reply_markup=None,
+                    current_ui_message=q.message,
+                )
+                bot_app._clear_flow(user_id)
+                return
+            bot_app._clear_flow(user_id)
+            n = len(selected_codes)
+            await bot_app._render_schedule_ui(
+                user_id,
+                q.message,
+                flow,
+                f"Queuing {n} episode{'s' if n != 1 else ''}\u2026",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            await bot_app._schedule_download_requested(q.message, pk_track, selected_codes)
+        else:
+            flow["stage"] = "confirm"
+            bot_app._set_flow(user_id, flow)
+            await bot_app._schedule_confirm_selection(
+                q.message, user_id, int(q.message.chat_id), post_action=post_action
+            )
+        return
+
+    if data == "sch:dlback":
+        flow = bot_app._get_flow(user_id)
+        if not flow or flow.get("stage") != "dl_confirm":
+            await q.answer("Session expired.", show_alert=True)
+            return
+        dl_from = str(flow.get("dl_confirm_from") or "confirm")
+        if dl_from == "picker":
+            flow["stage"] = "picker"
+            bot_app._set_flow(user_id, flow)
+            await bot_app._render_schedule_ui(
+                user_id,
+                q.message,
+                flow,
+                bot_app._schedule_picker_text(flow),
+                reply_markup=bot_app._schedule_picker_keyboard(flow),
+                current_ui_message=q.message,
+            )
+        else:
+            probe = dict(flow.get("probe") or {})
+            flow["stage"] = "confirm"
+            bot_app._set_flow(user_id, flow)
+            await bot_app._render_schedule_ui(
+                user_id,
+                q.message,
+                flow,
+                bot_app._schedule_preview_text(probe),
+                reply_markup=bot_app._schedule_preview_keyboard(probe),
+                current_ui_message=q.message,
+            )
+        return
+
+    if data.startswith("sch:ep:"):
+        _, _, track_id, episode_raw = data.split(":", 3)
+        track = await asyncio.to_thread(ctx.store.get_schedule_track, user_id, track_id)
+        if not track:
+            await bot_app._render_nav_ui(
+                user_id,
+                q.message,
+                "That schedule entry was not found.",
+                reply_markup=bot_app._home_only_keyboard(),
+                current_ui_message=q.message,
+            )
+            return
+        code = episode_code(int(track.get("season") or 1), int(episode_raw))
+        await bot_app._schedule_download_requested(q.message, track, [code])
+        return
+
+    if data.startswith("sch:skip:"):
+        track_id = data.split(":", 2)[2]
+        track = await asyncio.to_thread(ctx.store.get_schedule_track, user_id, track_id)
+        if not track:
+            await bot_app._render_nav_ui(
+                user_id,
+                q.message,
+                "That schedule entry was not found.",
+                reply_markup=bot_app._home_only_keyboard(),
+                current_ui_message=q.message,
+            )
+            return
+        probe = dict(track.get("last_probe_json") or {})
+        signature = str(probe.get("signature") or "") or None
+        await asyncio.to_thread(
+            ctx.store.update_schedule_track,
+            track_id,
+            skipped_signature=signature,
+            last_missing_signature=signature,
+        )
+        await bot_app._render_nav_ui(
+            user_id,
+            q.message,
+            "\U0001f44d Got it \u2014 I'll skip this notification.\n"
+            "<i>I'll alert you again if new episodes air or the missing count changes.</i>",
+            reply_markup=bot_app._home_only_keyboard(),
+            current_ui_message=q.message,
+        )
+        return
+
+    if data == "sch:addnew":
+        bot_app._schedule_start_flow(user_id)
+        text = (
+            "<b>\u270f\ufe0f Type a show name to search</b>\n"
+            "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\n"
+            "Monitors your Plex library and auto-queues missing episodes as they air.\n\n"
+            "<i>Example: Severance</i>"
+        )
+        kb = InlineKeyboardMarkup(bot_app._nav_footer(back_data="menu:schedule", include_home=False))
+        await bot_app._render_nav_ui(user_id, q.message, text, reply_markup=kb, current_ui_message=q.message)
+        return
+
+    if data == "sch:myshows":
+        tracks = await asyncio.to_thread(ctx.store.list_schedule_tracks, user_id, False, 50)
+        if not tracks:
+            await bot_app._render_nav_ui(
+                user_id,
+                q.message,
+                "<b>\U0001f4cb My Shows</b>\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\nNo shows tracked yet.\nTap <b>Add New Show</b> to get started.",
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [InlineKeyboardButton("\u2795 Add New Show", callback_data="sch:addnew")],
+                    ]
+                    + bot_app._nav_footer(back_data="menu:schedule", include_home=False)
+                ),
+                current_ui_message=q.message,
+            )
+            return
+        lines = [
+            "<b>\U0001f4cb My Shows</b>",
+            "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501",
+            "<i>\u23f8 Pause or \u25b6\ufe0f Resume tracking. \U0001f6ab Stop to remove a show.</i>",
+        ]
+        rows: list[list[InlineKeyboardButton]] = []
+        for track in tracks:
+            show = dict(track.get("show_json") or {})
+            name = str(show.get("name") or track.get("show_name") or "Unknown")
+            season = int(track.get("season") or 1)
+            tid = track["track_id"]
+            enabled = track.get("enabled")
+            lines.append("")
+            if enabled:
+                lines.append(bot_app._schedule_active_line(track))
+            else:
+                lines.append(bot_app._schedule_paused_line(name, season))
+            if enabled:
+                rows.append(
+                    [
+                        InlineKeyboardButton(f"\u23f8 {name}", callback_data=f"sch:pause:{tid}"),
+                        InlineKeyboardButton("\U0001f6ab Stop Tracking", callback_data=f"sch:dconf:{tid}"),
+                    ]
+                )
+            else:
+                rows.append(
+                    [
+                        InlineKeyboardButton(f"\u25b6\ufe0f {name}", callback_data=f"sch:pause:{tid}"),
+                        InlineKeyboardButton("\U0001f6ab Stop Tracking", callback_data=f"sch:dconf:{tid}"),
+                    ]
+                )
+        rows.append([InlineKeyboardButton("\u2795 Add New Show", callback_data="sch:addnew")])
+        rows += bot_app._nav_footer(back_data="menu:schedule", include_home=False)
+        await bot_app._render_nav_ui(
+            user_id,
+            q.message,
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(rows),
+            current_ui_message=q.message,
+        )
+        return
+
+    if data.startswith("sch:pause:"):
+        tid = data.split(":", 2)[2]
+        track = await asyncio.to_thread(ctx.store.get_schedule_track, user_id, tid)
+        if not track:
+            await bot_app._render_nav_ui(
+                user_id,
+                q.message,
+                "Track not found.",
+                reply_markup=bot_app._home_only_keyboard(),
+                current_ui_message=q.message,
+            )
+            return
+        new_enabled = not track.get("enabled")
+        await asyncio.to_thread(ctx.store.update_schedule_track, tid, enabled=new_enabled)
+        show = dict(track.get("show_json") or {})
+        name = str(show.get("name") or track.get("show_name") or "Unknown")
+        action = "resumed" if new_enabled else "paused"
+        await q.answer(f"{name} {action}")
+        # Re-render My Shows list
+        tracks = await asyncio.to_thread(ctx.store.list_schedule_tracks, user_id, False, 50)
+        lines = [
+            "<b>\U0001f4cb My Shows</b>",
+            "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501",
+            "<i>\u23f8 Pause or \u25b6\ufe0f Resume tracking. \U0001f6ab Stop to remove a show.</i>",
+        ]
+        rows_list: list[list[InlineKeyboardButton]] = []
+        for t in tracks:
+            s = dict(t.get("show_json") or {})
+            n = str(s.get("name") or t.get("show_name") or "Unknown")
+            sn = int(t.get("season") or 1)
+            t_id = t["track_id"]
+            lines.append("")
+            if t.get("enabled"):
+                lines.append(bot_app._schedule_active_line(t))
+                rows_list.append(
+                    [
+                        InlineKeyboardButton(f"\u23f8 {n}", callback_data=f"sch:pause:{t_id}"),
+                        InlineKeyboardButton("\U0001f6ab Stop Tracking", callback_data=f"sch:dconf:{t_id}"),
+                    ]
+                )
+            else:
+                lines.append(bot_app._schedule_paused_line(n, sn))
+                rows_list.append(
+                    [
+                        InlineKeyboardButton(f"\u25b6\ufe0f {n}", callback_data=f"sch:pause:{t_id}"),
+                        InlineKeyboardButton("\U0001f6ab Stop Tracking", callback_data=f"sch:dconf:{t_id}"),
+                    ]
+                )
+        rows_list.append([InlineKeyboardButton("\u2795 Add New Show", callback_data="sch:addnew")])
+        rows_list += bot_app._nav_footer(back_data="menu:schedule", include_home=False)
+        await bot_app._render_nav_ui(
+            user_id,
+            q.message,
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(rows_list),
+            current_ui_message=q.message,
+        )
+        return
+
+    if data.startswith("sch:dconf:"):
+        tid = data.split(":", 2)[2]
+        track = await asyncio.to_thread(ctx.store.get_schedule_track, user_id, tid)
+        if not track:
+            await bot_app._render_nav_ui(
+                user_id,
+                q.message,
+                "Track not found.",
+                reply_markup=bot_app._home_only_keyboard(),
+                current_ui_message=q.message,
+            )
+            return
+        show = dict(track.get("show_json") or {})
+        name = str(show.get("name") or track.get("show_name") or "Unknown")
+        season = int(track.get("season") or 1)
+        text = (
+            f"<b>\U0001f5d1 Delete Tracking?</b>\n"
+            f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\n"
+            f"Stop tracking <b>{_h(name)}</b> S{season:02d}?\n\n"
+            f"<i>This removes the schedule entry. It won't delete any downloaded files.</i>"
+        )
+        kb = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("Yes, delete", callback_data=f"sch:del:{tid}"),
+                    InlineKeyboardButton("Cancel", callback_data="sch:myshows"),
+                ],
+            ]
+        )
+        await bot_app._render_nav_ui(user_id, q.message, text, reply_markup=kb, current_ui_message=q.message)
+        return
+
+    if data.startswith("sch:del:"):
+        tid = data.split(":", 2)[2]
+        track = await asyncio.to_thread(ctx.store.get_schedule_track, user_id, tid)
+        show_name = "Unknown"
+        if track:
+            show = dict(track.get("show_json") or {})
+            show_name = str(show.get("name") or track.get("show_name") or "Unknown")
+        deleted = await asyncio.to_thread(ctx.store.delete_schedule_track, tid, user_id)
+        if deleted:
+            await q.answer(f"{show_name} removed")
+        # Re-render My Shows list (reuse sch:myshows logic)
+        tracks = await asyncio.to_thread(ctx.store.list_schedule_tracks, user_id, False, 50)
+        if not tracks:
+            await bot_app._render_nav_ui(
+                user_id,
+                q.message,
+                "<b>\U0001f4cb My Shows</b>\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\nNo shows tracked yet.\nTap <b>Add New Show</b> to get started.",
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [InlineKeyboardButton("\u2795 Add New Show", callback_data="sch:addnew")],
+                    ]
+                    + bot_app._nav_footer(back_data="menu:schedule", include_home=False)
+                ),
+                current_ui_message=q.message,
+            )
+            return
+        lines = [
+            "<b>\U0001f4cb My Shows</b>",
+            "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501",
+            "<i>\u23f8 Pause or \u25b6\ufe0f Resume tracking. \U0001f6ab Stop to remove a show.</i>",
+        ]
+        rows_del: list[list[InlineKeyboardButton]] = []
+        for t in tracks:
+            s = dict(t.get("show_json") or {})
+            n = str(s.get("name") or t.get("show_name") or "Unknown")
+            sn = int(t.get("season") or 1)
+            t_id = t["track_id"]
+            lines.append("")
+            if t.get("enabled"):
+                lines.append(bot_app._schedule_active_line(t))
+                rows_del.append(
+                    [
+                        InlineKeyboardButton(f"\u23f8 {n}", callback_data=f"sch:pause:{t_id}"),
+                        InlineKeyboardButton("\U0001f6ab Stop Tracking", callback_data=f"sch:dconf:{t_id}"),
+                    ]
+                )
+            else:
+                lines.append(bot_app._schedule_paused_line(n, sn))
+                rows_del.append(
+                    [
+                        InlineKeyboardButton(f"\u25b6\ufe0f {n}", callback_data=f"sch:pause:{t_id}"),
+                        InlineKeyboardButton("\U0001f6ab Stop Tracking", callback_data=f"sch:dconf:{t_id}"),
+                    ]
+                )
+        rows_del.append([InlineKeyboardButton("\u2795 Add New Show", callback_data="sch:addnew")])
+        rows_del += bot_app._nav_footer(back_data="menu:schedule", include_home=False)
+        await bot_app._render_nav_ui(
+            user_id,
+            q.message,
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(rows_del),
+            current_ui_message=q.message,
+        )
+        return
+
+    # Command center actions

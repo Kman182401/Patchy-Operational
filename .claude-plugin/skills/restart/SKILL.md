@@ -7,6 +7,13 @@ description: Restart the Patchy Bot systemd service and verify it started succes
 
 Restart the Telegram bot and confirm it came up healthy. Run these steps in order:
 
+## Agent Delegation
+
+This skill delegates to the following agents during execution. Always use these agents — do not implement inline what an agent can handle.
+
+- **Primary:** Delegate service restart and health verification to the `config-infra-agent` (sequential with error diagnosis).
+- **On failure:** If the service fails to start, delegate failure log analysis to the `error-detective` agent with the journalctl output from Step 3.
+
 ## Step 1 — Restart the service
 
 ```bash

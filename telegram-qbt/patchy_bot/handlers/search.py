@@ -65,6 +65,7 @@ def apply_filters(
     min_size: int | None,
     max_size: int | None,
     min_quality: int,
+    media_type: str = "movie",
 ) -> list[dict[str, Any]]:
     """Filter search result rows by seeds, size, quality, and source availability."""
     out: list[dict[str, Any]] = []
@@ -78,6 +79,7 @@ def apply_filters(
             continue
         if max_size is not None and size > max_size:
             continue
+        # quality_tier() is a resolution floor (2160/1080/720/480), NOT a quality score
         if min_quality > 0 and quality_tier(name) < min_quality:
             continue
 
@@ -94,7 +96,7 @@ def apply_filters(
                 continue
 
         # Score the result — reject garbage (CAM, TS, AV1, upscaled, zero-seed, LQ groups)
-        ts = score_torrent(name, size, seeds, media_type="movie")
+        ts = score_torrent(name, size, seeds, media_type=media_type)
         if ts.is_rejected:
             continue
         # Attach score to the row for sorting

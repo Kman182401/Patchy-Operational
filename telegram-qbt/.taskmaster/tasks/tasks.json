@@ -388,7 +388,7 @@
         "id": "12",
         "title": "Test backfill for extracted modules",
         "description": "Add targeted tests for the largest coverage gaps exposed during extraction. Minimum new tests: (1) handlers/search.py — _apply_filters with quality/size/seed filters, _sort_rows with various keys; (2) handlers/download.py — _progress_bar at 0/50/100%, _format_eta edge cases, _is_complete_torrent for various states; (3) handlers/commands.py — _health_report returns valid HTML, _speed_report formats correctly; (4) handlers/chat.py — _chat_needs_qbt_snapshot returns correct boolean. Target: +30 new tests minimum.",
-        "status": "in-progress",
+        "status": "done",
         "dependencies": [
           "4",
           "5",
@@ -401,7 +401,7 @@
         "details": "Current test coverage has major gaps: download tracking (0 tests), search execution (0 tests), LLM chat (0 tests), command handlers (0 tests), QBClient (0 tests), TVMetadataClient (0 tests). This task focuses on the extracted handler modules. Each handler module should have at least 3-5 focused unit tests. Tests should use the existing DummyBot/DummyStore mock patterns from the current test files. New tests go in tests/test_handlers.py or domain-specific files like tests/test_search.py, tests/test_download.py.",
         "testStrategy": "Run full test suite. Coverage for each new handler module should have at least 3 focused unit tests. No existing tests should regress. Total test count should be 192+.",
         "subtasks": [],
-        "updatedAt": "2026-04-05T06:03:04.638Z"
+        "updatedAt": "2026-04-05T06:13:45.998Z"
       },
       {
         "id": "13",
@@ -426,9 +426,9 @@
     ],
     "metadata": {
       "version": "1.0.0",
-      "lastModified": "2026-04-05T06:06:02.070Z",
+      "lastModified": "2026-04-05T06:13:45.998Z",
       "taskCount": 13,
-      "completedCount": 12,
+      "completedCount": 13,
       "tags": [
         "master"
       ]

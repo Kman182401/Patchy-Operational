@@ -7,6 +7,12 @@ description: Validate the Patchy Bot .env configuration for completeness and con
 
 Check that the bot's `.env` file has all required variables set and that related groups of variables are consistently configured. Never display actual secret values.
 
+## Agent Delegation
+
+This skill delegates to the following agents during execution. Always use these agents — do not implement inline what an agent can handle.
+
+- **Primary:** Delegate environment validation, config schema reading, and consistency checks to the `config-infra-agent`.
+
 ## Step 1 — Read the config schema
 
 Read the Pydantic config model to understand all expected variables:

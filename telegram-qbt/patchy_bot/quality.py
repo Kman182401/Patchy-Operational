@@ -18,6 +18,8 @@ from __future__ import annotations
 import dataclasses
 import re
 
+# RTN <2.0 uses Pydantic v1-style models internally.  Pinned in pyproject.toml.
+# If Pydantic v3 drops backward compat, RTN will need an update before upgrading.
 from RTN import parse
 from RTN.models import ParsedData
 
@@ -153,6 +155,8 @@ def score_torrent(
     size: int,
     seeds: int,
     media_type: str = "movie",
+    *,
+    scoring_overrides: dict[str, object] | None = None,
 ) -> TorrentScore:
     """Score a torrent for quality ranking.
 
@@ -165,10 +169,25 @@ def score_torrent(
         size: File size in bytes (0 = unknown, skips size check).
         seeds: Current seeder count.
         media_type: ``"movie"`` or ``"episode"`` — affects size sanity ranges.
+        scoring_overrides: Optional dict to adjust scoring behaviour:
+            - ``hevc_1080p_penalty`` (int, default -50): penalty for x265 at <=1080p.
+            - ``av1_reject`` (bool, default True): hard-reject AV1 codec.
+            - ``season_pack_max_episodes`` (int, default 24): multiplier for pack max size.
+            - ``hq_groups_extra`` (set[str]): additional HQ group names.
+            - ``lq_groups_extra`` (set[str]): additional LQ group names.
 
     Returns:
         TorrentScore with resolution_tier, format_score, is_rejected, and parsed data.
     """
+    ov = scoring_overrides or {}
+    hevc_penalty: int = int(ov.get("hevc_1080p_penalty", -50))
+    av1_reject: bool = bool(ov.get("av1_reject", True))
+    pack_max_eps: int = int(ov.get("season_pack_max_episodes", 24))
+    hq_extra: set[str] = set(ov.get("hq_groups_extra", set()))  # type: ignore[arg-type]
+    lq_extra: set[str] = set(ov.get("lq_groups_extra", set()))  # type: ignore[arg-type]
+    effective_hq = HQ_GROUPS | hq_extra
+    effective_lq = LQ_GROUPS | lq_extra
+
     parsed = parse_quality(name)
     tier = _RESOLUTION_TIERS.get(parsed.resolution, 0)
     is_4k = tier == 4
@@ -180,7 +199,7 @@ def score_torrent(
         return TorrentScore(tier, -9999, True, "garbage source (CAM/TS/SCR)", parsed)
     if parsed.upscaled:
         return TorrentScore(tier, -9999, True, "upscaled content", parsed)
-    if (parsed.codec or "").lower() == "av1":
+    if (parsed.codec or "").lower() == "av1" and av1_reject:
         return TorrentScore(tier, -9999, True, "AV1 codec — poor compatibility", parsed)
     if seeds == 0:
         return TorrentScore(tier, -9999, True, "zero seeders", parsed)
@@ -218,7 +237,7 @@ def score_torrent(
         if codec == "avc":
             score += 70
         elif codec == "hevc":
-            score -= 50  # x265 at 1080p causes transcoding on many clients
+            score += hevc_penalty  # x265 at 1080p causes transcoding on many clients
     # xvid always penalised regardless of resolution (RTN maps divx → xvid too)
     if codec == "xvid":
         score -= 200
@@ -302,13 +321,27 @@ def score_torrent(
             score -= 10
 
     group_lower = (parsed.group or "").lower()
-    if group_lower in HQ_GROUPS:
+    if group_lower in effective_hq:
         score += 30
-    elif group_lower in LQ_GROUPS:
+    elif group_lower in effective_lq:
         score -= 500
 
     if parsed.network:
         score += 5  # known streaming platform implies official WEB source
+
+    # ------------------------------------------------------------------
+    # Hardcoded subtitle penalty
+    # ------------------------------------------------------------------
+    low_name = name.lower()
+    has_hardcoded = getattr(parsed, "hardcoded", False)
+    if has_hardcoded or re.search(r"\b(korsub|hc|hardsub|hcsub)\b", low_name):
+        score -= 200
+
+    # ------------------------------------------------------------------
+    # Dual/multi audio bonus
+    # ------------------------------------------------------------------
+    if re.search(r"\b(dual|multi)\b", low_name):
+        score += 10
 
     # ------------------------------------------------------------------
     # File size sanity check
@@ -335,7 +368,7 @@ def score_torrent(
         if size_range:
             min_s, max_s = size_range
             if is_season_pack(name, parsed):
-                max_s *= 24  # season packs can be much larger
+                max_s *= pack_max_eps  # season packs can be much larger
                 min_s = 0  # skip minimum for packs
             if size < min_s:
                 score -= 100
@@ -343,6 +376,23 @@ def score_torrent(
                 score -= 20
 
     return TorrentScore(tier, score, False, None, parsed)
+
+
+# ---------------------------------------------------------------------------
+# Deferred design decisions (documented, not implemented)
+#
+# 1. Quality-based deduplication: Users benefit from seeing all quality tiers;
+#    content identity matching (same movie, different encode) is complex and
+#    error-prone.  Deferred.
+#
+# 2. Cross-resolution comparison: Resolution-first ordering is predictable.
+#    Subjective trade-offs (720p remux vs 1080p WEB-DL) are user-specific.
+#    Deferred.
+#
+# 3. Re-scoring old DB results: Old searches expire naturally (24h TTL).
+#    Re-scoring on scoring algorithm changes is not worth the complexity.
+#    Deferred.
+# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------

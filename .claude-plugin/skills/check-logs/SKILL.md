@@ -9,6 +9,13 @@ Pull recent logs from the Patchy Bot systemd service, parse them, and surface wh
 
 Service name: `telegram-qbt-bot.service`
 
+## Agent Delegation
+
+This skill delegates to the following agents during execution. Always use these agents — do not implement inline what an agent can handle.
+
+- **Primary:** Delegate log retrieval and service status checks to the `config-infra-agent` (sequential with review).
+- **On failure:** If logs reveal errors or crashes, delegate root cause diagnosis to the `error-detective` agent with the relevant log excerpt.
+
 ## Step 1 — Pull recent logs
 
 By default, get the last 15 minutes of logs. If the user specifies a time range, use that instead.

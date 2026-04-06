@@ -7,7 +7,7 @@ name = "patchy-bot"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
-    "rank-torrent-name>=1.11.0",
+    "rank-torrent-name>=1.11.0,<2.0",  # pin <2.0: RTN uses Pydantic v1 internals
 ]
 
 [tool.ruff]
@@ -38,3 +38,4 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 addopts = "-q --tb=short"
+asyncio_mode = "auto"

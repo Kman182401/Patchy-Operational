@@ -2,8 +2,10 @@
 name: schedule-agent
 description: "MUST be used for any work involving TV show episode tracking, the schedule system, TVMaze/TMDB metadata, auto-download logic, the schedule background runner, episode ranking, or the schedule_tracks/schedule_show_cache/schedule_runner_status database tables. Use proactively when the task mentions scheduling, episodes, tracking, seasons, air dates, or show metadata."
 tools: Read, Write, Edit, Bash, Grep, Glob
-model: opus
+model: sonnet
+maxTurns: 15
 memory: project
+effort: medium
 color: pink
 ---
 

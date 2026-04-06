@@ -7,6 +7,13 @@ description: Check that Movie and TV search features have matching functionality
 
 Compare the Movie and TV code paths across the bot and flag any feature that exists in one but not the other. This is a critical check — the project rule is that any change to Movie Search must also be applied to TV Search and vice versa.
 
+## Agent Delegation
+
+This skill delegates to the following agents during execution. Always use these agents — do not implement inline what an agent can handle.
+
+- **Primary:** Delegate search pipeline parity analysis (filters, sorting, result formatting) to the `search-download-agent` (parallel with UI review).
+- **Secondary:** Delegate UI parity analysis (keyboards, buttons, callbacks, navigation) to the `ui-agent` in parallel with the search analysis.
+
 ## What to compare
 
 Read these files and trace both the movie and TV paths through each:

@@ -9,6 +9,12 @@ Query the bot's SQLite database and present a clean, human-readable summary of a
 
 Database path: `/home/karson/Patchy_Bot/telegram-qbt/state.sqlite3`
 
+## Agent Delegation
+
+This skill delegates to the following agents during execution. Always use these agents — do not implement inline what an agent can handle.
+
+- **Primary:** Delegate all database queries, anomaly detection, and schema inspection to the `database-agent`.
+
 ## Step 1 — Get table overview
 
 ```bash

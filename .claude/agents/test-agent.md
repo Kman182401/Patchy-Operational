@@ -2,8 +2,10 @@
 name: test-agent
 description: "MUST be used for writing tests, running the test suite, debugging test failures, improving test coverage, or working with test infrastructure. Use proactively when the task mentions tests, testing, coverage, assertions, mocking, or pytest."
 tools: Read, Write, Edit, Bash, Grep, Glob
-model: opus
+model: sonnet
+maxTurns: 10
 memory: project
+effort: medium
 color: green
 ---
 
