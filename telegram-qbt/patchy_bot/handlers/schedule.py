@@ -618,8 +618,8 @@ def schedule_apply_tracking_mode(
                 cursor_ep = ep_num
                 break
 
-    target_code: str | None = None
-    target_air_ts: int | None = None
+    first_target_code: str | None = None
+    first_target_air_ts: int | None = None
     target_actionable: list[str] = []
     tracked_missing: list[str] = []
     for code in episode_order:
@@ -630,22 +630,30 @@ def schedule_apply_tracking_mode(
             continue
         if code in present_codes:
             continue
-        target_code = code
-        target_air_ts = episode_air.get(code)
+        air_ts = episode_air.get(code)
+        # Stop collecting when we hit an unreleased episode
+        if air_ts is not None and air_ts > now_value:
+            if first_target_code is None:
+                first_target_code = code
+                first_target_air_ts = air_ts
+            break
+        # This episode is released (or air_ts unknown)
+        if first_target_code is None:
+            first_target_code = code
+            first_target_air_ts = air_ts
         if code not in pending_codes:
             tracked_missing.append(code)
-            if target_air_ts is None or target_air_ts <= grace_cutoff:
-                target_actionable = [code]
-        break
+            if air_ts is None or air_ts <= grace_cutoff:
+                target_actionable.append(code)
 
-    if target_code:
-        auto_state["next_code"] = target_code
-        probe["tracking_code"] = target_code
+    if first_target_code:
+        auto_state["next_code"] = first_target_code
+        probe["tracking_code"] = first_target_code
         probe["tracked_missing_codes"] = tracked_missing
         probe["actionable_missing_codes"] = target_actionable
         probe["signature"] = "|".join(sorted(set(target_actionable)))
-        if target_air_ts:
-            probe["next_air_ts"] = target_air_ts
+        if first_target_air_ts:
+            probe["next_air_ts"] = first_target_air_ts
     else:
         auto_state["next_code"] = None
         probe["tracking_code"] = None
@@ -653,9 +661,9 @@ def schedule_apply_tracking_mode(
         probe["actionable_missing_codes"] = []
         probe["signature"] = ""
 
-    if target_code in pending_codes:
-        auto_state["next_code"] = target_code
-        probe["tracking_code"] = target_code
+    if first_target_code in pending_codes:
+        auto_state["next_code"] = first_target_code
+        probe["tracking_code"] = first_target_code
 
     probe["_auto_state"] = auto_state
     return probe
@@ -1026,7 +1034,7 @@ def schedule_reconcile_pending(
     return cleared, stale, qbt_codes
 
 
-def schedule_should_attempt_auto(track: dict[str, Any], probe: dict[str, Any]) -> tuple[bool, str | None]:
+def schedule_should_attempt_auto(track: dict[str, Any], probe: dict[str, Any]) -> tuple[bool, list[str] | str | None]:
     auto_state = schedule_episode_auto_state(track)
     if not auto_state.get("enabled"):
         return False, "auto disabled"
@@ -1041,7 +1049,7 @@ def schedule_should_attempt_auto(track: dict[str, Any], probe: dict[str, Any]) -
     next_retry = auto_state.get("next_auto_retry_at")
     if next_retry and int(next_retry) > now_value:
         return False, f"retry cooldown until <code>{format_local_ts(int(next_retry))}</code>"
-    return True, candidates[0]
+    return True, candidates
 
 
 def schedule_missing_text(track: dict[str, Any], probe: dict[str, Any]) -> str:
@@ -1312,21 +1320,23 @@ async def schedule_refresh_track(
         LOG.info("Schedule recovered %d stale pending episodes: %s", len(stale), ", ".join(sorted(stale)))
 
     _should_auto_fn = should_attempt_auto_fn or schedule_should_attempt_auto
-    should_auto, target_code = _should_auto_fn(track, probe)
-    auto_acquired: str | None = None
-    if should_auto and target_code and attempt_auto_acquire_fn:
-        result = await attempt_auto_acquire_fn(track, target_code)
-        if result:
-            auto_acquired = target_code
-            pending.add(target_code)
-            retry_codes = dict(auto_state.get("retry_codes") or {})
-            retry_codes[target_code] = now_ts()
-            auto_state["retry_codes"] = retry_codes
-            auto_state["last_auto_code"] = target_code
-            auto_state["last_auto_at"] = now_ts()
-            auto_state["next_auto_retry_at"] = now_ts() + schedule_retry_interval_s()
-            if allow_notify and notify_auto_queued_fn:
-                await notify_auto_queued_fn(track, target_code, result)
+    should_auto, target_codes_or_reason = _should_auto_fn(track, probe)
+    auto_acquired_codes: list[str] = []
+    if should_auto and isinstance(target_codes_or_reason, list) and target_codes_or_reason and attempt_auto_acquire_fn:
+        for target_code in target_codes_or_reason:
+            result = await attempt_auto_acquire_fn(track, target_code)
+            if result:
+                auto_acquired_codes.append(target_code)
+                pending.add(target_code)
+                retry_codes = dict(auto_state.get("retry_codes") or {})
+                retry_codes[target_code] = now_ts()
+                auto_state["retry_codes"] = retry_codes
+                auto_state["last_auto_code"] = target_code
+                auto_state["last_auto_at"] = now_ts()
+                if allow_notify and notify_auto_queued_fn:
+                    await notify_auto_queued_fn(track, target_code, result)
+        if auto_acquired_codes:
+            auto_state["next_auto_retry_at"] = None
         else:
             auto_state["next_auto_retry_at"] = now_ts() + schedule_retry_interval_s()
     elif not probe.get("actionable_missing_codes"):
@@ -1360,7 +1370,7 @@ async def schedule_refresh_track(
         raise RuntimeError(f"Schedule track {track_id} disappeared after refresh update")
     if (
         allow_notify
-        and not auto_acquired
+        and not auto_acquired_codes
         and probe.get("signature")
         and probe.get("signature") != updated.get("skipped_signature")
         and probe.get("signature") != updated.get("last_missing_signature")

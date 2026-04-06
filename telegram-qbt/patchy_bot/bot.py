@@ -155,6 +155,7 @@ class BotApp:
         d.register_prefix("sch:", self._on_cb_schedule)
         d.register_prefix("menu:", self._on_cb_menu)
         d.register_prefix("flow:", self._on_cb_flow)
+        d.register_exact("dl:manage", self._on_cb_dl_manage)
         d.register_prefix("stop:", self._on_cb_stop)
 
     # ---------- Telegram command discovery ----------
@@ -861,14 +862,14 @@ class BotApp:
         return kb_mod.compact_action_rows(rows, max_buttons=max_buttons, columns=columns)
 
     def _active_download_tuples(self) -> list[tuple[str, str]]:
-        """Return ``(hash, clean_name)`` for each active download (up to 5)."""
+        """Return ``(hash, clean_name)`` for each active download (up to 10)."""
         try:
             items = self.qbt.list_torrents(filter_name="all", limit=20)
         except Exception:
             return []
         active = [t for t in items if str(t.get("state") or "") in _ACTIVE_DL_STATES]
         result: list[tuple[str, str]] = []
-        for t in active[:5]:
+        for t in active[:10]:
             h = str(t.get("hash") or "")
             raw_name = str(t.get("name") or "Unknown")
             category = str(t.get("category") or "")
@@ -1592,8 +1593,8 @@ class BotApp:
                     cursor_ep = ep_num
                     break
 
-        target_code: str | None = None
-        target_air_ts: int | None = None
+        first_target_code: str | None = None
+        first_target_air_ts: int | None = None
         target_actionable: list[str] = []
         tracked_missing: list[str] = []
         for code in episode_order:
@@ -1604,22 +1605,30 @@ class BotApp:
                 continue
             if code in present_codes:
                 continue
-            target_code = code
-            target_air_ts = episode_air.get(code)
+            air_ts = episode_air.get(code)
+            # Stop collecting when we hit an unreleased episode
+            if air_ts is not None and air_ts > now_value:
+                if first_target_code is None:
+                    first_target_code = code
+                    first_target_air_ts = air_ts
+                break
+            # This episode is released (or air_ts unknown)
+            if first_target_code is None:
+                first_target_code = code
+                first_target_air_ts = air_ts
             if code not in pending_codes:
                 tracked_missing.append(code)
-                if target_air_ts is None or target_air_ts <= grace_cutoff:
-                    target_actionable = [code]
-            break
+                if air_ts is None or air_ts <= grace_cutoff:
+                    target_actionable.append(code)
 
-        if target_code:
-            auto_state["next_code"] = target_code
-            probe["tracking_code"] = target_code
+        if first_target_code:
+            auto_state["next_code"] = first_target_code
+            probe["tracking_code"] = first_target_code
             probe["tracked_missing_codes"] = tracked_missing
             probe["actionable_missing_codes"] = target_actionable
             probe["signature"] = "|".join(sorted(set(target_actionable)))
-            if target_air_ts:
-                probe["next_air_ts"] = target_air_ts
+            if first_target_air_ts:
+                probe["next_air_ts"] = first_target_air_ts
         else:
             auto_state["next_code"] = None
             probe["tracking_code"] = None
@@ -1627,10 +1636,10 @@ class BotApp:
             probe["actionable_missing_codes"] = []
             probe["signature"] = ""
 
-        if target_code in pending_codes:
+        if first_target_code in pending_codes:
             # Keep pending target in pending bucket so we do not auto-fire duplicates.
-            auto_state["next_code"] = target_code
-            probe["tracking_code"] = target_code
+            auto_state["next_code"] = first_target_code
+            probe["tracking_code"] = first_target_code
 
         probe["_auto_state"] = auto_state
         return probe
@@ -1972,7 +1981,9 @@ class BotApp:
                 stale.add(code)
         return cleared, stale, qbt_codes
 
-    def _schedule_should_attempt_auto(self, track: dict[str, Any], probe: dict[str, Any]) -> tuple[bool, str | None]:
+    def _schedule_should_attempt_auto(
+        self, track: dict[str, Any], probe: dict[str, Any]
+    ) -> tuple[bool, list[str] | str | None]:
         auto_state = self._schedule_episode_auto_state(track)
         if not auto_state.get("enabled"):
             return False, "auto disabled"
@@ -1987,7 +1998,7 @@ class BotApp:
         next_retry = auto_state.get("next_auto_retry_at")
         if next_retry and int(next_retry) > now_value:
             return False, f"retry cooldown until <code>{format_local_ts(int(next_retry))}</code>"
-        return True, candidates[0]
+        return True, candidates
 
     async def _schedule_attempt_auto_acquire(self, track: dict[str, Any], code: str) -> dict[str, Any] | None:
         try:
@@ -2174,21 +2185,23 @@ class BotApp:
                 retry_codes.pop(code, None)
             auto_state["retry_codes"] = retry_codes
             LOG.info("Schedule recovered %d stale pending episodes: %s", len(stale), ", ".join(sorted(stale)))
-        should_auto, target_code = self._schedule_should_attempt_auto(track, probe)
-        auto_acquired: str | None = None
-        if should_auto and target_code:
-            result = await self._schedule_attempt_auto_acquire(track, target_code)
-            if result:
-                auto_acquired = target_code
-                pending.add(target_code)
-                retry_codes = dict(auto_state.get("retry_codes") or {})
-                retry_codes[target_code] = now_ts()
-                auto_state["retry_codes"] = retry_codes
-                auto_state["last_auto_code"] = target_code
-                auto_state["last_auto_at"] = now_ts()
-                auto_state["next_auto_retry_at"] = now_ts() + self._schedule_retry_interval_s()
-                if allow_notify:
-                    await self._schedule_notify_auto_queued(track, target_code, result)
+        should_auto, target_codes_or_reason = self._schedule_should_attempt_auto(track, probe)
+        auto_acquired_codes: list[str] = []
+        if should_auto and isinstance(target_codes_or_reason, list) and target_codes_or_reason:
+            for target_code in target_codes_or_reason:
+                result = await self._schedule_attempt_auto_acquire(track, target_code)
+                if result:
+                    auto_acquired_codes.append(target_code)
+                    pending.add(target_code)
+                    retry_codes = dict(auto_state.get("retry_codes") or {})
+                    retry_codes[target_code] = now_ts()
+                    auto_state["retry_codes"] = retry_codes
+                    auto_state["last_auto_code"] = target_code
+                    auto_state["last_auto_at"] = now_ts()
+                    if allow_notify:
+                        await self._schedule_notify_auto_queued(track, target_code, result)
+            if auto_acquired_codes:
+                auto_state["next_auto_retry_at"] = None
             else:
                 auto_state["next_auto_retry_at"] = now_ts() + self._schedule_retry_interval_s()
         elif not probe.get("actionable_missing_codes"):
@@ -2221,7 +2234,7 @@ class BotApp:
             raise RuntimeError(f"Schedule track {track_id} disappeared after refresh update")
         if (
             allow_notify
-            and not auto_acquired
+            and not auto_acquired_codes
             and probe.get("signature")
             and probe.get("signature") != updated.get("skipped_signature")
             and probe.get("signature") != updated.get("last_missing_signature")
@@ -3926,6 +3939,19 @@ class BotApp:
 
     async def _on_cb_flow(self, *, data: str, q: Any, user_id: int) -> None:
         await commands_handler.on_cb_flow(self, data=data, q=q, user_id=user_id)
+
+    async def _on_cb_dl_manage(self, *, data: str, q: Any, user_id: int) -> None:
+        """Show the Manage Downloads sub-page with individual stop buttons."""
+        self._stop_command_center_refresh(user_id)
+        dl_tuples = await asyncio.to_thread(self._active_download_tuples)
+        lines: list[str] = ["<b>🛑 Manage Downloads</b>", ""]
+        if dl_tuples:
+            lines.append(f"<i>{len(dl_tuples)} active download{'s' if len(dl_tuples) != 1 else ''} — tap to cancel</i>")
+        else:
+            lines.append("<i>No active downloads right now.</i>")
+        text = "\n".join(lines)
+        kb = kb_mod.manage_downloads_keyboard(dl_tuples)
+        await self._render_nav_ui(user_id, q.message, text, reply_markup=kb, current_ui_message=q.message)
 
     async def _on_cb_stop(self, *, data: str, q: Any, user_id: int) -> None:
         await download_handler.on_cb_stop(self, data=data, q=q, user_id=user_id)

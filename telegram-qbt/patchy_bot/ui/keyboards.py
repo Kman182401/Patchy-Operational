@@ -69,10 +69,26 @@ def command_center_keyboard(
         ],
     ]
     if active_downloads:
-        for torrent_hash, name in active_downloads[:3]:
-            label = name[:28] + "…" if len(name) > 29 else name
-            rows.append([InlineKeyboardButton(f"🛑 Cancel: {label}", callback_data=f"stop:{torrent_hash}")])
+        count = len(active_downloads)
+        rows.append([InlineKeyboardButton(f"🛑 Manage Downloads ({count})", callback_data="dl:manage")])
     rows.append([InlineKeyboardButton("ℹ️ Help", callback_data="menu:help")])
+    return InlineKeyboardMarkup(rows)
+
+
+def manage_downloads_keyboard(
+    active_downloads: list[tuple[str, str]],
+) -> InlineKeyboardMarkup:
+    """Keyboard for the downloads management sub-page.
+
+    Shows individual stop buttons for each active download with a Back button.
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    for torrent_hash, name in active_downloads:
+        label = name[:33] + "…" if len(name) > 34 else name
+        rows.append([InlineKeyboardButton(f"🛑 {label}", callback_data=f"stop:{torrent_hash}")])
+    if not rows:
+        rows.append([InlineKeyboardButton("📭 No active downloads", callback_data="nav:home")])
+    rows.extend(nav_footer(back_data="nav:home"))
     return InlineKeyboardMarkup(rows)
 
 

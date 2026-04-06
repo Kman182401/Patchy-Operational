@@ -479,3 +479,154 @@ def test_extract_hash_returns_none() -> None:
     """When neither row nor URL has a hash, None is returned."""
     row = {"hash": ""}
     assert extract_hash(row, "https://example.com/page") is None
+
+
+# ---------------------------------------------------------------------------
+# Batch auto-acquire tests for _schedule_refresh_track
+# ---------------------------------------------------------------------------
+
+
+class _BatchDummyStore:
+    """Minimal store for batch auto-acquire tests."""
+
+    def __init__(self, track: dict[str, Any]) -> None:
+        self._track = track
+        self.last_update_kwargs: dict[str, Any] = {}
+
+    def update_schedule_track(self, track_id: str, **kwargs: Any) -> None:
+        self.last_update_kwargs = kwargs
+
+    def get_schedule_track_any(self, track_id: str) -> dict[str, Any]:
+        merged = dict(self._track)
+        merged.update(self.last_update_kwargs)
+        return merged
+
+
+class _BatchDummyBot:
+    """Minimal stand-in for BotApp with batch auto-acquire support."""
+
+    def __init__(self, store: _BatchDummyStore, acquire_results: dict[str, dict | None]) -> None:
+        self.store = store
+        self._acquire_results = acquire_results
+        self.acquire_calls: list[str] = []
+        self.notify_calls: list[tuple[str, dict]] = []
+
+    def _schedule_probe_track(self, track: dict[str, Any]) -> dict[str, Any]:
+        return dict(track.get("_test_probe") or {})
+
+    def _schedule_episode_auto_state(self, track: dict[str, Any]) -> dict[str, Any]:
+        return dict(track.get("auto_state_json") or {})
+
+    def _schedule_sanitize_auto_state(self, auto_state: dict, *, probe: dict | None = None) -> dict:
+        return auto_state
+
+    def _schedule_reconcile_pending(self, track: dict, probe: dict) -> tuple[set, set, set]:
+        return set(), set(), set()
+
+    def _schedule_should_attempt_auto(self, track: dict, probe: dict) -> tuple[bool, list[str] | str]:
+        codes = list(probe.get("actionable_missing_codes") or [])
+        if not codes:
+            return False, "no actionable"
+        return True, codes
+
+    async def _schedule_attempt_auto_acquire(self, track: dict, code: str) -> dict | None:
+        self.acquire_calls.append(code)
+        return self._acquire_results.get(code)
+
+    async def _schedule_notify_auto_queued(self, track: dict, code: str, result: dict) -> None:
+        self.notify_calls.append((code, result))
+
+    async def _schedule_notify_missing(self, track: dict, probe: dict) -> None:
+        pass
+
+    def _schedule_next_check_at(self, next_air_ts: Any, *, has_actionable_missing: bool, auto_state: dict) -> int:
+        return 9999
+
+    def _schedule_retry_interval_s(self) -> int:
+        return 3600
+
+    def _schedule_release_grace_s(self) -> int:
+        return 3600
+
+    def _schedule_source_snapshot(self, key: str) -> dict:
+        return {}
+
+
+def _make_batch_track(actionable: list[str]) -> dict[str, Any]:
+    """Build a track dict with an embedded probe for batch tests."""
+    probe = {
+        "actionable_missing_codes": actionable,
+        "tracked_missing_codes": actionable,
+        "tracking_code": actionable[0] if actionable else None,
+        "signature": "|".join(sorted(actionable)),
+        "show": {"name": "Test Show"},
+        "_auto_state": {"enabled": True},
+    }
+    return {
+        "track_id": "t-batch",
+        "pending_json": [],
+        "auto_state_json": {"enabled": True},
+        "show_json": {"name": "Test Show"},
+        "skipped_signature": None,
+        "last_missing_signature": None,
+        "_test_probe": probe,
+    }
+
+
+async def test_schedule_runner_batch_downloads_multiple_episodes(monkeypatch: Any) -> None:
+    """All three episodes are acquired and notified in one refresh cycle."""
+    monkeypatch.setattr("patchy_bot.bot.now_ts", lambda: 5000)
+    codes = ["S01E01", "S01E02", "S01E03"]
+    track = _make_batch_track(codes)
+    acquire_results = {c: {"name": f"Test.{c}", "hash": f"hash_{c}"} for c in codes}
+    store = _BatchDummyStore(track)
+    bot = _BatchDummyBot(store, acquire_results)
+
+    from patchy_bot.bot import BotApp
+
+    await BotApp._schedule_refresh_track(bot, track, allow_notify=True)  # type: ignore[arg-type]
+
+    assert bot.acquire_calls == codes
+    assert [c for c, _ in bot.notify_calls] == codes
+    assert store.last_update_kwargs.get("auto_state_json", {}).get("next_auto_retry_at") is None
+
+
+async def test_schedule_runner_batch_partial_failure(monkeypatch: Any) -> None:
+    """Partial success: 2 of 3 episodes succeed, no cooldown set."""
+    monkeypatch.setattr("patchy_bot.bot.now_ts", lambda: 5000)
+    codes = ["S01E01", "S01E02", "S01E03"]
+    track = _make_batch_track(codes)
+    acquire_results = {
+        "S01E01": {"name": "Test.E01", "hash": "h1"},
+        "S01E02": None,  # fails
+        "S01E03": {"name": "Test.E03", "hash": "h3"},
+    }
+    store = _BatchDummyStore(track)
+    bot = _BatchDummyBot(store, acquire_results)
+
+    from patchy_bot.bot import BotApp
+
+    await BotApp._schedule_refresh_track(bot, track, allow_notify=True)  # type: ignore[arg-type]
+
+    assert bot.acquire_calls == codes
+    assert [c for c, _ in bot.notify_calls] == ["S01E01", "S01E03"]
+    assert store.last_update_kwargs.get("auto_state_json", {}).get("next_auto_retry_at") is None
+
+
+async def test_schedule_runner_batch_all_fail(monkeypatch: Any) -> None:
+    """All episodes fail: cooldown is set."""
+    monkeypatch.setattr("patchy_bot.bot.now_ts", lambda: 5000)
+    codes = ["S01E01", "S01E02", "S01E03"]
+    track = _make_batch_track(codes)
+    acquire_results: dict[str, dict | None] = {c: None for c in codes}
+    store = _BatchDummyStore(track)
+    bot = _BatchDummyBot(store, acquire_results)
+
+    from patchy_bot.bot import BotApp
+
+    await BotApp._schedule_refresh_track(bot, track, allow_notify=True)  # type: ignore[arg-type]
+
+    assert bot.acquire_calls == codes
+    assert bot.notify_calls == []
+    retry_at = store.last_update_kwargs.get("auto_state_json", {}).get("next_auto_retry_at")
+    assert retry_at is not None and retry_at > 5000

@@ -73,7 +73,7 @@ def test_schedule_refresh_degrades_cleanly_when_metadata_lookup_fails() -> None:
             return set(), set(), set()
 
         def _schedule_should_attempt_auto(self, track, probe):
-            return False, None
+            return False, "metadata offline"
 
         def _schedule_next_check_at(self, next_air_ts, *, has_actionable_missing, auto_state):
             return (next_air_ts or now_ts()) + 3600
@@ -3553,3 +3553,103 @@ def test_movie_noresult_footer_uses_menu_movie_back_data() -> None:
     all_buttons = [btn for row in markup.inline_keyboard for btn in row]
     back_buttons = [b for b in all_buttons if b.callback_data and "menu:movie" in b.callback_data]
     assert len(back_buttons) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Multi-episode premiere batch download tests
+# ---------------------------------------------------------------------------
+
+
+def test_schedule_apply_tracking_mode_multi_episode_premiere(monkeypatch) -> None:
+    """Three released episodes all appear in actionable_missing_codes."""
+    from patchy_bot.handlers.schedule import schedule_apply_tracking_mode
+
+    NOW = 1_000_000
+    monkeypatch.setattr("patchy_bot.handlers.schedule.now_ts", lambda: NOW)
+    monkeypatch.setattr("patchy_bot.handlers.schedule.schedule_release_grace_s", lambda: 3600)
+
+    ctx = SimpleNamespace()
+    past = NOW - 7200
+    track = {"auto_state_json": {"enabled": True, "tracking_mode": "upcoming"}}
+    probe = {
+        "all_missing_codes": ["S01E01", "S01E02", "S01E03"],
+        "episode_order": ["S01E01", "S01E02", "S01E03"],
+        "present_codes": [],
+        "pending_codes": [],
+        "episode_air": {"S01E01": past, "S01E02": past, "S01E03": past},
+    }
+    result = schedule_apply_tracking_mode(ctx, track, probe)
+    assert result["actionable_missing_codes"] == ["S01E01", "S01E02", "S01E03"]
+    assert result["tracking_code"] == "S01E01"
+    assert result["tracked_missing_codes"] == ["S01E01", "S01E02", "S01E03"]
+
+
+def test_schedule_apply_tracking_mode_stops_at_unreleased(monkeypatch) -> None:
+    """Collection stops at the first unreleased episode."""
+    from patchy_bot.handlers.schedule import schedule_apply_tracking_mode
+
+    NOW = 1_000_000
+    monkeypatch.setattr("patchy_bot.handlers.schedule.now_ts", lambda: NOW)
+    monkeypatch.setattr("patchy_bot.handlers.schedule.schedule_release_grace_s", lambda: 3600)
+
+    ctx = SimpleNamespace()
+    past = NOW - 7200
+    future = NOW + 86400
+    track = {"auto_state_json": {"enabled": True, "tracking_mode": "upcoming", "next_code": "S01E01"}}
+    probe = {
+        "all_missing_codes": ["S01E01", "S01E02", "S01E03", "S01E04"],
+        "episode_order": ["S01E01", "S01E02", "S01E03", "S01E04"],
+        "present_codes": [],
+        "pending_codes": [],
+        "episode_air": {"S01E01": past, "S01E02": past, "S01E03": future, "S01E04": future},
+    }
+    result = schedule_apply_tracking_mode(ctx, track, probe)
+    assert result["actionable_missing_codes"] == ["S01E01", "S01E02"]
+    assert result["tracking_code"] == "S01E01"
+
+
+def test_schedule_apply_tracking_mode_skips_pending_in_batch(monkeypatch) -> None:
+    """Pending episodes are excluded from actionable but the loop continues past them."""
+    from patchy_bot.handlers.schedule import schedule_apply_tracking_mode
+
+    NOW = 1_000_000
+    monkeypatch.setattr("patchy_bot.handlers.schedule.now_ts", lambda: NOW)
+    monkeypatch.setattr("patchy_bot.handlers.schedule.schedule_release_grace_s", lambda: 3600)
+
+    ctx = SimpleNamespace()
+    past = NOW - 7200
+    track = {"auto_state_json": {"enabled": True, "tracking_mode": "upcoming"}}
+    probe = {
+        "all_missing_codes": ["S01E01", "S01E02", "S01E03"],
+        "episode_order": ["S01E01", "S01E02", "S01E03"],
+        "present_codes": [],
+        "pending_codes": ["S01E02"],
+        "episode_air": {"S01E01": past, "S01E02": past, "S01E03": past},
+    }
+    result = schedule_apply_tracking_mode(ctx, track, probe)
+    assert result["actionable_missing_codes"] == ["S01E01", "S01E03"]
+    assert "S01E02" not in result["actionable_missing_codes"]
+
+
+def test_schedule_apply_tracking_mode_single_episode_still_works(monkeypatch) -> None:
+    """Single released episode followed by unreleased behaves as before."""
+    from patchy_bot.handlers.schedule import schedule_apply_tracking_mode
+
+    NOW = 1_000_000
+    monkeypatch.setattr("patchy_bot.handlers.schedule.now_ts", lambda: NOW)
+    monkeypatch.setattr("patchy_bot.handlers.schedule.schedule_release_grace_s", lambda: 3600)
+
+    ctx = SimpleNamespace()
+    past = NOW - 7200
+    future = NOW + 86400
+    track = {"auto_state_json": {"enabled": True, "tracking_mode": "upcoming", "next_code": "S01E01"}}
+    probe = {
+        "all_missing_codes": ["S01E01", "S01E02"],
+        "episode_order": ["S01E01", "S01E02"],
+        "present_codes": [],
+        "pending_codes": [],
+        "episode_air": {"S01E01": past, "S01E02": future},
+    }
+    result = schedule_apply_tracking_mode(ctx, track, probe)
+    assert result["actionable_missing_codes"] == ["S01E01"]
+    assert result["tracking_code"] == "S01E01"
