@@ -2,6 +2,127 @@
 
 from __future__ import annotations
 
+from ..utils import _h, _relative_time, now_ts
+
+# ---------------------------------------------------------------------------
+# Tracked-list shared helpers (TV shows + Movies)
+# ---------------------------------------------------------------------------
+
+
+def tracked_list_header(title: str, icon: str) -> str:
+    """Header line for My Shows / My Movies screens."""
+    return f"<b>{icon} {_h(title)}</b>\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501"
+
+
+def tv_track_line(track: dict) -> str:
+    """Format a single TV track row for the My Shows list.
+
+    Mirrors the logic previously in BotApp._schedule_active_line /
+    BotApp._schedule_paused_line -- extracted here so it can be called
+    without a BotApp reference.
+    """
+    enabled = track.get("enabled", 1)
+    probe = dict(track.get("last_probe_json") or {})
+    show = dict(track.get("show_json") or probe.get("show") or {})
+    name = str(show.get("name") or track.get("show_name") or "Unknown show")
+    season = int(track.get("season") or probe.get("season") or 1)
+
+    if enabled is not None and not enabled:
+        return f"\u23f8 <b>{_h(name)}</b>\n   Season {season} \u00b7 <i>paused</i>"
+
+    actionable = len(probe.get("actionable_missing_codes") or [])
+    pending = len(track.get("pending_json") or probe.get("pending_codes") or [])
+    unreleased = len(probe.get("unreleased_codes") or [])
+
+    if actionable > 0:
+        lead = "\U0001f50d"
+        status = f"<b>{actionable} missing</b>"
+    elif pending > 0:
+        lead = "\u2b07\ufe0f"
+        status = f"<b>{pending} downloading</b>"
+    elif unreleased > 0:
+        lead = "\u23f0"
+        status = "waiting on release"
+    else:
+        lead = "\u2705"
+        status = "up to date"
+
+    details: list[str] = [status]
+    if unreleased > 0:
+        details.append(f"{unreleased} unreleased")
+    next_air_ts = int(track.get("next_air_ts") or probe.get("next_air_ts") or 0)
+    if next_air_ts > 0:
+        details.append(f"next {_relative_time(next_air_ts)}")
+    next_check_at = int(track.get("next_check_at") or 0)
+    if next_check_at > 0:
+        details.append(f"check {_relative_time(next_check_at)}")
+    if probe.get("metadata_stale"):
+        details.append("\u26a0\ufe0f stale data")
+    detail_line = " \u00b7 ".join(details[:3])
+    return f"{lead} <b>{_h(name)}</b>\n   Season {season} \u00b7 {detail_line}"
+
+
+def movie_track_line(track: dict) -> str:
+    """Format a single movie track row for the My Movies list."""
+    title = str(track.get("title") or "Unknown")
+    year = track.get("year")
+    enabled = track.get("enabled", 1)
+    status = str(track.get("status") or "pending")
+    year_str = f" ({year})" if year else ""
+
+    if not enabled:
+        return f"\u23f8 <b>{_h(title)}{_h(year_str)}</b>\n   <i>paused</i>"
+
+    if status == "downloading":
+        status_line = "\u2b07\ufe0f Downloading"
+    elif status == "done":
+        status_line = "\u2705 Downloaded"
+    else:
+        rel_status = str(track.get("release_status") or "unknown")
+        home_ts = track.get("home_release_ts")
+        release_ts = int(track.get("release_date_ts") or 0)
+        date_type = str(track.get("release_date_type") or "")
+        cur = now_ts()
+        if rel_status == "pre_theatrical":
+            status_line = "\U0001f3ac Not yet released"
+        elif rel_status == "in_theaters":
+            if home_ts:
+                status_line = f"\U0001f3ac In theaters \u00b7 Home est. {_relative_time(int(home_ts))}"
+            else:
+                status_line = "\U0001f3ac In theaters"
+        elif rel_status == "waiting_home":
+            if home_ts:
+                status_line = f"\u23f3 Waiting \u00b7 Home release {_relative_time(int(home_ts))}"
+            else:
+                status_line = "\u23f3 Waiting for home release"
+        elif rel_status == "home_available":
+            status_line = "\U0001f50d Searching for torrent\u2026"
+        elif rel_status == "unknown" and release_ts > cur:
+            label = date_type.capitalize() if date_type else "Release"
+            status_line = f"\u23f3 Waiting \u2014 {label} {_relative_time(release_ts)}"
+        else:
+            status_line = "\U0001f50d Searching for torrent\u2026"
+
+    return f"<b>{_h(title)}{_h(year_str)}</b>\n   {status_line}"
+
+
+def tracked_list_text(
+    header: str,
+    items: list[dict],
+    page: int,
+    total_pages: int,
+    line_fn,
+) -> str:
+    """Assemble full list message text: header + item lines + page indicator."""
+    lines = [header]
+    for item in items:
+        lines.append("")
+        lines.append(line_fn(item))
+    if total_pages > 1:
+        lines.append(f"\n<i>Page {page + 1} of {total_pages}</i>")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # TV search text
 # ---------------------------------------------------------------------------

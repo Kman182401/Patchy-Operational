@@ -3319,41 +3319,12 @@ class BotApp:
         return remove_handler.delete_remove_candidates(self._ctx, candidates, user_id=user_id, chat_id=chat_id)
 
     def _schedule_active_line(self, track: dict[str, Any]) -> str:
-        probe = dict(track.get("last_probe_json") or {})
-        show = dict(track.get("show_json") or probe.get("show") or {})
-        name = str(show.get("name") or track.get("show_name") or "Unknown show")
-        season = int(track.get("season") or probe.get("season") or 1)
-        actionable = len(probe.get("actionable_missing_codes") or [])
-        pending = len(track.get("pending_json") or probe.get("pending_codes") or [])
-        unreleased = len(probe.get("unreleased_codes") or [])
-        if actionable > 0:
-            lead = "🔍"
-            status = f"<b>{actionable} missing</b>"
-        elif pending > 0:
-            lead = "⬇️"
-            status = f"<b>{pending} downloading</b>"
-        elif unreleased > 0:
-            lead = "⏰"
-            status = "waiting on release"
-        else:
-            lead = "✅"
-            status = "up to date"
-        details: list[str] = [status]
-        if unreleased > 0:
-            details.append(f"{unreleased} unreleased")
-        next_air_ts = int(track.get("next_air_ts") or probe.get("next_air_ts") or 0)
-        if next_air_ts > 0:
-            details.append(f"next {_relative_time(next_air_ts)}")
-        next_check_at = int(track.get("next_check_at") or 0)
-        if next_check_at > 0:
-            details.append(f"check {_relative_time(next_check_at)}")
-        if probe.get("metadata_stale"):
-            details.append("⚠️ stale data")
-        detail_line = " · ".join(details[:3])
-        return f"{lead} <b>{_h(name)}</b>\n   Season {season} · {detail_line}"
+        from .ui.text import tv_track_line as _tv_track_line
+
+        return _tv_track_line(track)
 
     def _schedule_paused_line(self, name: str, season: int) -> str:
-        return f"⏸ <b>{_h(name)}</b>\n   Season {season} · <i>paused</i>"
+        return f"\u23f8 <b>{_h(name)}</b>\n   Season {season} \u00b7 <i>paused</i>"
 
     async def _send_active(self, msg: Any, n: int = 10, user_id: int | None = None) -> None:
         all_items = await asyncio.to_thread(self.qbt.list_torrents, filter_name="all", limit=50)

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import math
+from collections.abc import Callable
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 # ---------------------------------------------------------------------------
@@ -116,4 +119,92 @@ def media_picker_keyboard(sid: str, idx: int, *, back_data: str = "") -> InlineK
         ]
     ]
     rows.extend(nav_footer(back_data=back_data))
+    return InlineKeyboardMarkup(rows)
+
+
+# ---------------------------------------------------------------------------
+# Tracked-list shared keyboard (My Shows / My Movies)
+# ---------------------------------------------------------------------------
+
+
+def tracked_list_page_bounds(items: list, page: int, per_page: int = 8) -> tuple[int, int, int, int]:
+    """Return (page, total_pages, start, end) for a tracked list slice."""
+    total_pages = max(1, math.ceil(max(1, len(items)) / per_page))
+    page = max(0, min(int(page), total_pages - 1))
+    start = page * per_page
+    end = min(start + per_page, len(items))
+    return page, total_pages, start, end
+
+
+def tracked_list_keyboard(
+    items: list[dict],
+    page: int,
+    *,
+    per_page: int = 8,
+    item_callback_fn: Callable[[dict], str],
+    item_label_fn: Callable[[dict], str],
+    filter_current: str = "all",
+    filter_prefix: str = "sch",
+    nav_prefix: str = "sch",
+    add_callback: str = "",
+    add_label: str = "",
+    back_data: str = "menu:schedule",
+) -> InlineKeyboardMarkup:
+    """Build the full keyboard for a tracked-list screen.
+
+    Rows (top to bottom):
+      1. Filter tabs: All / Active / Paused
+      2. One button per visible item (tappable title)
+      3. Pagination: Prev / Next (only when multiple pages exist)
+      4. Add New button (when add_callback provided)
+      5. Nav footer: Back + Home
+    """
+    page, total_pages, start, end = tracked_list_page_bounds(items, page, per_page)
+    visible = items[start:end]
+
+    rows: list[list[InlineKeyboardButton]] = []
+
+    # --- filter row ---
+    def _filter_btn(label: str, key: str) -> InlineKeyboardButton:
+        marker = "✅ " if filter_current == key else ""
+        return InlineKeyboardButton(f"{marker}{label}", callback_data=f"{filter_prefix}:f:{key}")
+
+    rows.append(
+        [
+            _filter_btn("All", "all"),
+            _filter_btn("Active", "act"),
+            _filter_btn("Paused", "pau"),
+        ]
+    )
+
+    # --- item rows ---
+    for item in visible:
+        rows.append([InlineKeyboardButton(item_label_fn(item), callback_data=item_callback_fn(item))])
+
+    # --- pagination row ---
+    if total_pages > 1:
+        prev_btn = InlineKeyboardButton(
+            "⬅️ Prev",
+            callback_data=f"{nav_prefix}:pg:{page - 1}" if page > 0 else f"{nav_prefix}:pg:0",
+        )
+        next_btn = InlineKeyboardButton(
+            "Next ➡️",
+            callback_data=f"{nav_prefix}:pg:{page + 1}"
+            if page < total_pages - 1
+            else f"{nav_prefix}:pg:{total_pages - 1}",
+        )
+        if page == 0:
+            rows.append([next_btn])
+        elif page == total_pages - 1:
+            rows.append([prev_btn])
+        else:
+            rows.append([prev_btn, next_btn])
+
+    # --- add new button ---
+    if add_callback and add_label:
+        rows.append([InlineKeyboardButton(add_label, callback_data=add_callback)])
+
+    # --- nav footer ---
+    rows.extend(nav_footer(back_data=back_data, include_home=True))
+
     return InlineKeyboardMarkup(rows)

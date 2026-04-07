@@ -18,6 +18,8 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from ..types import HandlerContext
+from ..ui.keyboards import tracked_list_keyboard, tracked_list_page_bounds
+from ..ui.text import movie_track_line, tracked_list_header, tracked_list_text, tv_track_line
 from ..utils import (
     _PM,
     _h,
@@ -2015,62 +2017,160 @@ async def on_cb_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> No
         await bot_app._render_nav_ui(user_id, q.message, text, reply_markup=kb, current_ui_message=q.message)
         return
 
-    if data == "sch:myshows":
-        tracks = await asyncio.to_thread(ctx.store.list_schedule_tracks, user_id, False, 50)
-        if not tracks:
+    # ---- shared My Shows render helper ----------------------------------------
+
+    async def _render_my_shows(q_message: Any) -> None:
+        """Render (or re-render) the My Shows list using flow state for page/filter."""
+        flow = bot_app._get_flow(user_id) or {}
+        filt = str(flow.get("shows_filter") or "all")
+        page = int(flow.get("shows_page") or 0)
+
+        all_tracks = await asyncio.to_thread(ctx.store.list_schedule_tracks, user_id, False, 50)
+
+        if not all_tracks:
             await bot_app._render_nav_ui(
                 user_id,
-                q.message,
-                "<b>\U0001f4cb My Shows</b>\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\nNo shows tracked yet.\nTap <b>Add New Show</b> to get started.",
+                q_message,
+                (
+                    tracked_list_header("My Shows", "\U0001f4cb")
+                    + "\n\nNo shows tracked yet.\nTap <b>Add New Show</b> to get started."
+                ),
                 reply_markup=InlineKeyboardMarkup(
                     [
                         [InlineKeyboardButton("\u2795 Add New Show", callback_data="sch:addnew")],
                     ]
-                    + bot_app._nav_footer(back_data="menu:schedule", include_home=False)
+                    + bot_app._nav_footer(back_data="menu:schedule", include_home=True)
                 ),
-                current_ui_message=q.message,
+                current_ui_message=q_message,
             )
             return
-        lines = [
-            "<b>\U0001f4cb My Shows</b>",
-            "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501",
-            "<i>\u23f8 Pause or \u25b6\ufe0f Resume tracking. \U0001f6ab Stop to remove a show.</i>",
-        ]
-        rows: list[list[InlineKeyboardButton]] = []
-        for track in tracks:
-            show = dict(track.get("show_json") or {})
-            name = str(show.get("name") or track.get("show_name") or "Unknown")
-            season = int(track.get("season") or 1)
-            tid = track["track_id"]
-            enabled = track.get("enabled")
-            lines.append("")
+
+        # Apply filter
+        if filt == "act":
+            filtered = [t for t in all_tracks if t.get("enabled")]
+        elif filt == "pau":
+            filtered = [t for t in all_tracks if not t.get("enabled")]
+        else:
+            filtered = list(all_tracks)
+
+        # Sort: active by next_air_ts ascending (0 sorts last), paused alphabetical
+        def _sort_key(t: dict) -> tuple:
+            enabled = bool(t.get("enabled"))
             if enabled:
-                lines.append(bot_app._schedule_active_line(track))
-            else:
-                lines.append(bot_app._schedule_paused_line(name, season))
-            if enabled:
-                rows.append(
-                    [
-                        InlineKeyboardButton(f"\u23f8 {name}", callback_data=f"sch:pause:{tid}"),
-                        InlineKeyboardButton("\U0001f6ab Stop Tracking", callback_data=f"sch:dconf:{tid}"),
-                    ]
-                )
-            else:
-                rows.append(
-                    [
-                        InlineKeyboardButton(f"\u25b6\ufe0f {name}", callback_data=f"sch:pause:{tid}"),
-                        InlineKeyboardButton("\U0001f6ab Stop Tracking", callback_data=f"sch:dconf:{tid}"),
-                    ]
-                )
-        rows.append([InlineKeyboardButton("\u2795 Add New Show", callback_data="sch:addnew")])
-        rows += bot_app._nav_footer(back_data="menu:schedule", include_home=False)
+                air = int(t.get("next_air_ts") or 0)
+                return (0, air if air > 0 else 9999999999, "")
+            show = dict(t.get("show_json") or {})
+            name = str(show.get("name") or t.get("show_name") or "").lower()
+            return (1, 0, name)
+
+        filtered.sort(key=_sort_key)
+
+        _, total_pages, _, _ = tracked_list_page_bounds(filtered, page)
+
+        def _label(t: dict) -> str:
+            show = dict(t.get("show_json") or {})
+            name = str(show.get("name") or t.get("show_name") or "Unknown")
+            season = int(t.get("season") or 1)
+            if not t.get("enabled", 1):
+                return f"\u23f8 {name} S{season:02d}"
+            return f"\U0001f4fa {name} S{season:02d}"
+
+        def _cb(t: dict) -> str:
+            return f"sch:sel:{t['track_id']}"
+
+        header = tracked_list_header("My Shows", "\U0001f4cb")
+        _, total_pages_2, start, end = tracked_list_page_bounds(filtered, page)
+        visible = filtered[start:end]
+        text = tracked_list_text(header, visible, page, total_pages_2, tv_track_line)
+
+        kb = tracked_list_keyboard(
+            filtered,
+            page,
+            item_callback_fn=_cb,
+            item_label_fn=_label,
+            filter_current=filt,
+            filter_prefix="sch",
+            nav_prefix="sch",
+            add_callback="sch:addnew",
+            add_label="\u2795 Add New Show",
+            back_data="menu:schedule",
+        )
         await bot_app._render_nav_ui(
             user_id,
-            q.message,
-            "\n".join(lines),
-            reply_markup=InlineKeyboardMarkup(rows),
-            current_ui_message=q.message,
+            q_message,
+            text,
+            reply_markup=kb,
+            current_ui_message=q_message,
         )
+
+    # ---- per-show action screen helper ----------------------------------------
+
+    async def _render_show_action(q_message: Any, tid: str) -> None:
+        """Render the per-show action screen for a single TV track."""
+        track = await asyncio.to_thread(ctx.store.get_schedule_track, user_id, tid)
+        if not track:
+            await bot_app._render_nav_ui(
+                user_id,
+                q_message,
+                "Track not found.",
+                reply_markup=bot_app._home_only_keyboard(),
+                current_ui_message=q_message,
+            )
+            return
+        show = dict(track.get("show_json") or {})
+        name = str(show.get("name") or track.get("show_name") or "Unknown")
+        season = int(track.get("season") or 1)
+        enabled = bool(track.get("enabled"))
+
+        status_line = tv_track_line(track)
+        text = (
+            f"<b>\U0001f4fa {_h(name)}</b>\n"
+            f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\n"
+            f"Season {season}\n\n"
+            f"{status_line}"
+        )
+        pause_label = "\u25b6\ufe0f Resume" if not enabled else "\u23f8 Pause"
+        kb = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton(pause_label, callback_data=f"sch:pause:{tid}")],
+                [InlineKeyboardButton("\U0001f6ab Stop Tracking", callback_data=f"sch:dconf:{tid}")],
+                [
+                    InlineKeyboardButton("\u2b05\ufe0f Back", callback_data="sch:myshows"),
+                    InlineKeyboardButton("\U0001f3e0 Home", callback_data="nav:home"),
+                ],
+            ]
+        )
+        await bot_app._render_nav_ui(user_id, q_message, text, reply_markup=kb, current_ui_message=q_message)
+
+    # ---- My Shows callbacks -----------------------------------------------
+
+    if data == "sch:myshows":
+        await _render_my_shows(q.message)
+        return
+
+    if data.startswith("sch:f:") and data in ("sch:f:all", "sch:f:act", "sch:f:pau"):
+        key = data.split(":", 2)[2]
+        flow = bot_app._get_flow(user_id) or {}
+        flow["shows_filter"] = key
+        flow["shows_page"] = 0
+        bot_app._set_flow(user_id, flow)
+        await _render_my_shows(q.message)
+        return
+
+    if data.startswith("sch:pg:"):
+        try:
+            new_page = int(data.split(":", 2)[2])
+        except (ValueError, IndexError):
+            new_page = 0
+        flow = bot_app._get_flow(user_id) or {}
+        flow["shows_page"] = new_page
+        bot_app._set_flow(user_id, flow)
+        await _render_my_shows(q.message)
+        return
+
+    if data.startswith("sch:sel:"):
+        tid = data.split(":", 2)[2]
+        await _render_show_action(q.message, tid)
         return
 
     if data.startswith("sch:pause:"):
@@ -2091,45 +2191,8 @@ async def on_cb_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> No
         name = str(show.get("name") or track.get("show_name") or "Unknown")
         action = "resumed" if new_enabled else "paused"
         await q.answer(f"{name} {action}")
-        # Re-render My Shows list
-        tracks = await asyncio.to_thread(ctx.store.list_schedule_tracks, user_id, False, 50)
-        lines = [
-            "<b>\U0001f4cb My Shows</b>",
-            "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501",
-            "<i>\u23f8 Pause or \u25b6\ufe0f Resume tracking. \U0001f6ab Stop to remove a show.</i>",
-        ]
-        rows_list: list[list[InlineKeyboardButton]] = []
-        for t in tracks:
-            s = dict(t.get("show_json") or {})
-            n = str(s.get("name") or t.get("show_name") or "Unknown")
-            sn = int(t.get("season") or 1)
-            t_id = t["track_id"]
-            lines.append("")
-            if t.get("enabled"):
-                lines.append(bot_app._schedule_active_line(t))
-                rows_list.append(
-                    [
-                        InlineKeyboardButton(f"\u23f8 {n}", callback_data=f"sch:pause:{t_id}"),
-                        InlineKeyboardButton("\U0001f6ab Stop Tracking", callback_data=f"sch:dconf:{t_id}"),
-                    ]
-                )
-            else:
-                lines.append(bot_app._schedule_paused_line(n, sn))
-                rows_list.append(
-                    [
-                        InlineKeyboardButton(f"\u25b6\ufe0f {n}", callback_data=f"sch:pause:{t_id}"),
-                        InlineKeyboardButton("\U0001f6ab Stop Tracking", callback_data=f"sch:dconf:{t_id}"),
-                    ]
-                )
-        rows_list.append([InlineKeyboardButton("\u2795 Add New Show", callback_data="sch:addnew")])
-        rows_list += bot_app._nav_footer(back_data="menu:schedule", include_home=False)
-        await bot_app._render_nav_ui(
-            user_id,
-            q.message,
-            "\n".join(lines),
-            reply_markup=InlineKeyboardMarkup(rows_list),
-            current_ui_message=q.message,
-        )
+        # Re-render the per-show action screen so state is reflected immediately
+        await _render_show_action(q.message, tid)
         return
 
     if data.startswith("sch:dconf:"):
@@ -2148,16 +2211,16 @@ async def on_cb_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> No
         name = str(show.get("name") or track.get("show_name") or "Unknown")
         season = int(track.get("season") or 1)
         text = (
-            f"<b>\U0001f5d1 Delete Tracking?</b>\n"
+            f"<b>\U0001f5d1 Stop Tracking?</b>\n"
             f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\n"
             f"Stop tracking <b>{_h(name)}</b> S{season:02d}?\n\n"
-            f"<i>This removes the schedule entry. It won't delete any downloaded files.</i>"
+            f"<i>This removes the tracking entry only. Downloaded media is not deleted.</i>"
         )
         kb = InlineKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton("Yes, delete", callback_data=f"sch:del:{tid}"),
-                    InlineKeyboardButton("Cancel", callback_data="sch:myshows"),
+                    InlineKeyboardButton("Yes, stop tracking", callback_data=f"sch:del:{tid}"),
+                    InlineKeyboardButton("Cancel", callback_data=f"sch:sel:{tid}"),
                 ],
             ]
         )
@@ -2174,59 +2237,7 @@ async def on_cb_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> No
         deleted = await asyncio.to_thread(ctx.store.delete_schedule_track, tid, user_id)
         if deleted:
             await q.answer(f"{show_name} removed")
-        # Re-render My Shows list (reuse sch:myshows logic)
-        tracks = await asyncio.to_thread(ctx.store.list_schedule_tracks, user_id, False, 50)
-        if not tracks:
-            await bot_app._render_nav_ui(
-                user_id,
-                q.message,
-                "<b>\U0001f4cb My Shows</b>\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\nNo shows tracked yet.\nTap <b>Add New Show</b> to get started.",
-                reply_markup=InlineKeyboardMarkup(
-                    [
-                        [InlineKeyboardButton("\u2795 Add New Show", callback_data="sch:addnew")],
-                    ]
-                    + bot_app._nav_footer(back_data="menu:schedule", include_home=False)
-                ),
-                current_ui_message=q.message,
-            )
-            return
-        lines = [
-            "<b>\U0001f4cb My Shows</b>",
-            "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501",
-            "<i>\u23f8 Pause or \u25b6\ufe0f Resume tracking. \U0001f6ab Stop to remove a show.</i>",
-        ]
-        rows_del: list[list[InlineKeyboardButton]] = []
-        for t in tracks:
-            s = dict(t.get("show_json") or {})
-            n = str(s.get("name") or t.get("show_name") or "Unknown")
-            sn = int(t.get("season") or 1)
-            t_id = t["track_id"]
-            lines.append("")
-            if t.get("enabled"):
-                lines.append(bot_app._schedule_active_line(t))
-                rows_del.append(
-                    [
-                        InlineKeyboardButton(f"\u23f8 {n}", callback_data=f"sch:pause:{t_id}"),
-                        InlineKeyboardButton("\U0001f6ab Stop Tracking", callback_data=f"sch:dconf:{t_id}"),
-                    ]
-                )
-            else:
-                lines.append(bot_app._schedule_paused_line(n, sn))
-                rows_del.append(
-                    [
-                        InlineKeyboardButton(f"\u25b6\ufe0f {n}", callback_data=f"sch:pause:{t_id}"),
-                        InlineKeyboardButton("\U0001f6ab Stop Tracking", callback_data=f"sch:dconf:{t_id}"),
-                    ]
-                )
-        rows_del.append([InlineKeyboardButton("\u2795 Add New Show", callback_data="sch:addnew")])
-        rows_del += bot_app._nav_footer(back_data="menu:schedule", include_home=False)
-        await bot_app._render_nav_ui(
-            user_id,
-            q.message,
-            "\n".join(lines),
-            reply_markup=InlineKeyboardMarkup(rows_del),
-            current_ui_message=q.message,
-        )
+        await _render_my_shows(q.message)
         return
 
     # Command center actions
@@ -2269,76 +2280,175 @@ async def on_cb_movie_schedule(bot_app: Any, *, data: str, q: Any, user_id: int)
         )
         return
 
-    # ------------------------------------------------------------------
-    # msch:list — show all tracked movies for this user
-    # ------------------------------------------------------------------
+    # ---- shared My Movies render helper ----------------------------------------
+
+    async def _render_my_movies(q_message: Any) -> None:
+        """Render (or re-render) the My Movies list using flow state for page/filter."""
+        flow = bot_app._get_flow(user_id) or {}
+        filt = str(flow.get("movies_filter") or "all")
+        page = int(flow.get("movies_page") or 0)
+
+        all_tracks = await asyncio.to_thread(ctx.store.get_movie_tracks_for_user, user_id)
+
+        if not all_tracks:
+            await bot_app._render_nav_ui(
+                user_id,
+                q_message,
+                (
+                    tracked_list_header("My Movies", "\U0001f3ac")
+                    + "\n\nNo movies tracked yet.\nTap <b>Track a Movie</b> to get started."
+                ),
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [InlineKeyboardButton("\u2795 Track a Movie", callback_data="msch:add")],
+                    ]
+                    + bot_app._nav_footer(back_data="menu:schedule", include_home=True)
+                ),
+                current_ui_message=q_message,
+            )
+            return
+
+        # Apply filter
+        if filt == "act":
+            filtered = [t for t in all_tracks if t.get("enabled", 1)]
+        elif filt == "pau":
+            filtered = [t for t in all_tracks if not t.get("enabled", 1)]
+        else:
+            filtered = list(all_tracks)
+
+        # Sort: active by release_date_ts ascending (0 sorts last), paused alphabetical
+        def _sort_key(t: dict) -> tuple:
+            enabled = bool(t.get("enabled", 1))
+            if enabled:
+                ts = int(t.get("release_date_ts") or 0)
+                return (0, ts if ts > 0 else 9999999999, "")
+            return (1, 0, str(t.get("title") or "").lower())
+
+        filtered.sort(key=_sort_key)
+
+        def _label(t: dict) -> str:
+            title = str(t.get("title") or "Unknown")
+            year = t.get("year")
+            year_str = f" ({year})" if year else ""
+            if t.get("enabled", 1):
+                return f"\U0001f3ac {title}{year_str}"
+            return f"\u23f8 {title}{year_str}"
+
+        def _cb(t: dict) -> str:
+            return f"msch:sel:{t['track_id']}"
+
+        header = tracked_list_header("My Movies", "\U0001f3ac")
+        _, total_pages, start, end = tracked_list_page_bounds(filtered, page)
+        visible = filtered[start:end]
+        text = tracked_list_text(header, visible, page, total_pages, movie_track_line)
+
+        kb = tracked_list_keyboard(
+            filtered,
+            page,
+            item_callback_fn=_cb,
+            item_label_fn=_label,
+            filter_current=filt,
+            filter_prefix="msch",
+            nav_prefix="msch",
+            add_callback="msch:add",
+            add_label="\u2795 Track a Movie",
+            back_data="menu:schedule",
+        )
+        await bot_app._render_nav_ui(
+            user_id,
+            q_message,
+            text,
+            reply_markup=kb,
+            current_ui_message=q_message,
+        )
+
+    # ---- per-movie action screen helper ----------------------------------------
+
+    async def _render_movie_action(q_message: Any, tid: str) -> None:
+        """Render the per-movie action screen for a single movie track."""
+        track = await asyncio.to_thread(ctx.store.get_movie_track, tid)
+        if not track or int(track.get("user_id") or 0) != user_id:
+            await bot_app._render_nav_ui(
+                user_id,
+                q_message,
+                "Movie track not found.",
+                reply_markup=bot_app._home_only_keyboard(),
+                current_ui_message=q_message,
+            )
+            return
+        title = str(track.get("title") or "Unknown")
+        year = track.get("year")
+        year_str = f" ({year})" if year else ""
+        enabled = bool(track.get("enabled", 1))
+
+        status_line = movie_track_line(track)
+        text = (
+            f"<b>\U0001f3ac {_h(title)}{_h(year_str)}</b>\n"
+            f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\n"
+            f"{status_line}"
+        )
+        pause_label = "\u25b6\ufe0f Resume" if not enabled else "\u23f8 Pause"
+        kb = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton(pause_label, callback_data=f"msch:pause:{tid}")],
+                [InlineKeyboardButton("\U0001f5d1 Remove Tracking", callback_data=f"msch:rm_ask:{tid}")],
+                [
+                    InlineKeyboardButton("\u2b05\ufe0f Back", callback_data="msch:list"),
+                    InlineKeyboardButton("\U0001f3e0 Home", callback_data="nav:home"),
+                ],
+            ]
+        )
+        await bot_app._render_nav_ui(user_id, q_message, text, reply_markup=kb, current_ui_message=q_message)
+
+    # ---- My Movies callbacks -----------------------------------------------
+
     if data == "msch:list":
-        tracks = await asyncio.to_thread(ctx.store.get_movie_tracks_for_user, user_id)
-        if not tracks:
+        await _render_my_movies(q.message)
+        return
+
+    if data.startswith("msch:f:") and data in ("msch:f:all", "msch:f:act", "msch:f:pau"):
+        key = data.split(":", 2)[2]
+        flow = bot_app._get_flow(user_id) or {}
+        flow["movies_filter"] = key
+        flow["movies_page"] = 0
+        bot_app._set_flow(user_id, flow)
+        await _render_my_movies(q.message)
+        return
+
+    if data.startswith("msch:pg:"):
+        try:
+            new_page = int(data.split(":", 2)[2])
+        except (ValueError, IndexError):
+            new_page = 0
+        flow = bot_app._get_flow(user_id) or {}
+        flow["movies_page"] = new_page
+        bot_app._set_flow(user_id, flow)
+        await _render_my_movies(q.message)
+        return
+
+    if data.startswith("msch:sel:"):
+        tid = data.split(":", 2)[2]
+        await _render_movie_action(q.message, tid)
+        return
+
+    if data.startswith("msch:pause:"):
+        tid = data.split(":", 2)[2]
+        track = await asyncio.to_thread(ctx.store.get_movie_track, tid)
+        if not track or int(track.get("user_id") or 0) != user_id:
             await bot_app._render_nav_ui(
                 user_id,
                 q.message,
-                "<b>\U0001f3ac My Movies</b>\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\nNo movies tracked. Tap below to add one.",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("\u2795 Track a Movie", callback_data="msch:add")]]
-                    + bot_app._nav_footer(back_data="menu:schedule", include_home=False)
-                ),
+                "Movie track not found.",
+                reply_markup=bot_app._home_only_keyboard(),
                 current_ui_message=q.message,
             )
             return
-        lines = [
-            "<b>\U0001f3ac My Movies</b>",
-            "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501",
-        ]
-        rows: list[list[InlineKeyboardButton]] = []
-        for track in tracks:
-            title = str(track.get("title") or "Unknown")
-            year = track.get("year")
-            date_type = str(track.get("release_date_type") or "")
-            release_ts = int(track.get("release_date_ts") or 0)
-            status = str(track.get("status") or "pending")
-            tid = str(track["track_id"])
-            now = now_ts()
-            if status == "downloading":
-                status_line = "\u2b07\ufe0f Downloading"
-            elif status == "done":
-                status_line = "\u2705 Downloaded"
-            else:
-                # Check release gate status
-                rel_status = str(track.get("release_status") or "unknown")
-                home_ts = track.get("home_release_ts")
-                if rel_status == "pre_theatrical":
-                    status_line = "\U0001f3ac Not yet released"
-                elif rel_status == "in_theaters":
-                    if home_ts:
-                        status_line = f"\U0001f3ac In theaters \u00b7 Home est. {_relative_time(int(home_ts))}"
-                    else:
-                        status_line = "\U0001f3ac In theaters"
-                elif rel_status == "waiting_home":
-                    if home_ts:
-                        status_line = f"\u23f3 Waiting \u00b7 Home release {_relative_time(int(home_ts))}"
-                    else:
-                        status_line = "\u23f3 Waiting for home release"
-                elif rel_status == "home_available":
-                    status_line = "\U0001f50d Searching for torrent\u2026"
-                elif rel_status == "unknown" and release_ts > now:
-                    # Fallback for tracks created before release gate feature
-                    label = date_type.capitalize() if date_type else "Release"
-                    status_line = f"\u23f3 Waiting \u2014 {label} {_relative_time(release_ts)}"
-                else:
-                    status_line = "\U0001f50d Searching for torrent\u2026"
-            year_str = f" ({year})" if year else ""
-            lines.append(f"\n<b>{_h(title)}{_h(year_str)}</b>\n   {status_line}")
-            rows.append([InlineKeyboardButton(f"\U0001f5d1 Remove {title}", callback_data=f"msch:rm_ask:{tid}")])
-        rows.append([InlineKeyboardButton("\u2795 Track a Movie", callback_data="msch:add")])
-        rows += bot_app._nav_footer(back_data="menu:schedule", include_home=False)
-        await bot_app._render_nav_ui(
-            user_id,
-            q.message,
-            "\n".join(lines),
-            reply_markup=InlineKeyboardMarkup(rows),
-            current_ui_message=q.message,
-        )
+        new_enabled = not bool(track.get("enabled", 1))
+        await asyncio.to_thread(ctx.store.update_movie_track_status, tid, enabled=new_enabled)
+        title = str(track.get("title") or "Unknown")
+        action = "resumed" if new_enabled else "paused"
+        await q.answer(f"{title} {action}")
+        await _render_movie_action(q.message, tid)
         return
 
     # ------------------------------------------------------------------
@@ -2566,7 +2676,7 @@ async def on_cb_movie_schedule(bot_app: Any, *, data: str, q: Any, user_id: int)
             [
                 [
                     InlineKeyboardButton("\U0001f5d1 Yes, remove", callback_data=f"msch:rm:{track_id}"),
-                    InlineKeyboardButton("\u274c Keep it", callback_data="msch:list"),
+                    InlineKeyboardButton("\u274c Keep it", callback_data=f"msch:sel:{track_id}"),
                 ],
             ]
         )
@@ -2583,73 +2693,7 @@ async def on_cb_movie_schedule(bot_app: Any, *, data: str, q: Any, user_id: int)
             await asyncio.to_thread(ctx.store.delete_movie_track, track_id)
             title = str(track.get("title") or "Unknown")
             await q.answer(f"{title} removed")
-        # Re-render the list
-        tracks = await asyncio.to_thread(ctx.store.get_movie_tracks_for_user, user_id)
-        if not tracks:
-            await bot_app._render_nav_ui(
-                user_id,
-                q.message,
-                "<b>\U0001f3ac My Movies</b>\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\nNo movies tracked. Tap below to add one.",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("\u2795 Track a Movie", callback_data="msch:add")]]
-                    + bot_app._nav_footer(back_data="menu:schedule", include_home=False)
-                ),
-                current_ui_message=q.message,
-            )
-            return
-        lines = [
-            "<b>\U0001f3ac My Movies</b>",
-            "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501",
-        ]
-        rm_rows: list[list[InlineKeyboardButton]] = []
-        now = now_ts()
-        for t in tracks:
-            t_title = str(t.get("title") or "Unknown")
-            t_year = t.get("year")
-            t_dt = str(t.get("release_date_type") or "")
-            t_ts = int(t.get("release_date_ts") or 0)
-            t_status = str(t.get("status") or "pending")
-            t_id = str(t["track_id"])
-            if t_status == "downloading":
-                t_status_line = "\u2b07\ufe0f Downloading"
-            elif t_status == "done":
-                t_status_line = "\u2705 Downloaded"
-            else:
-                # Check release gate status
-                t_rel_status = str(t.get("release_status") or "unknown")
-                t_home_ts = t.get("home_release_ts")
-                if t_rel_status == "pre_theatrical":
-                    t_status_line = "\U0001f3ac Not yet released"
-                elif t_rel_status == "in_theaters":
-                    if t_home_ts:
-                        t_status_line = f"\U0001f3ac In theaters \u00b7 Home est. {_relative_time(int(t_home_ts))}"
-                    else:
-                        t_status_line = "\U0001f3ac In theaters"
-                elif t_rel_status == "waiting_home":
-                    if t_home_ts:
-                        t_status_line = f"\u23f3 Waiting \u00b7 Home release {_relative_time(int(t_home_ts))}"
-                    else:
-                        t_status_line = "\u23f3 Waiting for home release"
-                elif t_rel_status == "home_available":
-                    t_status_line = "\U0001f50d Searching for torrent\u2026"
-                elif t_rel_status == "unknown" and t_ts > now:
-                    # Fallback for tracks created before release gate feature
-                    t_label = t_dt.capitalize() if t_dt else "Release"
-                    t_status_line = f"\u23f3 Waiting \u2014 {t_label} {_relative_time(t_ts)}"
-                else:
-                    t_status_line = "\U0001f50d Searching for torrent\u2026"
-            t_year_str = f" ({t_year})" if t_year else ""
-            lines.append(f"\n<b>{_h(t_title)}{_h(t_year_str)}</b>\n   {t_status_line}")
-            rm_rows.append([InlineKeyboardButton(f"\U0001f5d1 Remove {t_title}", callback_data=f"msch:rm_ask:{t_id}")])
-        rm_rows.append([InlineKeyboardButton("\u2795 Track a Movie", callback_data="msch:add")])
-        rm_rows += bot_app._nav_footer(back_data="menu:schedule", include_home=False)
-        await bot_app._render_nav_ui(
-            user_id,
-            q.message,
-            "\n".join(lines),
-            reply_markup=InlineKeyboardMarkup(rm_rows),
-            current_ui_message=q.message,
-        )
+        await _render_my_movies(q.message)
         return
 
 
