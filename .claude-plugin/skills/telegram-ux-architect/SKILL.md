@@ -1,6 +1,6 @@
 ---
 name: telegram-ux-architect
-description: Decides where each interaction lives (bot chat vs. Mini App) and how to structure it for minimum friction. Invoke this skill whenever you're designing a new feature, refactoring a flow, planning onboarding, debating whether to build a Mini App screen, simplifying a messy settings menu, reducing the number of messages a user has to see, or choosing between keyboard types. Even if the user just says "add X to the bot" or "this flow is confusing", run this skill before touching any code — getting the architecture right first saves expensive rewrites.
+description: Decide where a Telegram interaction belongs and how the flow should be structured before implementation. Use for new features, major flow refactors, onboarding/menu architecture, or chat-vs-Mini-App decisions. Do not use for copy-only tweaks, button wording, or small keyboard cleanup; that is `telegram-chat-polisher`.
 ---
 
 # Telegram UX Architect

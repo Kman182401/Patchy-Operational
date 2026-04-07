@@ -1,6 +1,6 @@
 ---
 name: telegram-chat-polisher
-description: Refines Telegram bot chat UI — message text, button labels, keyboard layouts, and navigation flows. Invoke this skill when writing or reviewing /start, search results, settings menus, inline keyboards, confirmation prompts, status messages, or any message a user reads and taps. Also invoke it when a flow currently sends multiple sequential messages and could be a single editable keyboard, when button labels are too long or vague, or when a menu has too many competing options. Even if the user says "clean up the messages" or "the buttons are confusing" or "improve /start", invoke this skill first.
+description: Refine Telegram chat copy and presentation after the flow structure is known. Use for message text, button labels, keyboard layout polish, editable-message cleanup, and menu wording. Do not use for backend-only work or for deciding whether a flow belongs in chat versus a larger surface; that is `telegram-ux-architect`.
 ---
 
 # Telegram Chat Polisher

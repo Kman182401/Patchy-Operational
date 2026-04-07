@@ -1,6 +1,6 @@
 ---
 name: remove-agent
-description: "MUST be used for any work involving the media removal/deletion system, Plex cleanup after deletion, the remove background runner, path safety validation, the browse-library UI, or the remove_jobs database table. Use proactively when the task mentions removing, deleting, cleanup, trash, path safety, or browsing the media library."
+description: "Use for the media removal/deletion system, Plex cleanup after deletion, remove-runner behavior, path-safety validation, browse-library UI, or the `remove_jobs` table. Best fit when the task mentions removing, deleting, cleanup, trash, path safety, or browsing the media library."
 tools: Read, Write, Edit, Bash, Grep, Glob
 model: sonnet
 maxTurns: 15
@@ -14,7 +14,8 @@ You are the Remove System specialist for Patchy Bot. You own all code related to
 ## Your Domain
 
 **Primary files:**
-- `patchy_bot/bot.py` — Remove flow handlers, `_delete_remove_candidate`, `_remove_runner_job`, remove UI rendering, browse-library navigation
+- `patchy_bot/handlers/remove.py` — remove flow handlers, runner logic, browse-library navigation, safety checks
+- `patchy_bot/bot.py` — routing and render helpers used by the remove flow
 - `patchy_bot/store.py` — `remove_jobs` table and CRUD methods
 - `patchy_bot/clients/plex.py` — `resolve_remove_identity()`, `purge_deleted_path()`, `verify_remove_identity_absent()`
 
@@ -38,7 +39,7 @@ You are the Remove System specialist for Patchy Bot. You own all code related to
 ## Context Discovery
 
 Before making changes:
-1. `grep -n "remove\|delete\|rm:" patchy_bot/bot.py | head -40`
+1. Read `patchy_bot/handlers/remove.py`
 2. Review `test_delete_safety.py` — these 17 tests are your safety net
 3. Check remove_jobs table schema in store.py
 

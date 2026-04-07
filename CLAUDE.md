@@ -1,131 +1,75 @@
-# Patchy Bot — Project Intelligence
+# Patchy Bot — Claude Code Project Memory
 
-## Git Policy — ~/Patchy_Bot
-MUST NOT run any git-write commands (add, commit, push, reset, rebase, merge, branch create/delete, tag, stash) in ~/Patchy_Bot unless the user explicitly requests it in the current message. Read-only git commands (status, log, diff, show, remote -v) are always allowed. Editing files is allowed — committing them is not.
+## Git Policy
 
-## System Overview
+Do not run git write commands in `/home/karson/Patchy_Bot` unless the user explicitly asks in the current message. Read-only git commands are fine. File edits are fine.
 
-Patchy Bot is a Telegram bot managing qBittorrent downloads and Plex media library operations. It runs as a systemd service (`telegram-qbt-bot.service`) via `python -m patchy_bot` from a venv at `.venv/`. Python 3.12+, SQLite (WAL mode) for persistence, async via python-telegram-bot polling.
+## Source Of Truth
 
-## Package Map
+- Prefer code over docs when they disagree.
+- Most runtime code lives in [`telegram-qbt/`](/home/karson/Patchy_Bot/telegram-qbt).
+- Repo-root `.claude/`, `.claude-plugin/`, and `skills/` define Claude Code behavior for this project.
 
-    patchy_bot/
-      __main__.py          # Entry: logging → Config → BotApp → polling
-      bot.py               # BotApp: ALL handlers, callbacks, runners (~6,671 lines — refactor target)
-      config.py            # @dataclass, 45 env vars via Config.from_env()
-      store.py             # SQLite: 11 tables, 24+ CRUD methods, WAL mode
-      utils.py             # Pure functions, constants, episode parsing
-      rate_limiter.py      # Per-user sliding-window rate limiter
-      logging_config.py    # JSON log formatter for journalctl
-      clients/
-        qbittorrent.py     # QBClient: qBT WebUI API v2 wrapper (thread-safe)
-        llm.py             # PatchyLLMClient: OpenAI-compat with model fallback
-        tv_metadata.py     # TVMetadataClient: TVMaze + TMDB
-        plex.py            # PlexInventoryClient: Plex XML API ops
+## Runtime Map
 
-    Supporting:
-      plex_organizer.py    # Moves downloads → Plex folder structure
-      qbt_telegram_bot.py  # Backward-compat shim (tests import from here)
+- Entry point: [`telegram-qbt/patchy_bot/__main__.py`](/home/karson/Patchy_Bot/telegram-qbt/patchy_bot/__main__.py)
+- Config and startup: [`telegram-qbt/patchy_bot/config.py`](/home/karson/Patchy_Bot/telegram-qbt/patchy_bot/config.py), [`telegram-qbt/telegram-qbt-bot.service`](/home/karson/Patchy_Bot/telegram-qbt/telegram-qbt-bot.service)
+- Persistence: [`telegram-qbt/patchy_bot/store.py`](/home/karson/Patchy_Bot/telegram-qbt/patchy_bot/store.py)
+- Domain handlers: [`telegram-qbt/patchy_bot/handlers/`](/home/karson/Patchy_Bot/telegram-qbt/patchy_bot/handlers)
+- Telegram UI helpers: [`telegram-qbt/patchy_bot/ui/`](/home/karson/Patchy_Bot/telegram-qbt/patchy_bot/ui)
+- Clients: [`telegram-qbt/patchy_bot/clients/`](/home/karson/Patchy_Bot/telegram-qbt/patchy_bot/clients)
+- Back-compat test shim: [`telegram-qbt/qbt_telegram_bot.py`](/home/karson/Patchy_Bot/telegram-qbt/qbt_telegram_bot.py)
 
-    tests/
-      test_parsing.py          # 122+ tests, primary suite
-      test_delete_safety.py    # 17 path-safety tests
-      test_auth_ratelimit.py   # 19 auth/rate-limit tests
+## Skill Policy
 
-## Domain Boundaries in bot.py
+Use project-local skills selectively. Do not load the giant `skills/global/` library by default; treat it as reference-only unless the task clearly needs something the project-local skills do not cover.
 
-bot.py is monolithic. These are the logical domains and their approximate line ranges:
+### Default workflow guards
 
-- **Auth system:** Allowlist check → rate limiting → password gate → brute-force protection → session TTL
-- **Text input router (`on_text`):** Auth gate → active flow dispatch → quick shortcuts → prefixed searches → intent extraction → fallback
-- **Callback router (`on_callback`):** 53+ prefixes via if/elif chain (nav:, a:, d:, p:, menu:, flow:, sch:, rm:, stop:)
-- **Schedule system:** TVMaze lookup → season selection → Plex inventory probe → episode tracking → background runner (120s interval) → smart next-check scheduling → auto-download with episode ranking
-- **Remove system:** Fuzzy search / browse → multi-select → safety checks (path traversal, symlink, depth) → disk delete → qBT cleanup → Plex cleanup with retry
-- **Download tracking:** Per-download progress tasks → pending monitors → completion poller (60s) → Plex organize + scan
-- **Command Center:** Single-message edit pattern, per-user refresh loop (5s), persisted message location
-- **UI patterns:** All flows use `user_flow[uid]` dict with `mode` and `stage` keys
+Use these automatically when beneficial:
 
-## State Management
+- `scope-guard` for multi-step work, refactors, migrations, and before saying work is done.
+- `reuse-check` before creating helpers, wrappers, abstractions, utilities, or new dependencies.
+- `assumptions-audit` during planning, unfamiliar code, architecture choices, and external-system work.
+- `diff-review` before handoff, commit, PR, or any “done” claim.
 
-| Storage | Scope | Survives restart? |
-|---------|-------|-------------------|
-| `user_flow` | Per-user modal state | No |
-| `user_nav_ui` | Command center message ref | Yes (DB-backed) |
-| `progress_tasks` | Download monitor asyncio Tasks | No |
-| `chat_history` | LRU-bounded LLM history | No |
-| `schedule_source_state` | Metadata/inventory health | No |
-| SQLite `Store` | Everything persistent | Yes |
+### Conditional project skills
 
-## Coding Conventions
+Use these when the task matches:
 
-- HTML parse mode for all Telegram messages; escape with `_h(text)`
-- Callback data format: `prefix:param1:param2` (colon-delimited)
-- New flows MUST use `user_flow[uid]` with `mode` and `stage`
-- New callbacks MUST use namespaced prefixes (e.g., `myfeature:action`)
-- Episode codes: `S01E02` format via `episode_code(season, episode)`
-- Size display: `human_size(bytes)` and `parse_size_to_bytes("1.5 GiB")`
-- Time: `now_ts()` for UNIX timestamps, `_relative_time(ts)` for display
-- HTTP: `build_requests_session()` with retry/backoff on 429/5xx
-- Torrent quality: `quality_tier(name)` returns 2160/1080/720/480/0
+- `telegram-ux-architect` before major Telegram flow design or structural UX changes.
+- `telegram-chat-polisher` when editing user-facing message text, button labels, keyboard layout, or chat navigation wording.
+- `env-check` for env vars, startup config, deployment config, service assumptions, or integration enablement.
+- `test-bot` after Python or test changes when a full verification pass is warranted.
+- `restart` after runtime/config/service changes when applying them locally is appropriate.
+- `check-logs` for runtime diagnosis, restart failures, crashes, warnings, or “what happened?” questions.
+- `db-inspect` for live SQLite state, schema reality, or persistence debugging.
+- `debug-schedule` for schedule runner, due-track, metadata, or auto-download debugging.
+- `sync-parity` after search/add-flow/UI changes that should stay aligned across movie and TV paths.
 
-## Testing Patterns
+### Manual only
 
-- Run: `.venv/bin/python -m pytest tests/ -q`
-- Mocks: DummyBot, DummyStore in test files
-- Time mocking: `monkeypatch` on `patchy_bot.bot.now_ts`
-- Sleep bypass: `monkeypatch` on `patchy_bot.clients.plex.time.sleep`
-- HTTP mocking: FakeSession class
-- Tests import from `qbt_telegram_bot` (backward-compat shim) — do NOT break this
+- `gh-issues-auto-fixer` is manual-only. Never invoke it automatically.
 
-## Safety Rules
+## Agent Routing
 
-- NEVER read `.env` or secrets files unless explicitly needed
-- Path operations MUST pass traversal guard, symlink rejection, depth validation
-- Media paths cannot resolve to system-critical directories (/, /etc, /var, etc.)
-- VPN interface name must match: `^[a-zA-Z0-9_-]+$`
-- SQLite file permissions: owner-only 0o600
-- qBT client is thread-safe via threading.Lock() — preserve this
-- Path containment checks MUST use `PurePosixPath.is_relative_to()`, never `str.startswith()` with `os.sep`
-- File move operations MUST use try/except for `FileExistsError`, never check-then-move (TOCTOU race)
+Use project agents when the task naturally fits their domain. Do not force subagents for trivial edits.
 
-## Service Operations
+- `config-infra-agent`: config, `.env.example`, startup, service, logs, deployment.
+- `database-agent`: `store.py`, schema, migrations, live DB inspection.
+- `schedule-agent`: `handlers/schedule.py`, TV tracking, runner status, metadata flow.
+- `search-download-agent`: search, add/download flow, qBittorrent, progress/completion tracking.
+- `plex-agent`: Plex integration and organizer behavior.
+- `remove-agent`: deletion flow, safety checks, Plex cleanup after delete.
+- `ui-agent`: Telegram message rendering, keyboards, callbacks, navigation.
+- `test-agent`: tests, pytest failures, coverage, test utilities.
+- `security-agent`: auth, rate limits, path safety, validation, security review.
+- `taskmaster-sync-agent`: only when the user wants Task Master kept in sync.
 
-- Service: `sudo systemctl restart telegram-qbt-bot.service`
-- Logs: `journalctl -u telegram-qbt-bot.service -f`
-- DB: `state.sqlite3` in working directory (WAL mode, busy_timeout=5000)
-- Backup: `Store.backup()` — SQLite online backup API, 7 rotations
-- Dependencies: network-online.target, qbittorrent.service, tailscaled.service
+## Working Rules
 
-## Phase 2 Refactor Targets
-
-The BotApp class at ~6,671 lines is the primary decomposition target:
-1. Split callback router → domain-specific handlers with prefix dispatcher
-2. Extract handler modules → handlers/search.py, handlers/schedule.py, handlers/remove.py, handlers/commands.py
-3. Extract UI builders → All _*_keyboard() and _*_text() methods into ui/ modules
-4. Re-enable Patchy chat → Remove hardcoded disable, configure LLM provider
-5. Add pytest config → [tool.pytest.ini_options] in pyproject.toml
-
-## Subagent Routing
-
-Claude Code has 9 custom subagents in `.claude/agents/`. Use them proactively:
-- **schedule-agent** — Episode tracking, TVMaze, auto-download, schedule runner logic
-- **remove-agent** — Deletion flows, path safety, Plex cleanup, remove runner
-- **search-download-agent** — Torrent search, download initiation, progress tracking
-- **plex-agent** — Plex inventory, media organization, library refresh, PlexInventoryClient
-- **config-infra-agent** — Config, env vars, startup sequence, service management
-- **database-agent** — SQLite store, schema, migrations, CRUD methods, backup
-- **ui-agent** — Telegram keyboards, message rendering, callback routing, flow UI
-- **test-agent** — Writing/running tests, mocking patterns, coverage
-- **security-agent** — Auth system, rate limiting, path safety, input validation, secrets
-  - For Patchy Bot security reviews, use project `security-agent` (has domain-specific context for auth, path safety, rate limiting).
-  - User-level `security-auditor` is for cross-project or generic security audits not specific to Patchy Bot.
-
-## Subagent-Driven Development (Mandatory)
-
-ALL work MUST use the subagent-driven-development workflow (superpowers skill). Use project subagents above as implementers. One subagent at a time, two-stage review (spec then quality) after each task. Never implement inline. Model selection: haiku (1-2 files), sonnet (multi-file), opus (design/review).
-
-## Task Master
-
-Use Task Master for all task tracking. Run `task-master list` at session start. Prefer CLI over MCP tools. Full reference: `.taskmaster/CLAUDE.md`.
-
-@./.taskmaster/CLAUDE.md
+- Keep instructions concise and operational.
+- Do not promote every skill into always-on context.
+- Prefer the project-local skill when it overlaps a generic/global one.
+- For Python changes in `telegram-qbt/`, run `pytest -q` from that project when tests cover the touched area.
+- Keep `qbt_telegram_bot.py` import compatibility intact unless the user explicitly wants it changed.

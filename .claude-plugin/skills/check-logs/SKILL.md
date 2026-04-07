@@ -1,6 +1,6 @@
 ---
 name: check-logs
-description: Read and filter recent Patchy Bot service logs from journalctl. Use when the user says "check logs", "show logs", "bot logs", "what happened", "any errors", "why did it crash", or when diagnosing any bot runtime issue.
+description: Inspect recent Patchy Bot service logs and summarize what matters. Use for runtime diagnosis, restart failures, crashes, warnings, slowdowns, or “what happened?” questions. Do not use for purely static code review.
 ---
 
 # Bot Log Inspector
@@ -14,7 +14,7 @@ Service name: `telegram-qbt-bot.service`
 This skill delegates to the following agents during execution. Always use these agents — do not implement inline what an agent can handle.
 
 - **Primary:** Delegate log retrieval and service status checks to the `config-infra-agent` (sequential with review).
-- **On failure:** If logs reveal errors or crashes, delegate root cause diagnosis to the `error-detective` agent with the relevant log excerpt.
+- **On domain-specific errors:** Route the finding to the relevant project agent after extracting the key log evidence.
 
 ## Step 1 — Pull recent logs
 

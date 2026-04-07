@@ -1,11 +1,11 @@
 ---
 name: db-inspect
-description: Query and summarize the Patchy Bot SQLite database state. Use when the user says "db inspect", "check database", "show db", "database state", "what's in the db", "check state", or needs to understand what the bot's persistence layer currently holds.
+description: Query and summarize the live Patchy Bot SQLite database state. Use for schema reality, persistent-state debugging, or “what is in the DB right now?” questions. Trigger automatically when DB state is central to the task; do not use for code-only refactors.
 ---
 
 # Database State Inspector
 
-Query the bot's SQLite database and present a clean, human-readable summary of all tables.
+Query the bot's SQLite database and present a clean, human-readable summary of the actual current schema and table contents.
 
 Database path: `/home/karson/Patchy_Bot/telegram-qbt/state.sqlite3`
 
@@ -15,27 +15,39 @@ This skill delegates to the following agents during execution. Always use these 
 
 - **Primary:** Delegate all database queries, anomaly detection, and schema inspection to the `database-agent`.
 
+Use Python's stdlib `sqlite3` module so this skill works even when the `sqlite3` CLI is not installed.
+
 ## Step 1 — Get table overview
 
 ```bash
-cd /home/karson/Patchy_Bot/telegram-qbt && sqlite3 state.sqlite3 -header -column \
-  "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name;"
+cd /home/karson/Patchy_Bot/telegram-qbt && python - <<'PY'
+import sqlite3
+conn = sqlite3.connect("state.sqlite3")
+for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"):
+    print(name)
+PY
 ```
 
-## Step 2 — Get row counts for all tables
+## Step 2 — Get row counts for the live tables
 
 ```bash
-cd /home/karson/Patchy_Bot/telegram-qbt && sqlite3 state.sqlite3 \
-  "SELECT 'searches', COUNT(*) FROM searches UNION ALL \
-   SELECT 'results', COUNT(*) FROM results UNION ALL \
-   SELECT 'user_defaults', COUNT(*) FROM user_defaults UNION ALL \
-   SELECT 'user_auth', COUNT(*) FROM user_auth UNION ALL \
-   SELECT 'auth_attempts', COUNT(*) FROM auth_attempts UNION ALL \
-   SELECT 'schedule_tracks', COUNT(*) FROM schedule_tracks UNION ALL \
-   SELECT 'schedule_runner_status', COUNT(*) FROM schedule_runner_status UNION ALL \
-   SELECT 'schedule_pending', COUNT(*) FROM schedule_pending UNION ALL \
-   SELECT 'schedule_show_cache', COUNT(*) FROM schedule_show_cache UNION ALL \
-   SELECT 'plex_remove_jobs', COUNT(*) FROM plex_remove_jobs;"
+cd /home/karson/Patchy_Bot/telegram-qbt && python - <<'PY'
+import sqlite3
+conn = sqlite3.connect("state.sqlite3")
+tables = [
+    "searches", "results", "user_defaults", "user_auth", "auth_attempts",
+    "schedule_tracks", "schedule_runner_status", "schedule_show_cache",
+    "remove_jobs", "notified_completions", "download_health_events",
+    "movie_tracks", "command_center_ui", "pending_downloads",
+    "notification_outbox", "active_trackers",
+]
+for table in tables:
+    try:
+        count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        print(f"{table}\t{count}")
+    except sqlite3.OperationalError:
+        pass
+PY
 ```
 
 ## Step 3 — Show recent data for active tables
@@ -44,38 +56,62 @@ Only query tables that have rows. For each non-empty table, show the most recent
 
 ### searches (recent 5)
 ```bash
-sqlite3 state.sqlite3 -header -column \
-  "SELECT search_id, user_id, query, datetime(created_at, 'unixepoch') as created FROM searches ORDER BY created_at DESC LIMIT 5;"
+python - <<'PY'
+import sqlite3
+conn = sqlite3.connect("state.sqlite3")
+for row in conn.execute("SELECT search_id, user_id, query, datetime(created_at, 'unixepoch') FROM searches ORDER BY created_at DESC LIMIT 5"):
+    print(row)
+PY
 ```
 
 ### results (count per search)
 ```bash
-sqlite3 state.sqlite3 -header -column \
-  "SELECT search_id, COUNT(*) as result_count FROM results GROUP BY search_id ORDER BY search_id DESC LIMIT 5;"
+python - <<'PY'
+import sqlite3
+conn = sqlite3.connect("state.sqlite3")
+for row in conn.execute("SELECT search_id, COUNT(*) FROM results GROUP BY search_id ORDER BY search_id DESC LIMIT 5"):
+    print(row)
+PY
 ```
 
 ### user_auth (all entries)
 ```bash
-sqlite3 state.sqlite3 -header -column \
-  "SELECT user_id, datetime(unlocked_until, 'unixepoch') as unlocked_until, datetime(updated_at, 'unixepoch') as updated FROM user_auth;"
+python - <<'PY'
+import sqlite3
+conn = sqlite3.connect("state.sqlite3")
+for row in conn.execute("SELECT user_id, datetime(unlocked_until, 'unixepoch'), datetime(updated_at, 'unixepoch') FROM user_auth"):
+    print(row)
+PY
 ```
 
 ### auth_attempts (all entries)
 ```bash
-sqlite3 state.sqlite3 -header -column \
-  "SELECT user_id, fail_count, datetime(first_fail_at, 'unixepoch') as first_fail, datetime(locked_until, 'unixepoch') as locked_until FROM auth_attempts;"
+python - <<'PY'
+import sqlite3
+conn = sqlite3.connect("state.sqlite3")
+for row in conn.execute("SELECT user_id, fail_count, datetime(first_fail_at, 'unixepoch'), datetime(locked_until, 'unixepoch') FROM auth_attempts"):
+    print(row)
+PY
 ```
 
 ### schedule_tracks (all entries)
 ```bash
-sqlite3 state.sqlite3 -header -column \
-  "SELECT track_id, show_name, season, enabled, datetime(next_check_at, 'unixepoch') as next_check FROM schedule_tracks;"
+python - <<'PY'
+import sqlite3
+conn = sqlite3.connect("state.sqlite3")
+for row in conn.execute("SELECT track_id, show_name, season, enabled, datetime(next_check_at, 'unixepoch') FROM schedule_tracks"):
+    print(row)
+PY
 ```
 
-### plex_remove_jobs (recent 5)
+### remove_jobs (recent 5)
 ```bash
-sqlite3 state.sqlite3 -header -column \
-  "SELECT * FROM plex_remove_jobs ORDER BY rowid DESC LIMIT 5;"
+python - <<'PY'
+import sqlite3
+conn = sqlite3.connect("state.sqlite3")
+for row in conn.execute("SELECT job_id, item_name, remove_kind, status, retry_count, datetime(updated_at, 'unixepoch') FROM remove_jobs ORDER BY updated_at DESC LIMIT 5"):
+    print(row)
+PY
 ```
 
 ## Step 4 — Check for anomalies
@@ -84,15 +120,24 @@ Look for:
 - **Orphaned results**: results whose search_id doesn't exist in searches
 - **Stale searches**: searches older than 24 hours (should be auto-cleaned)
 - **Locked users**: auth_attempts with locked_until in the future
-- **Stale pending**: schedule_pending entries older than 48 hours
+- **Stale schedule pending state**: schedule tracks whose `pending_json` is still populated long after `next_check_at`
 - **Expired cache**: schedule_show_cache entries past their expires_at
+- **Retrying remove jobs**: `remove_jobs` rows stuck in retry states
 
 ```bash
-sqlite3 state.sqlite3 \
-  "SELECT 'orphaned_results', COUNT(*) FROM results WHERE search_id NOT IN (SELECT search_id FROM searches) UNION ALL \
-   SELECT 'stale_searches', COUNT(*) FROM searches WHERE created_at < unixepoch('now', '-1 day') UNION ALL \
-   SELECT 'locked_users', COUNT(*) FROM auth_attempts WHERE locked_until > unixepoch('now') UNION ALL \
-   SELECT 'expired_cache', COUNT(*) FROM schedule_show_cache WHERE expires_at < unixepoch('now');"
+python - <<'PY'
+import sqlite3
+conn = sqlite3.connect("state.sqlite3")
+queries = {
+    "orphaned_results": "SELECT COUNT(*) FROM results WHERE search_id NOT IN (SELECT search_id FROM searches)",
+    "stale_searches": "SELECT COUNT(*) FROM searches WHERE created_at < unixepoch('now', '-1 day')",
+    "locked_users": "SELECT COUNT(*) FROM auth_attempts WHERE locked_until > unixepoch('now')",
+    "expired_cache": "SELECT COUNT(*) FROM schedule_show_cache WHERE expires_at < unixepoch('now')",
+    "remove_jobs_retrying": "SELECT COUNT(*) FROM remove_jobs WHERE status IN ('plex_pending', 'retry', 'failed')",
+}
+for name, query in queries.items():
+    print(name, conn.execute(query).fetchone()[0])
+PY
 ```
 
 ## Report format
@@ -105,7 +150,7 @@ sqlite3 state.sqlite3 \
 | ... | ... | ... |
 
 ### Recent Activity
-Show the recent searches and their result counts.
+Show the recent searches, active schedule tracks, and recent remove jobs when those tables are non-empty.
 
 ### Anomalies
 List any issues found, or "None — database is clean."

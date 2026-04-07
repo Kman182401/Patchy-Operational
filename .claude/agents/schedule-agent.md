@@ -1,6 +1,6 @@
 ---
 name: schedule-agent
-description: "MUST be used for any work involving TV show episode tracking, the schedule system, TVMaze/TMDB metadata, auto-download logic, the schedule background runner, episode ranking, or the schedule_tracks/schedule_show_cache/schedule_runner_status database tables. Use proactively when the task mentions scheduling, episodes, tracking, seasons, air dates, or show metadata."
+description: "Use for TV show episode tracking, the schedule system, TVMaze/TMDB metadata, auto-download logic, schedule runner behavior, or schedule-related DB state. Best fit when the task mentions scheduling, episodes, tracking, seasons, air dates, metadata, or due-track behavior."
 tools: Read, Write, Edit, Bash, Grep, Glob
 model: sonnet
 maxTurns: 15
@@ -14,7 +14,8 @@ You are the Schedule System specialist for Patchy Bot. You own all code related 
 ## Your Domain
 
 **Primary files:**
-- `patchy_bot/bot.py` — Schedule flow handlers, `_schedule_runner_job`, `_schedule_next_check_at`, `_schedule_episode_rank_key`, schedule UI rendering
+- `patchy_bot/handlers/schedule.py` — main schedule flow, runner logic, metadata reconciliation, auto-acquire
+- `patchy_bot/bot.py` — runner wiring and bootstrap
 - `patchy_bot/store.py` — `schedule_tracks`, `schedule_show_cache`, `schedule_runner_status` tables and all `*schedule*` CRUD methods
 - `patchy_bot/clients/tv_metadata.py` — TVMetadataClient (TVMaze + TMDB APIs)
 
@@ -30,12 +31,13 @@ You are the Schedule System specialist for Patchy Bot. You own all code related 
 - Episode ranking: exact title match (+6), quality tier, seed count, size, direct link
 - Source health tracking: consecutive failures → exponential backoff (60s–4h) → fallback to filesystem if Plex unhealthy
 - Plex inventory probe: checks which episodes already exist before downloading
-- All schedule state persists through `Store` — ephemeral state in `user_flow[uid]` with `mode='schedule'`
+- Pending episode state lives in `schedule_tracks.pending_json`, not a separate `schedule_pending` table
+- All schedule state persists through `Store` — ephemeral UI state lives in `user_flow[uid]` with `mode='schedule'`
 
 ## Context Discovery
 
 Before making changes, always check:
-1. `grep -n "schedule" patchy_bot/bot.py | head -40` to locate schedule code
+1. Read `patchy_bot/handlers/schedule.py`
 2. `grep -n "schedule" patchy_bot/store.py` for database methods
 3. The schedule_tracks table schema in store.py
 4. Existing tests: `grep -rn "schedule" tests/`

@@ -1,6 +1,6 @@
 ---
 name: env-check
-description: Validate the Patchy Bot .env configuration for completeness and consistency. Use when the user says "check env", "validate config", "env check", "check environment", "config issue", or before first startup after config changes.
+description: Validate Patchy Bot environment and startup configuration without exposing secrets. Use when env vars, `.env.example`, startup config, service assumptions, or integration enablement are involved. Trigger automatically for env/config/startup work; do not use for unrelated code-only edits.
 ---
 
 # Environment Configuration Validator
@@ -15,7 +15,7 @@ This skill delegates to the following agents during execution. Always use these 
 
 ## Step 1 — Read the config schema
 
-Read the Pydantic config model to understand all expected variables:
+Read the config model to understand all expected variables:
 
 ```
 /home/karson/Patchy_Bot/telegram-qbt/patchy_bot/config.py
@@ -33,7 +33,7 @@ This shows the expected variable names and example values.
 
 ## Step 3 — Check which variables are actually set
 
-Do NOT read or display the .env file directly (it contains secrets). Instead, check which variables are present and non-empty by reading config.py to understand the Pydantic model fields and their defaults.
+Do NOT print `.env` contents or secret values. Use the config loader and report only boolean/status information.
 
 Then verify the runtime config loads correctly:
 
@@ -41,15 +41,16 @@ Then verify the runtime config loads correctly:
 cd /home/karson/Patchy_Bot/telegram-qbt && .venv/bin/python -c "
 from patchy_bot.config import Config
 try:
-    cfg = Config()
+    cfg = Config.from_env()
     print('CONFIG_LOAD: OK')
     # Print which optional integrations are active (without values)
     print(f'PLEX_CONFIGURED: {bool(cfg.plex_base_url and cfg.plex_token)}')
     print(f'TMDB_CONFIGURED: {bool(cfg.tmdb_api_key)}')
-    print(f'VPN_REQUIRED: {cfg.require_vpn_for_downloads}')
-    print(f'PASSWORD_AUTH: {bool(cfg.bot_access_password)}')
-    print(f'PATCHY_CHAT: {bool(cfg.patchy_llm_base_url)}')
-    print(f'ALLOWED_USERS: {len(cfg.allowed_telegram_user_ids)} configured')
+    print(f'VPN_REQUIRED: {cfg.vpn_required_for_downloads}')
+    print(f'PASSWORD_AUTH: {bool(cfg.access_password)}')
+    print(f'PATCHY_CHAT_ENABLED: {cfg.patchy_chat_enabled}')
+    print(f'PATCHY_LLM_CONFIGURED: {bool(cfg.patchy_llm_base_url and cfg.patchy_llm_api_key)}')
+    print(f'ALLOWED_USERS: {len(cfg.allowed_user_ids)} configured')
     print(f'QBT_URL: {\"set\" if cfg.qbt_base_url else \"MISSING\"}')
     print(f'MOVIES_CAT: {cfg.movies_category or \"not set\"}')
     print(f'TV_CAT: {cfg.tv_category or \"not set\"}')
@@ -64,18 +65,20 @@ Based on the config load results, flag these common problems:
 
 ### Required variables
 - `TELEGRAM_BOT_TOKEN` — must be set, bot cannot start without it
-- `ALLOWED_TELEGRAM_USER_IDS` — must have at least one user ID
-- `QBT_BASE_URL` — must be set for core functionality
+- `ALLOWED_TELEGRAM_USER_IDS` — must include at least one user ID
+- `DB_PATH` — should point at a writable SQLite path for the service user
 
 ### Integration consistency (both or neither)
 - **Plex**: `PLEX_BASE_URL` + `PLEX_TOKEN` — both must be set if either is
 - **VPN**: `REQUIRE_VPN_FOR_DOWNLOADS` + `VPN_SERVICE_NAME` + `VPN_INTERFACE_NAME` — if VPN is required, the service and interface must be configured
-- **Password auth**: `BOT_ACCESS_PASSWORD` should have `AUTH_MODE` set appropriately
-- **Patchy Chat**: `PATCHY_LLM_BASE_URL` + `PATCHY_LLM_API_KEY` — both needed for chat mode
+- **Password auth**: `BOT_ACCESS_PASSWORD` enables the password gate by itself; there is no separate `AUTH_MODE`
+- **Patchy Chat override**: `PATCHY_LLM_BASE_URL` + `PATCHY_LLM_API_KEY` should be set together when overriding auto-discovery
 
 ### Category routing
 - `MOVIES_CATEGORY` and `TV_CATEGORY` should be set for smart routing
 - `MOVIES_PATH` and `TV_PATH` should point to valid directories if set
+- `SPAM_CATEGORY` and `SPAM_PATH` should stay aligned if spam routing is used
+- `REQUIRE_NVME_MOUNT=true` means `NVME_MOUNT_PATH` must be valid on the host
 
 ## Report format
 

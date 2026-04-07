@@ -10,7 +10,13 @@
       "Bash(git log:*)",
       "Bash(git show:*)",
       "Bash(git remote:*)",
-      "Bash(.venv/bin/python -m pytest:*)"
+      "Bash(.venv/bin/python -m pytest:*)",
+      "Bash(.venv/bin/python -m ruff:*)",
+      "Bash(.venv/bin/python -m mypy:*)",
+      "Bash(systemctl status:*)",
+      "Bash(systemctl is-active:*)",
+      "Bash(systemctl cat:*)",
+      "Bash(journalctl:*)"
     ],
     "deny": ["Read(./.env)", "Read(./.env.*)", "Read(./secrets/**)"]
   },

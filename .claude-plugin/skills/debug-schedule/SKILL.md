@@ -1,6 +1,6 @@
 ---
 name: debug-schedule
-description: Diagnose TV show schedule issues by inspecting database state, runner status, and pending episodes. Use when the user says "debug schedule", "schedule not working", "show not downloading", "check schedule", "schedule status", or reports any issue with TV show auto-tracking.
+description: Diagnose Patchy's schedule runner and TV auto-tracking state. Use when schedule checks, due tracks, metadata refresh, or episode auto-download behavior looks wrong. Trigger automatically for schedule-specific debugging; do not use for unrelated DB inspection.
 ---
 
 # TV Schedule Diagnostics
@@ -14,32 +14,64 @@ This skill delegates to the following agents during execution. Always use these 
 - **Primary:** Delegate schedule state inspection, runner health analysis, and diagnosis to the `schedule-agent` (sequential with database queries).
 - **Secondary:** Delegate SQLite queries (Steps 1-2) to the `database-agent` if the schedule-agent needs raw query support.
 
+Use Python's stdlib `sqlite3` module so this works without the `sqlite3` CLI.
+
 ## Step 1 — Read the schedule database tables
 
 Run these SQLite queries against `/home/karson/Patchy_Bot/telegram-qbt/state.sqlite3`:
 
 ### Runner status (is the schedule engine running?)
 ```bash
-cd /home/karson/Patchy_Bot/telegram-qbt && sqlite3 state.sqlite3 -header -column \
-  "SELECT status_id, datetime(last_started_at, 'unixepoch') as last_started, datetime(last_finished_at, 'unixepoch') as last_finished, datetime(last_success_at, 'unixepoch') as last_success, datetime(last_error_at, 'unixepoch') as last_error, last_error_text, last_due_count, last_processed_count, metadata_source_health_json, inventory_source_health_json FROM schedule_runner_status;"
+cd /home/karson/Patchy_Bot/telegram-qbt && python - <<'PY'
+import sqlite3
+conn = sqlite3.connect("state.sqlite3")
+for row in conn.execute("""
+SELECT status_id, datetime(last_started_at, 'unixepoch'), datetime(last_finished_at, 'unixepoch'),
+       datetime(last_success_at, 'unixepoch'), datetime(last_error_at, 'unixepoch'),
+       last_error_text, last_due_count, last_processed_count,
+       metadata_source_health_json, inventory_source_health_json
+FROM schedule_runner_status
+"""):
+    print(row)
+PY
 ```
 
 ### Active tracks (what shows are being monitored?)
 ```bash
-cd /home/karson/Patchy_Bot/telegram-qbt && sqlite3 state.sqlite3 -header -column \
-  "SELECT track_id, user_id, show_name, season, tvmaze_id, enabled, datetime(next_check_at, 'unixepoch') as next_check, datetime(next_air_ts, 'unixepoch') as next_air, datetime(updated_at, 'unixepoch') as updated FROM schedule_tracks ORDER BY next_check_at;"
+cd /home/karson/Patchy_Bot/telegram-qbt && python - <<'PY'
+import sqlite3
+conn = sqlite3.connect("state.sqlite3")
+for row in conn.execute("""
+SELECT track_id, user_id, show_name, season, tvmaze_id, enabled,
+       datetime(next_check_at, 'unixepoch'), datetime(next_air_ts, 'unixepoch'),
+       datetime(updated_at, 'unixepoch'), pending_json, auto_state_json
+FROM schedule_tracks
+ORDER BY next_check_at
+"""):
+    print(row)
+PY
 ```
 
-### Pending episodes (what's queued for download?)
+### Pending episodes (stored inside `schedule_tracks.pending_json`)
 ```bash
-cd /home/karson/Patchy_Bot/telegram-qbt && sqlite3 state.sqlite3 -header -column \
-  "SELECT * FROM schedule_pending ORDER BY rowid DESC LIMIT 20;"
+cd /home/karson/Patchy_Bot/telegram-qbt && python - <<'PY'
+import json, sqlite3
+conn = sqlite3.connect("state.sqlite3")
+for row in conn.execute("SELECT track_id, show_name, season, pending_json FROM schedule_tracks ORDER BY updated_at DESC"):
+    pending = json.loads(row[3] or "[]")
+    if pending:
+        print(row[0], row[1], row[2], pending[:5])
+PY
 ```
 
 ### Show cache (is metadata fresh?)
 ```bash
-cd /home/karson/Patchy_Bot/telegram-qbt && sqlite3 state.sqlite3 -header -column \
-  "SELECT tvmaze_id, datetime(fetched_at, 'unixepoch') as fetched, datetime(expires_at, 'unixepoch') as expires FROM schedule_show_cache;"
+cd /home/karson/Patchy_Bot/telegram-qbt && python - <<'PY'
+import sqlite3
+conn = sqlite3.connect("state.sqlite3")
+for row in conn.execute("SELECT tvmaze_id, datetime(fetched_at, 'unixepoch'), datetime(expires_at, 'unixepoch'), last_error_text FROM schedule_show_cache"):
+    print(row)
+PY
 ```
 
 ## Step 2 — Analyze the state
@@ -48,7 +80,7 @@ For each tracked show, determine:
 1. **Is the track enabled?** If disabled, note it.
 2. **Is next_check_at in the past?** If so, the runner may be stuck or not running.
 3. **Is next_air_ts set?** If null, metadata may have failed.
-4. **Are there pending episodes?** What state are they in?
+4. **Is `pending_json` populated?** If so, what episode codes or retries are waiting?
 5. **Is the show cache expired?** Stale metadata means wrong air dates.
 
 For the runner:
@@ -59,7 +91,8 @@ For the runner:
 ## Step 3 — Cross-reference with code if needed
 
 If the database state doesn't explain the issue, read:
-- `/home/karson/Patchy_Bot/telegram-qbt/patchy_bot/schedule.py` — the main schedule logic
+- `/home/karson/Patchy_Bot/telegram-qbt/patchy_bot/handlers/schedule.py` — the main schedule logic
+- `/home/karson/Patchy_Bot/telegram-qbt/patchy_bot/bot.py` — runner wiring and bootstrap
 - Look for the runner loop, check timing, grace windows, backoff logic
 
 ## Report format
@@ -82,7 +115,7 @@ Where status is one of:
 - **Stale cache** — show cache expired, metadata needs refresh
 
 ### Pending Episodes
-List any pending downloads with their state.
+List any non-empty `pending_json` state and summarize what it implies.
 
 ### Diagnosis
 Plain-English explanation of what's wrong (if anything) and what to do about it.

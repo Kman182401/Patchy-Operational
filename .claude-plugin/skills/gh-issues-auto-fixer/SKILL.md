@@ -1,6 +1,6 @@
 ---
 name: gh-issues
-description: "Fetch GitHub issues from Patchy-Operational, route each to the appropriate domain agent for a fix, then open PRs for review. Use when the user says 'fix issues', 'gh-issues', 'auto-fix', 'process issues', or wants to automatically resolve open GitHub issues."
+description: "Manual-only workflow for fetching GitHub issues from Patchy-Operational, routing each to the appropriate domain agent for a fix, then opening PRs for review. Use only when the user explicitly asks for issue automation."
 user_invocable: true
 ---
 

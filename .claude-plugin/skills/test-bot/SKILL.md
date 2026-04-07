@@ -1,11 +1,11 @@
 ---
 name: test-bot
-description: Run the full quality check suite for Patchy Bot — pytest, ruff lint, and mypy type checking. Use when the user says "test", "run tests", "check code", "lint", "quality check", or before marking any code change as done. Also use proactively after editing bot code.
+description: Run Patchy Bot verification from the project venv. Use automatically after Python, test, typing, or lint-relevant changes, and before claiming code is done. Prefer this for real code changes; do not use for docs-only or skill-only edits.
 ---
 
 # Full Quality Check Suite
 
-Run all three code quality tools against the Patchy Bot codebase and report a unified pass/fail summary.
+Run the project verification commands against the Patchy Bot codebase and report a unified pass/fail summary.
 
 All commands run from `/home/karson/Patchy_Bot/telegram-qbt` using the project venv.
 
@@ -14,11 +14,11 @@ All commands run from `/home/karson/Patchy_Bot/telegram-qbt` using the project v
 This skill delegates to the following agents during execution. Always use these agents — do not implement inline what an agent can handle.
 
 - **Primary:** Delegate test execution, lint checks, and failure diagnosis to the `test-agent`.
-- **On failure:** If tests fail, delegate root cause analysis to the `error-detective` agent with the pytest output.
+- **On config/tooling failure:** If the venv or toolchain is missing, route the environment problem to the `config-infra-agent`.
 
-## Step 1 — Run all three checks in parallel
+## Step 1 — Run the verification stack
 
-Run these three commands simultaneously:
+Run these commands from the project root:
 
 ### pytest
 ```bash
@@ -34,6 +34,8 @@ cd /home/karson/Patchy_Bot/telegram-qbt && .venv/bin/python -m ruff check . 2>&1
 ```bash
 cd /home/karson/Patchy_Bot/telegram-qbt && .venv/bin/python -m mypy patchy_bot/ qbt_telegram_bot.py 2>&1
 ```
+
+If the task only touched a narrow area, it is fine to run targeted pytest selection first. Before final handoff, prefer the broader suite when practical.
 
 ## Step 2 — Summarize results
 
@@ -54,6 +56,8 @@ For each failing check:
 2. Explain what the error means in plain English
 3. Suggest a fix or offer to fix it
 
+If a command fails because the tool is missing or the venv is broken, report that as an environment/setup issue, not as an application test failure.
+
 ## Step 4 — Verdict
 
 End with a single-line verdict:
@@ -63,4 +67,4 @@ End with a single-line verdict:
 ## Key config
 - ruff config: `pyproject.toml` (line-length 120, rules E/F/W/I/UP)
 - mypy config: `pyproject.toml` (strict-ish, Python 3.12)
-- pytest config: standard, tests in `tests/` directory
+- pytest config: `pyproject.toml`, tests in `tests/`

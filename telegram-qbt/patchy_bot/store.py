@@ -210,6 +210,7 @@ class Store:
                     next_check_ts   INTEGER,
                     error_text   TEXT,
                     notified     INTEGER NOT NULL DEFAULT 0,
+                    enabled      INTEGER NOT NULL DEFAULT 1,
                     created_ts   INTEGER NOT NULL
                 );
 
@@ -274,6 +275,8 @@ class Store:
             conn.execute("ALTER TABLE movie_tracks ADD COLUMN release_status TEXT DEFAULT 'unknown'")
         if "last_release_check_ts" not in mt_cols:
             conn.execute("ALTER TABLE movie_tracks ADD COLUMN last_release_check_ts INTEGER")
+        if "enabled" not in mt_cols:
+            conn.execute("ALTER TABLE movie_tracks ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1")
 
         conn.execute("PRAGMA optimize;")
         conn.commit()
@@ -1288,7 +1291,7 @@ class Store:
                 raise RuntimeError("Store is closed")
             conn = self._conn
             rows = conn.execute(
-                "SELECT * FROM movie_tracks WHERE status = 'pending' AND release_date_ts <= ? "
+                "SELECT * FROM movie_tracks WHERE status = 'pending' AND enabled = 1 AND release_date_ts <= ? "
                 "AND (next_check_ts IS NULL OR next_check_ts <= ?)",
                 (now_value, now_value),
             ).fetchall()
@@ -1299,7 +1302,7 @@ class Store:
             if self._closed:
                 raise RuntimeError("Store is closed")
             conn = self._conn
-            rows = conn.execute("SELECT * FROM movie_tracks WHERE status = 'downloading'").fetchall()
+            rows = conn.execute("SELECT * FROM movie_tracks WHERE status = 'downloading' AND enabled = 1").fetchall()
             return [dict(row) for row in rows]
 
     def update_movie_track_status(
@@ -1310,6 +1313,7 @@ class Store:
         notified: bool | None = None,
         next_check_ts: int | None = None,
         error_text: str | None = None,
+        enabled: bool | None = None,
     ) -> None:
         parts: list[str] = []
         values: list[Any] = []
@@ -1328,6 +1332,9 @@ class Store:
         if error_text is not None:
             parts.append("error_text = ?")
             values.append(str(error_text))
+        if enabled is not None:
+            parts.append("enabled = ?")
+            values.append(1 if enabled else 0)
         parts.append("last_checked_ts = ?")
         values.append(now_ts())
         if not parts:

@@ -1,6 +1,6 @@
 ---
 name: security-agent
-description: "MUST be used for any work involving authentication, authorization, rate limiting, password handling, brute-force protection, input validation, path safety, secrets management, or security review. Use proactively when the task mentions security, auth, passwords, rate limits, validation, or when reviewing code for vulnerabilities."
+description: "Use for authentication, authorization, rate limiting, password handling, brute-force protection, input validation, path safety, secrets management, or security review. Best fit when the task mentions security, auth, passwords, rate limits, validation, or vulnerability review."
 tools: Read, Grep, Glob, Bash
 model: sonnet
 maxTurns: 10
@@ -15,6 +15,7 @@ You are the Security specialist for Patchy Bot. You review all code for security
 
 **Primary files:**
 - `patchy_bot/bot.py` — Auth system (allowlist, password gate, session management), path safety validators
+- `patchy_bot/handlers/commands.py` — `/unlock`, `/logout`, access-mode user messaging
 - `patchy_bot/rate_limiter.py` — Per-user sliding-window rate limiter
 - `patchy_bot/store.py` — `user_auth`, `auth_attempts` tables
 - `patchy_bot/config.py` — Safety validation in `__post_init__`

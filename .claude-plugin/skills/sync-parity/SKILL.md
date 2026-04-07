@@ -1,6 +1,6 @@
 ---
 name: sync-parity
-description: Check that Movie and TV search features have matching functionality. Use when the user says "check parity", "sync parity", "movie tv parity", "compare movie and tv", or after making changes to search, callback, navigation, or add-flow code that touches either movie or TV paths.
+description: Audit movie/TV parity across Patchy's search and add flows. Use after changing shared search UX, result rendering, callback routing, or add/download flows that should stay aligned across movie and TV behavior. Do not use when the difference is intentionally domain-specific, such as TV episode scheduling versus movie release gating.
 ---
 
 # Movie / TV Feature Parity Audit
@@ -18,13 +18,13 @@ This skill delegates to the following agents during execution. Always use these 
 
 Read these files and trace both the movie and TV paths through each:
 
-1. **`/home/karson/Patchy_Bot/telegram-qbt/patchy_bot/handlers/_search.py`** — Search command handling
-2. **`/home/karson/Patchy_Bot/telegram-qbt/patchy_bot/handlers/_callbacks.py`** — Callback routing for add flows, media choice
-3. **`/home/karson/Patchy_Bot/telegram-qbt/patchy_bot/handlers/_navigation.py`** — Pagination and result display
-4. **`/home/karson/Patchy_Bot/telegram-qbt/patchy_bot/search_chat.py`** — Natural language search intent parsing
-5. **`/home/karson/Patchy_Bot/telegram-qbt/patchy_bot/common.py`** — Shared utilities (quality detection, formatting)
-6. **`/home/karson/Patchy_Bot/telegram-qbt/patchy_bot/ui.py`** — UI state and keyboard building
-7. **`/home/karson/Patchy_Bot/telegram-qbt/qbt_telegram_bot.py`** — Legacy monolith (runtime file)
+1. **`/home/karson/Patchy_Bot/telegram-qbt/patchy_bot/handlers/search.py`** — shared search filtering, ranking, rendering
+2. **`/home/karson/Patchy_Bot/telegram-qbt/patchy_bot/handlers/download.py`** — add/download completion flow
+3. **`/home/karson/Patchy_Bot/telegram-qbt/patchy_bot/handlers/commands.py`** — command-surface entry points and active/status UI
+4. **`/home/karson/Patchy_Bot/telegram-qbt/patchy_bot/handlers/schedule.py`** — TV schedule acquisition and movie release-track differences
+5. **`/home/karson/Patchy_Bot/telegram-qbt/patchy_bot/ui/text.py`** — shared user-facing wording
+6. **`/home/karson/Patchy_Bot/telegram-qbt/patchy_bot/ui/keyboards.py`** — inline keyboard layout patterns
+7. **`/home/karson/Patchy_Bot/telegram-qbt/patchy_bot/bot.py`** — callback dispatch and flow wiring
 
 ## What to look for
 
@@ -38,7 +38,15 @@ For each feature area, check if movie and TV paths have equivalent:
 - **Pagination** — same page size, same navigation buttons?
 - **Error handling** — same error messages and fallback behavior?
 - **Keyboard buttons** — same button labels and layout patterns?
-- **Natural language parsing** — does search_chat handle both "find movie X" and "find show X" equivalently?
+- **Intent boundaries** — are differences intentional because TV uses episodic schedule logic while movies use release tracking?
+
+## Intentional differences
+
+Do not flag these as parity bugs by default:
+
+- TV episode auto-tracking in `schedule_tracks`
+- Movie release-date tracking in `movie_tracks`
+- Plex inventory logic that is inherently TV-episode-specific
 
 ## Report format
 

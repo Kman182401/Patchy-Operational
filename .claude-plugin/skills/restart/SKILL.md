@@ -1,6 +1,6 @@
 ---
 name: restart
-description: Restart the Patchy Bot systemd service and verify it started successfully. Use when the user says "restart", "restart bot", "reboot the bot", "apply changes", or after any code change to qbt_telegram_bot.py or the patchy_bot/ package. Also invoke automatically after editing bot runtime code.
+description: Restart the Patchy Bot systemd service and verify startup. Use when the user asks to restart/apply runtime changes, or after runtime code, env, or service-file changes that should be exercised locally. Do not auto-run for docs-only, skill-only, or non-runtime edits.
 ---
 
 # Restart & Verify Bot Service
@@ -12,7 +12,7 @@ Restart the Telegram bot and confirm it came up healthy. Run these steps in orde
 This skill delegates to the following agents during execution. Always use these agents — do not implement inline what an agent can handle.
 
 - **Primary:** Delegate service restart and health verification to the `config-infra-agent` (sequential with error diagnosis).
-- **On failure:** If the service fails to start, delegate failure log analysis to the `error-detective` agent with the journalctl output from Step 3.
+- **On failure:** Use `check-logs` or the `config-infra-agent` to analyze the startup failure before changing code.
 
 ## Step 1 — Restart the service
 
@@ -64,5 +64,5 @@ Then offer to fix the issue immediately.
 ## Key details
 - Service name: `telegram-qbt-bot.service`
 - Working directory: `/home/karson/Patchy_Bot/telegram-qbt`
-- Runtime entry point: `qbt_telegram_bot.py`
+- Runtime entry point: `python -m patchy_bot`
 - Python venv: `/home/karson/Patchy_Bot/telegram-qbt/.venv/bin/python`

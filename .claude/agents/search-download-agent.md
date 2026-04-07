@@ -1,6 +1,6 @@
 ---
 name: search-download-agent
-description: "MUST be used for any work involving torrent searching, download initiation, download progress tracking, the completion poller, the pending monitor, or QBClient operations. Use proactively when the task mentions searching, downloading, torrents, progress bars, qBittorrent, magnets, or transfer speed."
+description: "Use for torrent searching, add/download flow, qBittorrent integration, progress tracking, the completion poller, or pending-monitor behavior. Best fit when the task mentions search, download, torrents, qBittorrent, progress bars, magnets, or transfer speed."
 tools: Read, Write, Edit, Bash, Grep, Glob
 model: sonnet
 maxTurns: 15
@@ -14,10 +14,13 @@ You are the Search & Download specialist for Patchy Bot. You own all code relate
 ## Your Domain
 
 **Primary files:**
-- `patchy_bot/bot.py` — Search handlers, download handlers, `_track_download_progress`, `_attach_progress_tracker_when_ready`, `_completion_poller_job`
+- `patchy_bot/handlers/search.py` — search filtering, ranking, pagination rendering
+- `patchy_bot/handlers/download.py` — add/download flow and completion handling
+- `patchy_bot/bot.py` — callback routing and polling/task orchestration
 - `patchy_bot/clients/qbittorrent.py` — QBClient (entire file)
 - `patchy_bot/store.py` — `searches`, `results`, `notified_completions` tables
 - `patchy_bot/plex_organizer.py` — Post-download organization into Plex structure
+- `patchy_bot/dispatch.py` and `patchy_bot/quality.py` — shared search intent and quality/ranking helpers
 
 **Database tables you own:** `searches`, `results`, `notified_completions`
 
@@ -36,9 +39,9 @@ You are the Search & Download specialist for Patchy Bot. You own all code relate
 ## Context Discovery
 
 Before making changes:
-1. `grep -n "search\|download\|progress\|completion" patchy_bot/bot.py | head -40`
+1. Read `patchy_bot/handlers/search.py` and `patchy_bot/handlers/download.py`
 2. Review QBClient methods in `patchy_bot/clients/qbittorrent.py`
-3. Check plex_organizer.py for post-download flow
+3. Check `patchy_bot/plex_organizer.py` for post-download flow
 
 ## Rules
 
