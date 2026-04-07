@@ -157,6 +157,7 @@ def render_progress_text(
     progress_pct: float | None = None,
     dls_bps: int | None = None,
     uls_bps: int | None = None,
+    header: str | None = None,
 ) -> str:
     """Build the live-progress message text."""
     raw_progress = float(info.get("progress", 0.0) or 0.0) * 100.0
@@ -175,7 +176,7 @@ def render_progress_text(
     eta_txt = eta_label(info)
     state_txt = state_label(info)
 
-    return (
+    monitor = (
         f"<b>Live Download Monitor</b>\n"
         f"<code>{_h(name)}</code>\n"
         f"<code>[{bar}] {progress:.1f}%</code>\n"
@@ -183,6 +184,9 @@ def render_progress_text(
         f"\u2193 <code>{dls}</code> \u2022 ETA <code>{eta_txt}</code>\n"
         f"Done: <code>{done}</code> / <code>{total}</code>"
     )
+    if header:
+        return f"{header}\n\n{monitor}"
+    return monitor
 
 
 # ---------------------------------------------------------------------------
@@ -190,16 +194,25 @@ def render_progress_text(
 # ---------------------------------------------------------------------------
 
 
-def stop_download_keyboard(torrent_hash: str) -> InlineKeyboardMarkup:
-    """Build the inline keyboard with Home + Stop buttons for a download."""
-    return InlineKeyboardMarkup(
+def stop_download_keyboard(
+    torrent_hash: str,
+    *,
+    post_add_rows: list[list[Any]] | None = None,
+) -> InlineKeyboardMarkup:
+    """Build the inline keyboard with Home + Stop buttons for a download.
+
+    If post_add_rows is provided, those rows are prepended before the Home/Stop row.
+    """
+    rows: list[list[Any]] = []
+    if post_add_rows:
+        rows.extend(post_add_rows)
+    rows.append(
         [
-            [
-                InlineKeyboardButton("\U0001f3e0 Home", callback_data="nav:home"),
-                InlineKeyboardButton("\U0001f6d1 Stop & Delete Download", callback_data=f"stop:{torrent_hash}"),
-            ]
+            InlineKeyboardButton("\U0001f3e0 Home", callback_data="nav:home"),
+            InlineKeyboardButton("\U0001f6d1 Stop & Delete Download", callback_data=f"stop:{torrent_hash}"),
         ]
     )
+    return InlineKeyboardMarkup(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +263,16 @@ async def safe_tracker_edit(tracker_msg: Any, text: str, reply_markup: Any = Non
 # ---------------------------------------------------------------------------
 
 
-def start_progress_tracker(ctx: HandlerContext, user_id: int, torrent_hash: str, tracker_msg: Any, title: str) -> None:
+def start_progress_tracker(
+    ctx: HandlerContext,
+    user_id: int,
+    torrent_hash: str,
+    tracker_msg: Any,
+    title: str,
+    *,
+    header: str | None = None,
+    post_add_rows: list[list[Any]] | None = None,
+) -> None:
     """Launch a progress-tracking asyncio task for a torrent, keyed by (uid, hash)."""
     key = (user_id, torrent_hash.lower())
     existing = ctx.progress_tasks.get(key)
@@ -258,7 +280,15 @@ def start_progress_tracker(ctx: HandlerContext, user_id: int, torrent_hash: str,
         existing.cancel()
 
     task = asyncio.create_task(
-        track_download_progress(ctx, user_id, torrent_hash, tracker_msg, title),
+        track_download_progress(
+            ctx,
+            user_id,
+            torrent_hash,
+            tracker_msg,
+            title,
+            header=header,
+            post_add_rows=post_add_rows,
+        ),
         name=f"progress:{user_id}:{torrent_hash.lower()}",
     )
     ctx.progress_tasks[key] = task
@@ -324,7 +354,14 @@ async def attach_progress_tracker_when_ready(
 
 
 async def track_download_progress(
-    ctx: HandlerContext, user_id: int, torrent_hash: str, tracker_msg: Any, title: str
+    ctx: HandlerContext,
+    user_id: int,
+    torrent_hash: str,
+    tracker_msg: Any,
+    title: str,
+    *,
+    header: str | None = None,
+    post_add_rows: list[list[Any]] | None = None,
 ) -> None:
     """The main progress-tracking loop: polls qBT every few seconds, edits the Telegram message."""
     key = (user_id, torrent_hash.lower())
@@ -335,7 +372,7 @@ async def track_download_progress(
     last_edit_at = 0.0
     qbt_error_streak = 0
     edit_error_streak = 0
-    stop_kb = stop_download_keyboard(torrent_hash)
+    stop_kb = stop_download_keyboard(torrent_hash, post_add_rows=post_add_rows)
 
     smooth_progress_pct: float | None = None
     smooth_dls: float | None = None
@@ -536,6 +573,7 @@ async def track_download_progress(
                 progress_pct=smooth_progress_pct,
                 dls_bps=int(smooth_dls),
                 uls_bps=int(smooth_uls),
+                header=header,
             )
 
             now = time.time()
@@ -558,6 +596,7 @@ async def track_download_progress(
                         progress_pct=100.0,
                         dls_bps=int(raw_dls),
                         uls_bps=int(raw_uls),
+                        header=header,
                     )
                     + "\n<b>\u2705 Download Complete</b>"
                 )

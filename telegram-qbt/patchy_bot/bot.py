@@ -623,8 +623,25 @@ class BotApp:
             name, info, tick, progress_pct=progress_pct, dls_bps=dls_bps, uls_bps=uls_bps
         )
 
-    def _start_progress_tracker(self, user_id: int, torrent_hash: str, tracker_msg: Any, title: str) -> None:
-        download_handler.start_progress_tracker(self._ctx, user_id, torrent_hash, tracker_msg, title)
+    def _start_progress_tracker(
+        self,
+        user_id: int,
+        torrent_hash: str,
+        tracker_msg: Any,
+        title: str,
+        *,
+        header: str | None = None,
+        post_add_rows: list[list[Any]] | None = None,
+    ) -> None:
+        download_handler.start_progress_tracker(
+            self._ctx,
+            user_id,
+            torrent_hash,
+            tracker_msg,
+            title,
+            header=header,
+            post_add_rows=post_add_rows,
+        )
 
     def _start_pending_progress_tracker(self, user_id: int, title: str, category: str, base_msg: Any) -> None:
         download_handler.start_pending_progress_tracker(self._ctx, user_id, title, category, base_msg)
@@ -632,8 +649,22 @@ class BotApp:
     async def _attach_progress_tracker_when_ready(self, user_id: int, title: str, category: str, base_msg: Any) -> None:
         await download_handler.attach_progress_tracker_when_ready(self._ctx, user_id, title, category, base_msg)
 
-    def _stop_download_keyboard(self, torrent_hash: str) -> InlineKeyboardMarkup:
-        return download_handler.stop_download_keyboard(torrent_hash)
+    def _stop_download_keyboard(
+        self, torrent_hash: str, post_add_rows: list[list[Any]] | None = None
+    ) -> InlineKeyboardMarkup:
+        return download_handler.stop_download_keyboard(torrent_hash, post_add_rows=post_add_rows)
+
+    @staticmethod
+    def _extract_post_add_rows(kb: InlineKeyboardMarkup | None) -> list[list[Any]] | None:
+        """Extract button rows from a post-add keyboard, filtering out Home (stop kb has its own)."""
+        if not kb or not kb.inline_keyboard:
+            return None
+        rows = []
+        for row in kb.inline_keyboard:
+            filtered = [btn for btn in row if btn.callback_data != "nav:home"]
+            if filtered:
+                rows.append(filtered)
+        return rows or None
 
     async def _tracker_send_fallback(self, tracker_msg: Any, text: str) -> None:
         await download_handler.tracker_send_fallback(self._ctx, tracker_msg, text)
@@ -4299,28 +4330,39 @@ class BotApp:
             )
             return
         summary = str(out["summary"])
-        if not out.get("hash"):
-            summary += "\n\n<i>Waiting for qBittorrent to assign a hash. A live monitor will attach automatically.</i>"
 
         # Build post-add keyboard based on search origin context
         post_kb = await self._build_post_add_keyboard(user_id, sid, choice)
-
-        rendered = await self._render_nav_ui(
-            user_id,
-            rendered,
-            summary,
-            reply_markup=post_kb,
-            current_ui_message=rendered,
-        )
+        post_add_rows = self._extract_post_add_rows(post_kb)
 
         if out.get("hash"):
-            tracker_msg = await rendered.reply_text(
-                "<b>📡 Live Monitor Attached</b>\n<i>Tracking download progress…</i>",
-                reply_markup=self._stop_download_keyboard(out["hash"]),
-                parse_mode=_PM,
+            # Combined message: confirmation + live monitor placeholder
+            combined_text = summary + "\n\n<b>📡 Live Monitor Attached</b>\n<i>Tracking download progress…</i>"
+            stop_kb = self._stop_download_keyboard(out["hash"], post_add_rows=post_add_rows)
+            rendered = await self._render_nav_ui(
+                user_id,
+                rendered,
+                combined_text,
+                reply_markup=stop_kb,
+                current_ui_message=rendered,
             )
-            self._start_progress_tracker(user_id, out["hash"], tracker_msg, out["name"])
+            self._start_progress_tracker(
+                user_id,
+                out["hash"],
+                rendered,
+                out["name"],
+                header=summary,
+                post_add_rows=post_add_rows,
+            )
         else:
+            summary += "\n\n<i>Waiting for qBittorrent to assign a hash. A live monitor will attach automatically.</i>"
+            rendered = await self._render_nav_ui(
+                user_id,
+                rendered,
+                summary,
+                reply_markup=post_kb,
+                current_ui_message=rendered,
+            )
             self._start_pending_progress_tracker(user_id, out["name"], out["category"], rendered)
 
     async def _build_post_add_keyboard(self, user_id: int, sid: str, choice: str) -> InlineKeyboardMarkup | None:
