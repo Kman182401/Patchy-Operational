@@ -635,6 +635,11 @@ async def track_download_progress(
                     notif_text += "\n\n⚠️ <b>Plex scan failed</b> — may need manual refresh"
                 if org_result is not None:
                     await tracker_send_fallback(ctx, tracker_msg, notif_text)
+                # Delete the monitor message so it doesn't linger in the chat.
+                try:
+                    await tracker_msg.delete()
+                except Exception:
+                    pass
                 break
 
             tick += 1
