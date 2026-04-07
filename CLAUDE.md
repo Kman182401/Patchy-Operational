@@ -85,6 +85,8 @@ bot.py is monolithic. These are the logical domains and their approximate line r
 - VPN interface name must match: `^[a-zA-Z0-9_-]+$`
 - SQLite file permissions: owner-only 0o600
 - qBT client is thread-safe via threading.Lock() — preserve this
+- Path containment checks MUST use `PurePosixPath.is_relative_to()`, never `str.startswith()` with `os.sep`
+- File move operations MUST use try/except for `FileExistsError`, never check-then-move (TOCTOU race)
 
 ## Service Operations
 

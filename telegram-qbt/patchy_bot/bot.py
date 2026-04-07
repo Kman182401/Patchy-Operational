@@ -163,24 +163,9 @@ class BotApp:
     async def _post_init(self, app: Application) -> None:
         commands = [
             BotCommand("start", "Open command center"),
-            BotCommand("search", "Search torrents (with filters)"),
-            BotCommand("schedule", "Track a TV show and auto-acquire new episodes"),
-            BotCommand("show", "Show a saved search page"),
-            BotCommand("add", "Add result to qBittorrent (Movies/TV)"),
-            BotCommand("active", "Show active downloads"),
-            BotCommand("remove", "Find and delete media from disk/Plex after confirmation"),
-            BotCommand("categories", "Show NVMe + category routing status"),
-            BotCommand("profile", "Show current defaults"),
-            BotCommand("setminseeds", "Set default minimum seeds"),
-            BotCommand("setlimit", "Set default result limit"),
-            BotCommand("plugins", "List installed search plugins"),
-            BotCommand("health", "Quick health check"),
-            BotCommand("speed", "Download/upload speed dashboard"),
-            BotCommand("unlock", "Unlock bot session with password"),
-            BotCommand("logout", "Lock bot session again"),
-            BotCommand("help", "Show help/command center"),
         ]
         try:
+            await app.bot.delete_my_commands()
             await app.bot.set_my_commands(commands)
             LOG.info("Telegram command list registered")
         except Exception:
