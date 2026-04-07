@@ -2,9 +2,9 @@
 
 **Title:** Build the callback dispatcher
 
-**Status:** pending
+**Status:** done
 
-**Dependencies:** 1
+**Dependencies:** 1 ✓
 
 **Priority:** high
 

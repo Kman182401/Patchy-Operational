@@ -2,9 +2,9 @@
 
 **Title:** Extract the command handlers
 
-**Status:** pending
+**Status:** done
 
-**Dependencies:** 2, 3, 4, 5, 6, 7
+**Dependencies:** 2 ✓, 3 ✓, 4 ✓, 5 ✓, 6 ✓, 7 ✓
 
 **Priority:** medium
 

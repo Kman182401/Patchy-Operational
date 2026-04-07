@@ -60,6 +60,13 @@ class Config:
     progress_smoothing_alpha: float
     progress_track_timeout_s: int
     backup_dir: str | None
+    stall_metadata_warn_s: int = 180
+    stall_zero_progress_warn_s: int = 300
+    stall_auto_retry_enabled: bool = True
+    stall_max_retries: int = 2
+    preflight_check_enabled: bool = True
+    preflight_min_disk_gb: float = 5.0
+    health_event_retention_days: int = 30
 
     _DANGEROUS_ROOTS: frozenset[str] = frozenset(
         {
@@ -175,6 +182,13 @@ class Config:
             progress_refresh_s=max(0.6, float(os.getenv("PROGRESS_REFRESH_SECONDS", "1.0"))),
             progress_edit_min_s=max(0.5, float(os.getenv("PROGRESS_EDIT_MIN_SECONDS", "0.9"))),
             progress_smoothing_alpha=min(1.0, max(0.05, float(os.getenv("PROGRESS_SMOOTHING_ALPHA", "0.35")))),
-            progress_track_timeout_s=max(60, int(os.getenv("PROGRESS_TRACK_TIMEOUT_SECONDS", "1800"))),
+            progress_track_timeout_s=max(60, int(os.getenv("PROGRESS_TRACK_TIMEOUT_SECONDS", "7200"))),
+            stall_metadata_warn_s=max(30, int(os.getenv("STALL_METADATA_WARN_SECONDS", "180"))),
+            stall_zero_progress_warn_s=max(60, int(os.getenv("STALL_ZERO_PROGRESS_WARN_SECONDS", "300"))),
+            stall_auto_retry_enabled=parse_bool(os.getenv("STALL_AUTO_RETRY_ENABLED", "true"), default=True),
+            stall_max_retries=max(0, int(os.getenv("STALL_MAX_RETRIES", "2"))),
+            preflight_check_enabled=parse_bool(os.getenv("PREFLIGHT_CHECK_ENABLED", "true"), default=True),
+            preflight_min_disk_gb=max(0.0, float(os.getenv("PREFLIGHT_MIN_DISK_GB", "5.0"))),
+            health_event_retention_days=max(1, int(os.getenv("HEALTH_EVENT_RETENTION_DAYS", "30"))),
             backup_dir=parse_env_optional(os.getenv("BACKUP_DIR")),
         )

@@ -26,33 +26,33 @@ KEEP_EXTS = VIDEO_EXTS | frozenset({".srt", ".ass", ".ssa", ".sub", ".idx", ".vt
 @dataclass
 class OrganizeResult:
     moved: bool
-    new_path: str          # final content path (for Plex scan)
-    summary: str           # human-readable one-liner
+    new_path: str  # final content path (for Plex scan)
+    summary: str  # human-readable one-liner
     files_moved: int
 
 
 def _strip_site_prefix(name: str) -> str:
     """Remove leading site prefixes like 'www.UIndex.org    -    '."""
-    return re.sub(r'^www\.\S+\s*[-–—]+\s*', '', name).strip()
+    return re.sub(r"^www\.\S+\s*[-–—]+\s*", "", name).strip()
 
 
 def _strip_tracker_tags(name: str) -> str:
     """Remove trailing tracker tags like [EZTVx.to], [TGx], etc."""
-    return re.sub(r'\[[\w.]+\]', '', name).strip()
+    return re.sub(r"\[[\w.]+\]", "", name).strip()
 
 
 def _strip_brackets(name: str) -> str:
     """Remove all bracket-enclosed tags like [1080p], [YTS.MX], [BluRay]."""
-    cleaned = re.sub(r'\s*\[.*?\]\s*', ' ', name).strip()
-    return re.sub(r'\s+', ' ', cleaned)
+    cleaned = re.sub(r"\s*\[.*?\]\s*", " ", name).strip()
+    return re.sub(r"\s+", " ", cleaned)
 
 
 def _dots_to_spaces(name: str) -> str:
     """Convert dot-separated scene names to spaces, preserving extensions."""
     # Don't convert if it already has spaces (non-scene name)
-    if ' ' in name and '.' not in name.replace('.mkv', '').replace('.mp4', ''):
+    if " " in name and "." not in name.replace(".mkv", "").replace(".mp4", ""):
         return name
-    return re.sub(r'\.(?!mkv$|mp4$|avi$|srt$|nfo$)', ' ', name)
+    return re.sub(r"\.(?!mkv$|mp4$|avi$|srt$|nfo$)", " ", name)
 
 
 def _parse_tv(name: str) -> tuple[str, int, list[int]] | None:
@@ -64,12 +64,12 @@ def _parse_tv(name: str) -> tuple[str, int, list[int]] | None:
     cleaned = _strip_tracker_tags(cleaned)
 
     # Match S01E02 or S01E02E03 patterns
-    m = re.search(r'[.\s]S(\d{1,2})E(\d{1,3})(?:E(\d{1,3}))?', cleaned, re.IGNORECASE)
+    m = re.search(r"[.\s]S(\d{1,2})E(\d{1,3})(?:E(\d{1,3}))?", cleaned, re.IGNORECASE)
     if m:
-        show_part = cleaned[:m.start()]
-        show_name = _dots_to_spaces(show_part).strip(' .-')
+        show_part = cleaned[: m.start()]
+        show_name = _dots_to_spaces(show_part).strip(" .-")
         # Remove year suffix if present (e.g. "Invincible 2021" -> "Invincible")
-        show_name = re.sub(r'\s+\d{4}\s*$', '', show_name).strip()
+        show_name = re.sub(r"\s+\d{4}\s*$", "", show_name).strip()
         season = int(m.group(1))
         episodes = [int(m.group(2))]
         if m.group(3):
@@ -78,11 +78,11 @@ def _parse_tv(name: str) -> tuple[str, int, list[int]] | None:
             return show_name, season, episodes
 
     # Match "Season X" or "SEASON.XX.SXX" in directory names (complete season packs)
-    m = re.search(r'[.\s](?:SEASON[.\s]*)?S(\d{1,2})[.\s]', cleaned, re.IGNORECASE)
+    m = re.search(r"[.\s](?:SEASON[.\s]*)?S(\d{1,2})[.\s]", cleaned, re.IGNORECASE)
     if m:
-        show_part = cleaned[:m.start()]
-        show_name = _dots_to_spaces(show_part).strip(' .-')
-        show_name = re.sub(r'\s+\d{4}\s*$', '', show_name).strip()
+        show_part = cleaned[: m.start()]
+        show_name = _dots_to_spaces(show_part).strip(" .-")
+        show_name = re.sub(r"\s+\d{4}\s*$", "", show_name).strip()
         season = int(m.group(1))
         if show_name:
             return show_name, season, []  # empty episodes = season pack
@@ -100,18 +100,18 @@ def _parse_movie(name: str) -> tuple[str, int | None] | None:
     cleaned = _strip_brackets(cleaned)
 
     # Try "Title (Year)" format first (already clean)
-    m = re.match(r'^(.+?)\s*\((\d{4})\)', cleaned)
+    m = re.match(r"^(.+?)\s*\((\d{4})\)", cleaned)
     if m:
         return m.group(1).strip(), int(m.group(2))
 
     # Try scene format: "Title.Name.Year.quality.stuff"
-    m = re.match(r'^(.+?)[.\s]((?:19|20)\d{2})[.\s]', cleaned)
+    m = re.match(r"^(.+?)[.\s]((?:19|20)\d{2})[.\s]", cleaned)
     if m:
-        title = _dots_to_spaces(m.group(1)).strip(' .-')
+        title = _dots_to_spaces(m.group(1)).strip(" .-")
         return title, int(m.group(2))
 
     # Try "Title Year quality" with spaces
-    m = re.match(r'^(.+?)\s+((?:19|20)\d{2})\s+', cleaned)
+    m = re.match(r"^(.+?)\s+((?:19|20)\d{2})\s+", cleaned)
     if m:
         return m.group(1).strip(), int(m.group(2))
 
@@ -131,7 +131,7 @@ def _find_existing_show_dir(tv_root: str, parsed_name: str) -> str | None:
         if not os.path.isdir(entry_path):
             continue
         # Compare base name without year suffix
-        entry_base = re.sub(r'\s*\(\d{4}\)\s*$', '', entry).strip().lower()
+        entry_base = re.sub(r"\s*\(\d{4}\)\s*$", "", entry).strip().lower()
         if entry_base == normalized or entry.lower() == normalized:
             return entry
     return None
@@ -147,7 +147,7 @@ def _find_existing_movie_dir(movies_root: str, parsed_title: str, year: int | No
         if not os.path.isdir(entry_path):
             continue
         entry_clean = _strip_brackets(entry)
-        entry_base = re.sub(r'\s*\(\d{4}\)\s*$', '', entry_clean).strip().lower()
+        entry_base = re.sub(r"\s*\(\d{4}\)\s*$", "", entry_clean).strip().lower()
         if entry_base == norm_title:
             return entry
     return None
@@ -212,7 +212,7 @@ def organize_tv(content_path: str, tv_root: str) -> OrganizeResult:
 
         # Clean up empty source dir
         if files_moved > 0:
-            _try_remove_empty_tree(content_path)
+            _try_remove_empty_tree(content_path, allowed_roots=(tv_root,))
 
         ep_str = f"E{episodes[0]:02d}" if episodes else f"{files_moved} files"
         return OrganizeResult(
@@ -272,16 +272,19 @@ def organize_movie(content_path: str, movies_root: str) -> OrganizeResult:
         shutil.move(content_path, target_dir)
 
         # Rename main video file inside to match Plex convention
-        files_moved = 0
-        for f in os.listdir(target_dir):
+        video_files = [f for f in os.listdir(target_dir) if os.path.splitext(f)[1].lower() in VIDEO_EXTS]
+        files_moved = len(video_files)
+
+        if len(video_files) == 1:
+            f = video_files[0]
             ext = os.path.splitext(f)[1].lower()
-            if ext in VIDEO_EXTS:
-                new_name = target_name + ext
-                src = os.path.join(target_dir, f)
-                dst = os.path.join(target_dir, new_name)
-                if src != dst and not os.path.exists(dst):
-                    os.rename(src, dst)
-                files_moved += 1
+            new_name = target_name + ext
+            src = os.path.join(target_dir, f)
+            dst = os.path.join(target_dir, new_name)
+            if src != dst and not os.path.exists(dst):
+                os.rename(src, dst)
+        elif len(video_files) > 1:
+            LOG.info("Movie dir has %d video files — skipping rename: %s", len(video_files), target_dir)
 
         return OrganizeResult(True, target_dir, f"-> {target_name}/", files_moved)
 
@@ -316,10 +319,39 @@ def organize_download(
     return result
 
 
-def _try_remove_empty_tree(path: str) -> None:
-    """Remove a directory tree if it contains no more media files."""
+def _try_remove_empty_tree(path: str, *, allowed_roots: tuple[str, ...] = ()) -> None:
+    """Remove a directory tree if it contains no more media files.
+
+    When *allowed_roots* is given, the path must resolve inside one of them
+    and must not be a symlink.
+    """
     if not os.path.isdir(path):
         return
+
+    real_path = os.path.realpath(path)
+
+    # Reject symlinks — content_path should never be a symlink
+    if os.path.islink(path):
+        LOG.warning("Refusing to remove symlinked path: %s -> %s", path, real_path)
+        return
+
+    # Path containment: must be inside one of the allowed media roots
+    if allowed_roots:
+        inside = False
+        for root in allowed_roots:
+            real_root = os.path.realpath(root)
+            if real_path.startswith(real_root + os.sep):
+                inside = True
+                break
+        if not inside:
+            LOG.warning(
+                "Refusing to remove path outside media roots: %s (resolves to %s, allowed: %s)",
+                path,
+                real_path,
+                allowed_roots,
+            )
+            return
+
     has_media = False
     for root, dirs, files in os.walk(path):
         for f in files:

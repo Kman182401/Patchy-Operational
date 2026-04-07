@@ -2,9 +2,9 @@
 
 **Title:** Extract UI builders into ui/ modules
 
-**Status:** pending
+**Status:** done
 
-**Dependencies:** 1
+**Dependencies:** 1 ✓
 
 **Priority:** high
 

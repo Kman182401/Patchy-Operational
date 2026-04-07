@@ -2,9 +2,9 @@
 
 **Title:** Extract the schedule handler
 
-**Status:** pending
+**Status:** done
 
-**Dependencies:** 2, 3, 5
+**Dependencies:** 2 ✓, 3 ✓, 5 ✓
 
 **Priority:** high
 

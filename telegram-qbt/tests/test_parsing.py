@@ -1483,6 +1483,9 @@ def test_on_text_schedule_cancel_returns_to_command_center() -> None:
         ) -> None:
             self.command_center_calls.append(msg)
 
+        async def _navigate_to_command_center(self, msg: object, user_id: int) -> None:
+            self.command_center_calls.append(msg)
+
     update = DummyUpdate()
     bot = DummyBot()
 

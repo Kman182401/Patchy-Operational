@@ -2,9 +2,9 @@
 
 **Title:** Extract the download tracking handler
 
-**Status:** pending
+**Status:** done
 
-**Dependencies:** 2, 3
+**Dependencies:** 2 ✓, 3 ✓
 
 **Priority:** medium
 

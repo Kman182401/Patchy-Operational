@@ -40,6 +40,9 @@ class FakeBotApp:
         self.flow: dict[int, dict[str, Any]] = {}
         self.render_calls: list[tuple[str, tuple, dict]] = []
         self.progress_tasks: dict[tuple[int, str], Any] = ctx.progress_tasks
+        # Wire render_command_center and navigate_to_command_center on ctx so handlers can use them
+        ctx.render_command_center = self._render_command_center
+        ctx.navigate_to_command_center = self._navigate_to_command_center
 
     # -- Flow management --
 
@@ -91,6 +94,9 @@ class FakeBotApp:
 
     async def _render_command_center(self, *args: Any, **kwargs: Any) -> None:
         self.render_calls.append(("command_center", args, kwargs))
+
+    async def _navigate_to_command_center(self, msg: Any, user_id: int) -> None:
+        self.render_calls.append(("command_center", (msg,), {"user_id": user_id}))
 
     async def _open_remove_browse_root(self, *args: Any, **kwargs: Any) -> None:
         self.render_calls.append(("remove_browse_root", args, kwargs))
@@ -375,7 +381,7 @@ async def test_cb_stop_cancels_task(fake_app: FakeBotApp, query: MagicMock, monk
     notice_mock.message_id = 999
     query.message.chat.send_message = AsyncMock(return_value=notice_mock)
 
-    await on_cb_stop(fake_app, data=f"stop:{torrent_hash}", q=query, user_id=USER_ID)
+    await on_cb_stop(fake_app._ctx, data=f"stop:{torrent_hash}", q=query, user_id=USER_ID)
 
     mock_task.cancel.assert_called_once()
     # Should navigate to command center
@@ -404,7 +410,7 @@ async def test_cb_stop_delete_fails(fake_app: FakeBotApp, query: MagicMock, monk
 
     monkeypatch.setattr("patchy_bot.handlers.download.asyncio.to_thread", fake_to_thread)
 
-    await on_cb_stop(fake_app, data=f"stop:{torrent_hash}", q=query, user_id=USER_ID)
+    await on_cb_stop(fake_app._ctx, data=f"stop:{torrent_hash}", q=query, user_id=USER_ID)
 
     query.message.edit_text.assert_called_once()
     assert "Failed" in query.message.edit_text.call_args[0][0]
@@ -435,7 +441,7 @@ async def test_cb_stop_tv_category_navigates_to_cc(
     notice_mock.message_id = 999
     query.message.chat.send_message = AsyncMock(return_value=notice_mock)
 
-    await on_cb_stop(fake_app, data=f"stop:{torrent_hash}", q=query, user_id=USER_ID)
+    await on_cb_stop(fake_app._ctx, data=f"stop:{torrent_hash}", q=query, user_id=USER_ID)
 
     # Should navigate to command center
     assert any(name == "command_center" for name, _, _ in fake_app.render_calls)

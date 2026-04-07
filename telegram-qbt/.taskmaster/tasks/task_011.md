@@ -2,7 +2,7 @@
 
 **Title:** Add pytest configuration
 
-**Status:** pending
+**Status:** done
 
 **Dependencies:** None
 

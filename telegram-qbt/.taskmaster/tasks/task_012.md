@@ -2,9 +2,9 @@
 
 **Title:** Test backfill for extracted modules
 
-**Status:** pending
+**Status:** done
 
-**Dependencies:** 4, 5, 6, 7, 8, 9
+**Dependencies:** 4 ✓, 5 ✓, 6 ✓, 7 ✓, 8 ✓, 9 ✓
 
 **Priority:** medium
 

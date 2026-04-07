@@ -181,6 +181,20 @@ class Store:
                     notified_at INTEGER NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS download_health_events (
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at REAL NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    torrent_hash TEXT,
+                    event_type TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    detail_json TEXT NOT NULL,
+                    torrent_name TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_health_events_user ON download_health_events(user_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_health_events_type ON download_health_events(event_type, created_at DESC);
+
                 CREATE TABLE IF NOT EXISTS command_center_ui (
                     user_id INTEGER PRIMARY KEY,
                     chat_id INTEGER NOT NULL,
@@ -193,6 +207,11 @@ class Store:
                 CREATE INDEX IF NOT EXISTS idx_remove_jobs_due ON remove_jobs(status, next_retry_at);
                 """
         )
+        # Add user_id to notified_completions if missing
+        nc_cols = {row[1] for row in conn.execute("PRAGMA table_info(notified_completions)")}
+        if "user_id" not in nc_cols:
+            conn.execute("ALTER TABLE notified_completions ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0")
+
         results_cols = {row[1] for row in conn.execute("PRAGMA table_info(results)")}
         if "quality_score" not in results_cols:
             conn.execute("ALTER TABLE results ADD COLUMN quality_score INTEGER DEFAULT 0")
@@ -248,16 +267,28 @@ class Store:
             ).fetchone()
             return row is not None
 
-    def mark_completion_notified(self, torrent_hash: str, name: str) -> None:
+    def mark_completion_notified(self, torrent_hash: str, name: str, user_id: int = 0) -> None:
         with self._lock:
             if self._closed:
                 raise RuntimeError("Store is closed")
             conn = self._conn
             conn.execute(
-                "INSERT OR IGNORE INTO notified_completions(torrent_hash, name, notified_at) VALUES(?, ?, ?)",
-                (torrent_hash.lower(), name, now_ts()),
+                "INSERT OR IGNORE INTO notified_completions(torrent_hash, name, notified_at, user_id) VALUES(?, ?, ?, ?)",
+                (torrent_hash.lower(), name, now_ts(), user_id),
             )
             conn.commit()
+
+    def get_completion_user_id(self, torrent_hash: str) -> int:
+        """Return the user_id who initiated the download, or 0 if unknown."""
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
+            row = conn.execute(
+                "SELECT user_id FROM notified_completions WHERE torrent_hash = ?",
+                (torrent_hash.lower(),),
+            ).fetchone()
+            return int(row["user_id"]) if row else 0
 
     def get_command_center(self, user_id: int) -> dict[str, int] | None:
         with self._lock:
@@ -294,6 +325,69 @@ class Store:
             conn = self._conn
             conn.execute("DELETE FROM notified_completions WHERE notified_at < ?", (cutoff,))
             conn.commit()
+
+    def log_health_event(
+        self,
+        user_id: int,
+        torrent_hash: str | None,
+        event_type: str,
+        severity: str,
+        detail_json: str,
+        torrent_name: str | None = None,
+    ) -> int:
+        """Insert a download health event and return its event_id."""
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
+            cur = conn.execute(
+                "INSERT INTO download_health_events"
+                "(created_at, user_id, torrent_hash, event_type, severity, detail_json, torrent_name) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?)",
+                (now_ts(), user_id, torrent_hash, event_type, severity, detail_json, torrent_name),
+            )
+            conn.commit()
+            return cur.lastrowid
+
+    def get_health_events(
+        self,
+        user_id: int,
+        *,
+        since_ts: int | None = None,
+        event_type: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Retrieve health events for a user with optional filters."""
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
+            clauses = ["user_id = ?"]
+            params: list[Any] = [user_id]
+            if since_ts is not None:
+                clauses.append("created_at >= ?")
+                params.append(since_ts)
+            if event_type is not None:
+                clauses.append("event_type = ?")
+                params.append(event_type)
+            where = " AND ".join(clauses)
+            params.append(limit)
+            rows = conn.execute(
+                f"SELECT * FROM download_health_events WHERE {where} ORDER BY created_at DESC LIMIT ?",
+                params,
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def cleanup_old_health_events(self, retention_days: int = 30) -> int:
+        """Delete health events older than retention_days. Return count deleted."""
+        cutoff = now_ts() - retention_days * 86400
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
+            cur = conn.execute("DELETE FROM download_health_events WHERE created_at < ?", (cutoff,))
+            conn.commit()
+            return cur.rowcount
 
     def cleanup(self, max_age_hours: int = 24) -> None:
         cutoff = now_ts() - max_age_hours * 3600

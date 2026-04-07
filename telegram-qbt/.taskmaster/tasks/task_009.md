@@ -2,9 +2,9 @@
 
 **Title:** Extract the LLM chat handler
 
-**Status:** pending
+**Status:** done
 
-**Dependencies:** 1, 3
+**Dependencies:** 1 ✓, 3 ✓
 
 **Priority:** low
 

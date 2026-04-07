@@ -5,6 +5,7 @@ active-state filtering, and shared helpers (normalize_media_choice, check_free_s
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -14,9 +15,12 @@ from patchy_bot.handlers._shared import (
     normalize_media_choice,
 )
 from patchy_bot.handlers.download import (
+    completion_poller_job,
     do_add,
+    on_cb_stop,
     render_progress_text,
     resolve_hash_by_name,
+    start_progress_tracker,
     track_download_progress,
 )
 from patchy_bot.utils import _ACTIVE_DL_STATES
@@ -539,13 +543,25 @@ class TestCheckFreeSpace:
         assert ok is False
         assert "Not enough disk space" in msg
 
-    def test_check_free_space_oserror_skips(self, monkeypatch):
-        """OSError on statvfs returns (True, skip message) — no hard failure."""
+    def test_check_free_space_nonexistent_path_blocked(self, monkeypatch):
+        """Non-existent path blocks the download."""
         import os
 
         monkeypatch.setattr(os, "statvfs", MagicMock(side_effect=OSError("No such file")))
+        monkeypatch.setattr(os.path, "exists", lambda p: False)
 
         ok, msg = check_free_space("/nonexistent/path")
+        assert ok is False
+        assert "target path does not exist" in msg
+
+    def test_check_free_space_permission_error_skips(self, monkeypatch):
+        """Existing path with permission error allows download with warning."""
+        import os
+
+        monkeypatch.setattr(os, "statvfs", MagicMock(side_effect=OSError("Permission denied")))
+        monkeypatch.setattr(os.path, "exists", lambda p: True)
+
+        ok, msg = check_free_space("/restricted/path")
         assert ok is True
         assert "skipped" in msg.lower()
 
@@ -567,3 +583,475 @@ class TestCheckFreeSpace:
         # Block threshold = 512 MiB → ok (1 GiB > 512 MiB)
         ok2, _ = check_free_space("/any/path", block_bytes=512 * 1024**2)
         assert ok2 is True
+
+
+# ---------------------------------------------------------------------------
+# 8f: on_cb_stop hash validation
+# ---------------------------------------------------------------------------
+
+
+class TestOnCbStopHashValidation:
+    """on_cb_stop rejects invalid torrent hashes before any qBT API call."""
+
+    @pytest.mark.asyncio
+    async def test_rejects_short_hash(self, mock_callback_query):
+        """Too-short hash is rejected with 'Invalid hash' alert."""
+        ctx = MagicMock()
+        ctx.progress_tasks = {}
+        await on_cb_stop(ctx, data="stop:abc123", q=mock_callback_query, user_id=12345)
+        mock_callback_query.answer.assert_awaited_once_with("Invalid hash", show_alert=True)
+
+    @pytest.mark.asyncio
+    async def test_rejects_uppercase_hash(self, mock_callback_query):
+        """Uppercase hex chars are rejected (pattern requires lowercase)."""
+        ctx = MagicMock()
+        ctx.progress_tasks = {}
+        await on_cb_stop(ctx, data="stop:" + "A" * 40, q=mock_callback_query, user_id=12345)
+        mock_callback_query.answer.assert_awaited_once_with("Invalid hash", show_alert=True)
+
+    @pytest.mark.asyncio
+    async def test_rejects_nonhex_hash(self, mock_callback_query):
+        """Non-hex characters are rejected."""
+        ctx = MagicMock()
+        ctx.progress_tasks = {}
+        await on_cb_stop(ctx, data="stop:" + "g" * 40, q=mock_callback_query, user_id=12345)
+        mock_callback_query.answer.assert_awaited_once_with("Invalid hash", show_alert=True)
+
+    @pytest.mark.asyncio
+    async def test_rejects_empty_hash(self, mock_callback_query):
+        """Empty string after 'stop:' prefix is rejected."""
+        ctx = MagicMock()
+        ctx.progress_tasks = {}
+        await on_cb_stop(ctx, data="stop:", q=mock_callback_query, user_id=12345)
+        mock_callback_query.answer.assert_awaited_once_with("Invalid hash", show_alert=True)
+
+    @pytest.mark.asyncio
+    @patch("patchy_bot.handlers.download.flow_mod.clear_flow")
+    @patch("patchy_bot.handlers.download.render_mod.cancel_pending_trackers_for_user")
+    async def test_valid_hash_proceeds(self, _mock_cancel, _mock_clear, mock_callback_query):
+        """Valid 40-char lowercase hex hash does NOT trigger early return."""
+        ctx = MagicMock()
+        ctx.progress_tasks = {}
+        ctx.user_nav_ui = {}
+        ctx.qbt.get_torrent = MagicMock(return_value={"name": "Test"})
+        ctx.qbt.delete_torrent = MagicMock(return_value=None)
+        ctx.store.get_command_center = MagicMock(return_value=None)
+        ctx.navigate_to_command_center = AsyncMock()
+        mock_callback_query.message.chat = MagicMock()
+        mock_callback_query.message.chat.send_message = AsyncMock(return_value=MagicMock(message_id=999))
+        mock_callback_query.get_bot = MagicMock(return_value=MagicMock())
+
+        valid_hash = "a" * 40
+        await on_cb_stop(ctx, data=f"stop:{valid_hash}", q=mock_callback_query, user_id=12345)
+        # Should NOT have been called with "Invalid hash" — it should proceed to the delete path
+        for call in mock_callback_query.answer.await_args_list:
+            assert call.args != ("Invalid hash",) if call.args else True
+
+    @pytest.mark.asyncio
+    async def test_delete_failure_shows_error(self, mock_callback_query):
+        """When qBT delete raises, error message is shown."""
+        ctx = MagicMock()
+        ctx.progress_tasks = {}
+        ctx.qbt.get_torrent = MagicMock(return_value={"name": "Test"})
+        ctx.qbt.delete_torrent = MagicMock(side_effect=RuntimeError("connection refused"))
+        mock_callback_query.message.edit_text = AsyncMock()
+
+        valid_hash = "a" * 40
+        await on_cb_stop(ctx, data=f"stop:{valid_hash}", q=mock_callback_query, user_id=12345)
+        mock_callback_query.message.edit_text.assert_awaited_once()
+        call_args = mock_callback_query.message.edit_text.await_args
+        assert "Stop Failed" in call_args.args[0]
+
+    @pytest.mark.asyncio
+    @patch("patchy_bot.handlers.download.flow_mod.clear_flow")
+    @patch("patchy_bot.handlers.download.render_mod.cancel_pending_trackers_for_user")
+    async def test_cc_recovery_from_db(self, _mock_cancel, _mock_clear, mock_callback_query):
+        """Command center navigation is invoked after successful stop."""
+        ctx = MagicMock()
+        ctx.progress_tasks = {}
+        ctx.user_nav_ui = {}
+        ctx.qbt.get_torrent = MagicMock(return_value={"name": "Test"})
+        ctx.qbt.delete_torrent = MagicMock(return_value=None)
+        ctx.store.get_command_center = MagicMock(return_value=None)
+        ctx.navigate_to_command_center = AsyncMock()
+        mock_callback_query.message.chat = MagicMock()
+        mock_callback_query.message.chat.send_message = AsyncMock(return_value=MagicMock(message_id=999))
+        mock_callback_query.get_bot = MagicMock(return_value=MagicMock())
+
+        valid_hash = "a" * 40
+        await on_cb_stop(ctx, data=f"stop:{valid_hash}", q=mock_callback_query, user_id=12345)
+        # navigate_to_command_center should have been called
+        ctx.navigate_to_command_center.assert_awaited_once()
+        call_args = ctx.navigate_to_command_center.await_args
+        assert call_args[0][1] == 12345  # user_id
+
+
+# ---------------------------------------------------------------------------
+# 8g: completion_poller_job
+# ---------------------------------------------------------------------------
+
+# A fully-complete torrent dict used across multiple poller tests.
+_COMPLETE_TORRENT = {
+    "hash": "a" * 40,
+    "name": "Test.Show.S01E01",
+    "progress": 1.0,
+    "state": "uploading",
+    "amount_left": 0,
+    "content_path": "/dl/test",
+    "category": "Movies",
+    "size": 1_073_741_824,
+}
+
+
+class TestCompletionPollerJob:
+    """Tests for completion_poller_job — the background completion sweep."""
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _make_app(self):
+        """Return a MagicMock that looks enough like a PTB Application."""
+        app = MagicMock()
+        app.bot = MagicMock()
+        app.bot.send_message = AsyncMock(return_value=MagicMock(chat_id=12345, message_id=1))
+        return app
+
+    # ------------------------------------------------------------------
+    # test_skips_already_notified
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    @patch("patchy_bot.handlers.download._organize_download")
+    async def test_skips_already_notified(self, mock_org, mock_ctx):
+        """When is_completion_notified returns True, nothing is marked or sent."""
+        mock_ctx.app = self._make_app()
+        mock_ctx.qbt.list_torrents = MagicMock(return_value=[dict(_COMPLETE_TORRENT)])
+        mock_ctx.store.is_completion_notified = MagicMock(return_value=True)
+        mock_ctx.store.mark_completion_notified = MagicMock()
+        mock_ctx.store.cleanup_old_completion_records = MagicMock()
+
+        await completion_poller_job(mock_ctx, MagicMock())
+
+        mock_ctx.store.mark_completion_notified.assert_not_called()
+        mock_ctx.app.bot.send_message.assert_not_awaited()
+
+    # ------------------------------------------------------------------
+    # test_skips_non_complete_torrent
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    @patch("patchy_bot.handlers.download._organize_download")
+    async def test_skips_non_complete_torrent(self, mock_org, mock_ctx):
+        """Torrent with progress=0.5 / state=downloading is skipped entirely.
+
+        is_completion_notified must NOT be called because the torrent fails
+        is_complete_torrent before we ever hit the store.
+        """
+        incomplete = dict(_COMPLETE_TORRENT)
+        incomplete["progress"] = 0.5
+        incomplete["state"] = "downloading"
+        incomplete["amount_left"] = 500_000_000
+
+        mock_ctx.app = self._make_app()
+        mock_ctx.qbt.list_torrents = MagicMock(return_value=[incomplete])
+        mock_ctx.store.is_completion_notified = MagicMock(return_value=False)
+        mock_ctx.store.mark_completion_notified = MagicMock()
+        mock_ctx.store.cleanup_old_completion_records = MagicMock()
+
+        await completion_poller_job(mock_ctx, MagicMock())
+
+        mock_ctx.store.is_completion_notified.assert_not_called()
+        mock_ctx.store.mark_completion_notified.assert_not_called()
+
+    # ------------------------------------------------------------------
+    # test_mark_before_send
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    @patch("patchy_bot.handlers.download._organize_download")
+    async def test_mark_before_send(self, mock_org, mock_ctx):
+        """mark_completion_notified is called before send_message."""
+        call_order: list[str] = []
+
+        mock_org.return_value = MagicMock(moved=False, new_path="", summary="", files_moved=0)
+        mock_ctx.app = self._make_app()
+        mock_ctx.qbt.list_torrents = MagicMock(return_value=[dict(_COMPLETE_TORRENT)])
+        mock_ctx.store.is_completion_notified = MagicMock(return_value=False)
+        mock_ctx.store.cleanup_old_completion_records = MagicMock()
+
+        def _mark(torrent_hash, name):
+            call_order.append("mark")
+
+        mock_ctx.store.mark_completion_notified = MagicMock(side_effect=_mark)
+
+        async def _send(**kwargs):
+            call_order.append("send")
+            return MagicMock(chat_id=12345, message_id=1)
+
+        mock_ctx.app.bot.send_message = _send
+
+        await completion_poller_job(mock_ctx, MagicMock())
+
+        assert "mark" in call_order, "mark_completion_notified was never called"
+        assert "send" in call_order, "send_message was never called"
+        assert call_order.index("mark") < call_order.index("send"), (
+            "mark_completion_notified must be called before send_message"
+        )
+
+    # ------------------------------------------------------------------
+    # test_plex_organize_and_scan
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    @patch("patchy_bot.handlers.download._organize_download")
+    async def test_plex_organize_and_scan(self, mock_org, mock_ctx):
+        """Both _organize_download and plex.refresh_for_path are called when Plex is ready."""
+        mock_org.return_value = MagicMock(
+            moved=True, new_path="/plex/Movies/Test", summary="Moved to Movies", files_moved=1
+        )
+        mock_ctx.app = self._make_app()
+        mock_ctx.plex.ready.return_value = True
+        mock_ctx.plex.refresh_for_path = MagicMock(return_value="Scanned 1 item")
+        mock_ctx.qbt.list_torrents = MagicMock(return_value=[dict(_COMPLETE_TORRENT)])
+        mock_ctx.store.is_completion_notified = MagicMock(return_value=False)
+        mock_ctx.store.mark_completion_notified = MagicMock()
+        mock_ctx.store.cleanup_old_completion_records = MagicMock()
+
+        await completion_poller_job(mock_ctx, MagicMock())
+
+        mock_org.assert_called_once()
+        mock_ctx.plex.refresh_for_path.assert_called_once_with("/plex/Movies/Test")
+
+    # ------------------------------------------------------------------
+    # test_plex_skipped_when_not_ready
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    @patch("patchy_bot.handlers.download._organize_download")
+    async def test_plex_skipped_when_not_ready(self, mock_org, mock_ctx):
+        """refresh_for_path is NOT called when plex.ready() returns False."""
+        mock_org.return_value = MagicMock(moved=False, new_path="", summary="", files_moved=0)
+        mock_ctx.app = self._make_app()
+        mock_ctx.plex.ready.return_value = False
+        mock_ctx.plex.refresh_for_path = MagicMock()
+        mock_ctx.qbt.list_torrents = MagicMock(return_value=[dict(_COMPLETE_TORRENT)])
+        mock_ctx.store.is_completion_notified = MagicMock(return_value=False)
+        mock_ctx.store.mark_completion_notified = MagicMock()
+        mock_ctx.store.cleanup_old_completion_records = MagicMock()
+
+        await completion_poller_job(mock_ctx, MagicMock())
+
+        mock_ctx.plex.refresh_for_path.assert_not_called()
+
+    # ------------------------------------------------------------------
+    # test_error_in_one_torrent_doesnt_break_others
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    @patch("patchy_bot.handlers.download._organize_download")
+    async def test_error_in_one_torrent_doesnt_break_others(self, mock_org, mock_ctx):
+        """send_message raising on the 2nd torrent does not prevent the 3rd from being marked."""
+        mock_org.return_value = MagicMock(moved=False, new_path="", summary="", files_moved=0)
+
+        t1 = dict(_COMPLETE_TORRENT, hash="1" * 40, name="Torrent One")
+        t2 = dict(_COMPLETE_TORRENT, hash="2" * 40, name="Torrent Two")
+        t3 = dict(_COMPLETE_TORRENT, hash="3" * 40, name="Torrent Three")
+
+        mock_ctx.app = self._make_app()
+        send_call_count = 0
+
+        async def _send_maybe_raise(**kwargs):
+            nonlocal send_call_count
+            send_call_count += 1
+            if send_call_count == 2:
+                raise RuntimeError("Telegram timeout")
+            return MagicMock(chat_id=12345, message_id=send_call_count)
+
+        mock_ctx.app.bot.send_message = _send_maybe_raise
+        mock_ctx.qbt.list_torrents = MagicMock(return_value=[t1, t2, t3])
+        mock_ctx.store.is_completion_notified = MagicMock(return_value=False)
+        mock_ctx.store.mark_completion_notified = MagicMock()
+        mock_ctx.store.cleanup_old_completion_records = MagicMock()
+
+        await completion_poller_job(mock_ctx, MagicMock())
+
+        # mark_completion_notified must have been called for all 3 torrents
+        assert mock_ctx.store.mark_completion_notified.call_count == 3
+
+    # ------------------------------------------------------------------
+    # test_notification_sent_to_all_allowed_users
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    @patch("patchy_bot.handlers.download._organize_download")
+    async def test_notification_sent_to_all_allowed_users(self, mock_org, mock_ctx):
+        """send_message is called once per allowed user ID."""
+        mock_org.return_value = MagicMock(moved=False, new_path="", summary="", files_moved=0)
+
+        mock_ctx.app = self._make_app()
+        mock_ctx.cfg.allowed_user_ids = {111, 222, 333}
+        mock_ctx.qbt.list_torrents = MagicMock(return_value=[dict(_COMPLETE_TORRENT)])
+        mock_ctx.store.is_completion_notified = MagicMock(return_value=False)
+        mock_ctx.store.mark_completion_notified = MagicMock()
+        mock_ctx.store.cleanup_old_completion_records = MagicMock()
+
+        sent_to: list[int] = []
+
+        async def _capture_send(**kwargs):
+            sent_to.append(kwargs["chat_id"])
+            return MagicMock(chat_id=kwargs["chat_id"], message_id=1)
+
+        mock_ctx.app.bot.send_message = _capture_send
+
+        await completion_poller_job(mock_ctx, MagicMock())
+
+        assert sorted(sent_to) == [111, 222, 333]
+
+    # ------------------------------------------------------------------
+    # test_cleanup_old_records_called
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    @patch("patchy_bot.handlers.download._organize_download")
+    async def test_cleanup_old_records_called(self, mock_org, mock_ctx):
+        """cleanup_old_completion_records is called exactly once per run."""
+        mock_org.return_value = MagicMock(moved=False, new_path="", summary="", files_moved=0)
+
+        mock_ctx.app = self._make_app()
+        # Empty torrent list — no completions at all this run.
+        mock_ctx.qbt.list_torrents = MagicMock(return_value=[])
+        mock_ctx.store.cleanup_old_completion_records = MagicMock()
+
+        await completion_poller_job(mock_ctx, MagicMock())
+
+        mock_ctx.store.cleanup_old_completion_records.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# TestProgressTrackerRaceGuard
+# ---------------------------------------------------------------------------
+
+
+class TestProgressTrackerRaceGuard:
+    """Tests for the race-condition guard in start_progress_tracker /
+    track_download_progress."""
+
+    @pytest.mark.asyncio
+    async def test_start_tracker_cancels_existing(self):
+        """Calling start_progress_tracker twice for the same key cancels the first task."""
+        ctx = MagicMock()
+        ctx.progress_tasks = {}
+        ctx.user_flow = {}
+        msg2 = MagicMock(chat_id=1, message_id=2)
+
+        # Seed a fake "existing" task that is not yet done.
+        first_task = asyncio.Future()
+        key = (12345, "a" * 40)
+        ctx.progress_tasks[key] = first_task
+
+        with patch(
+            "patchy_bot.handlers.download.track_download_progress",
+            new_callable=AsyncMock,
+        ) as mock_track:
+            mock_track.return_value = None
+            start_progress_tracker(ctx, 12345, "a" * 40, msg2, "Test")
+
+        assert first_task.cancelled()
+        assert ctx.progress_tasks[key] is not first_task
+
+    @pytest.mark.asyncio
+    async def test_task_is_named(self):
+        """The asyncio Task created by start_progress_tracker carries the expected name."""
+        ctx = MagicMock()
+        ctx.progress_tasks = {}
+        ctx.user_flow = {}
+        msg = MagicMock(chat_id=1, message_id=1)
+
+        with patch(
+            "patchy_bot.handlers.download.track_download_progress",
+            new_callable=AsyncMock,
+        ) as mock_track:
+            mock_track.return_value = None
+            start_progress_tracker(ctx, 12345, "ABCD" * 10, msg, "Test")
+
+        task = ctx.progress_tasks[(12345, "abcd" * 10)]
+        assert task.get_name() == f"progress:12345:{'abcd' * 10}"
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    @pytest.mark.asyncio
+    async def test_replaced_tracker_exits_gracefully(self):
+        """A tracker that finds itself replaced in progress_tasks exits on the next loop
+        iteration without raising."""
+        ctx = MagicMock()
+        ctx.progress_tasks = {}
+        ctx.cfg.progress_track_timeout_s = 300
+        ctx.cfg.progress_refresh_s = 0.01
+        ctx.cfg.progress_edit_min_s = 0
+        ctx.cfg.progress_smoothing_alpha = 0.35
+
+        tracker_msg = MagicMock()
+        tracker_msg.edit_text = AsyncMock()
+
+        key = (12345, "a" * 40)
+
+        task = asyncio.create_task(track_download_progress(ctx, 12345, "a" * 40, tracker_msg, "Test"))
+        ctx.progress_tasks[key] = task
+
+        # Let it run at least one iteration.
+        await asyncio.sleep(0.05)
+
+        # Replace the entry — the running tracker should detect the mismatch and return.
+        ctx.progress_tasks[key] = asyncio.Future()
+
+        # Should complete cleanly within a generous timeout.
+        await asyncio.wait_for(task, timeout=2.0)
+
+        # The task finished without an exception.
+        assert not task.cancelled()
+        assert task.exception() is None
+
+
+# ---------------------------------------------------------------------------
+# TestAutoDeleteTaskTracking
+# ---------------------------------------------------------------------------
+
+
+class TestAutoDeleteTaskTracking:
+    """on_cb_stop tracks the auto-delete task in ctx.background_tasks."""
+
+    @pytest.mark.asyncio
+    @patch("patchy_bot.handlers.download.flow_mod.clear_flow")
+    @patch("patchy_bot.handlers.download.render_mod.cancel_pending_trackers_for_user")
+    async def test_auto_delete_task_tracked(self, _mock_cancel, _mock_clear, mock_callback_query):
+        """After successful stop, the auto-delete task is added to ctx.background_tasks."""
+        ctx = MagicMock()
+        ctx.progress_tasks = {}
+        ctx.user_nav_ui = {}
+        ctx.background_tasks = set()
+        ctx.qbt.get_torrent = MagicMock(return_value={"name": "Test"})
+        ctx.qbt.delete_torrent = MagicMock(return_value=None)
+        ctx.store.get_command_center = MagicMock(return_value=None)
+        ctx.navigate_to_command_center = AsyncMock()
+        mock_callback_query.message.chat = MagicMock()
+        mock_callback_query.message.chat.send_message = AsyncMock(return_value=MagicMock(message_id=999))
+        mock_callback_query.message.chat_id = 12345
+        mock_callback_query.get_bot = MagicMock(return_value=MagicMock())
+
+        valid_hash = "a" * 40
+        await on_cb_stop(ctx, data=f"stop:{valid_hash}", q=mock_callback_query, user_id=12345)
+
+        # A task should have been added to background_tasks
+        assert len(ctx.background_tasks) == 1
+        del_task = next(iter(ctx.background_tasks))
+        assert del_task.get_name().startswith("auto-delete:")
+
+        # Clean up: cancel the sleep-10 task so it doesn't leak
+        del_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await del_task
+
+        # The done callback should have discarded it from the set
+        assert len(ctx.background_tasks) == 0

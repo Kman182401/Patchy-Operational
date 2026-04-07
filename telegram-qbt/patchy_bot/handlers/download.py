@@ -8,18 +8,21 @@ Instance methods take a HandlerContext as their first argument.
 from __future__ import annotations
 
 import asyncio
+import errno as _errno
+import json
 import logging
 import re
 import time
 import urllib.parse
 from typing import Any
 
-import requests
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from ..plex_organizer import organize_download as _organize_download
 from ..types import HandlerContext
+from ..ui import flow as flow_mod
+from ..ui import rendering as render_mod
 from ..utils import _PM, _h, human_size, normalize_title
 from ._shared import (
     check_free_space,
@@ -250,8 +253,10 @@ def start_progress_tracker(ctx: HandlerContext, user_id: int, torrent_hash: str,
     if existing and not existing.done():
         existing.cancel()
 
-    track_ephemeral_message(ctx, user_id, tracker_msg)
-    task = asyncio.create_task(track_download_progress(ctx, user_id, torrent_hash, tracker_msg, title))
+    task = asyncio.create_task(
+        track_download_progress(ctx, user_id, torrent_hash, tracker_msg, title),
+        name=f"progress:{user_id}:{torrent_hash.lower()}",
+    )
     ctx.progress_tasks[key] = task
 
 
@@ -312,13 +317,40 @@ async def track_download_progress(
     smooth_uls: float | None = None
     alpha = ctx.cfg.progress_smoothing_alpha
 
+    # Stall detection state
+    metadata_stall_start: float | None = None
+    zero_progress_start: float | None = None
+    stall_warned: bool = False
+
     try:
         while True:
+            # If another tracker replaced us in progress_tasks, exit gracefully.
+            incumbent = ctx.progress_tasks.get(key)
+            if incumbent is not None and incumbent is not asyncio.current_task():
+                return
+
             elapsed = time.time() - start
             if elapsed > ctx.cfg.progress_track_timeout_s:
+                # Fetch final state for diagnostic info
+                state_line = ""
+                try:
+                    final_info = await asyncio.to_thread(ctx.qbt.get_torrent, torrent_hash)
+                    if final_info:
+                        final_state = str(final_info.get("state") or "unknown")
+                        final_progress = float(final_info.get("progress", 0) or 0)
+                        final_speed = int(final_info.get("dlspeed", 0) or 0)
+                        state_line = (
+                            f"\n\n<b>Last Known State:</b>\n"
+                            f"State: <code>{_h(final_state)}</code>\n"
+                            f"Progress: {final_progress * 100:.1f}%\n"
+                            f"Speed: {human_size(final_speed)}/s"
+                        )
+                except Exception:
+                    state_line = "\n\n<i>Could not retrieve final torrent state.</i>"
+
                 timeout_text = (
                     (last_text + "\n") if last_text else ""
-                ) + "<b>\u23f1 Monitor Timed Out</b>\nUse <code>/active</code> for current status."
+                ) + f"<b>\u23f1 Monitor Timed Out</b>\nUse <code>/active</code> for current status.{state_line}"
                 if timeout_text != last_text:
                     edited = await safe_tracker_edit(tracker_msg, timeout_text, reply_markup=None)
                     if edited:
@@ -327,7 +359,7 @@ async def track_download_progress(
                         await tracker_send_fallback(
                             ctx,
                             tracker_msg,
-                            "<b>\u23f1 Monitor Timed Out</b>\nUse <code>/active</code> for current status.",
+                            f"<b>\u23f1 Monitor Timed Out</b>\nUse <code>/active</code> for current status.{state_line}",
                         )
                 break
 
@@ -353,10 +385,26 @@ async def track_download_progress(
                     await asyncio.sleep(ctx.cfg.progress_refresh_s)
                     tick += 1
                     continue
-                notice = "<b>\u26a0\ufe0f Torrent Not Found</b>\n<i>Could not locate torrent for tracking.</i> Use <code>/active</code>."
+                notice = (
+                    "<b>\u26a0\ufe0f Torrent Not Found</b>\n"
+                    "<i>Lost track of download — torrent not found in qBittorrent.</i>\n"
+                    "This can happen if qBittorrent rejected the torrent or the magnet link was invalid.\n\n"
+                    "Check qBittorrent WebUI directly, or use <code>/active</code>."
+                )
                 edited = await safe_tracker_edit(tracker_msg, notice, reply_markup=None)
                 if not edited:
                     await tracker_send_fallback(ctx, tracker_msg, notice)
+                try:
+                    ctx.store.log_health_event(
+                        user_id,
+                        torrent_hash,
+                        "hash_resolve_fail",
+                        "error",
+                        json.dumps({"elapsed_s": int(elapsed)}),
+                        title,
+                    )
+                except Exception:
+                    LOG.debug("Failed to log hash_resolve_fail health event", exc_info=True)
                 break
 
             raw_progress_pct = max(0.0, min(100.0, float(info.get("progress", 0.0) or 0.0) * 100.0))
@@ -371,6 +419,81 @@ async def track_download_progress(
                 smooth_progress_pct = ((1.0 - alpha) * smooth_progress_pct) + (alpha * raw_progress_pct)
                 smooth_dls = ((1.0 - alpha) * smooth_dls) + (alpha * raw_dls)
                 smooth_uls = ((1.0 - alpha) * smooth_uls) + (alpha * raw_uls)
+
+            # --- Stall detection ---
+            current_ts = time.time()
+            state = str(info.get("state") or "")
+            progress = float(info.get("progress", 0) or 0)
+            dlspeed = int(info.get("dlspeed", 0) or 0)
+
+            # Metadata stall: stuck in metaDL for too long
+            if state in ("metaDL", "forcedMetaDL"):
+                if metadata_stall_start is None:
+                    metadata_stall_start = current_ts
+                elif not stall_warned and (current_ts - metadata_stall_start) >= ctx.cfg.stall_metadata_warn_s:
+                    stall_warned = True
+                    elapsed_s = int(current_ts - metadata_stall_start)
+                    tracker_detail: dict[str, Any] = {"state": state, "elapsed_s": elapsed_s}
+                    try:
+                        trackers = await asyncio.to_thread(ctx.qbt.get_torrent_trackers, torrent_hash)
+                        failed = [t for t in trackers if t.get("status") == 4]
+                        tracker_detail["failed_trackers"] = len(failed)
+                        tracker_detail["total_trackers"] = len(trackers)
+                        tracker_msg_text = (
+                            f"{len(failed)}/{len(trackers)} trackers failing" if failed else "trackers responding"
+                        )
+                    except Exception:
+                        tracker_msg_text = "tracker status unknown"
+                    warn_text = (
+                        f"\u26a0\ufe0f <b>Download Stalled</b>\n\n"
+                        f"<code>{_h(title)}</code>\n\n"
+                        f"Stuck getting metadata for {elapsed_s // 60}m {elapsed_s % 60}s ({tracker_msg_text})\n\n"
+                        f"You may want to cancel and try a different torrent."
+                    )
+                    await tracker_send_fallback(ctx, tracker_msg, warn_text)
+                    try:
+                        ctx.store.log_health_event(
+                            user_id,
+                            torrent_hash,
+                            "stall_detected",
+                            "warn",
+                            json.dumps(tracker_detail),
+                            title,
+                        )
+                    except Exception:
+                        pass
+            else:
+                metadata_stall_start = None
+
+            # Zero-progress stall: downloading but no actual progress
+            if state in ("downloading", "forcedDL", "stalledDL") and progress < 0.01 and dlspeed == 0:
+                if zero_progress_start is None:
+                    zero_progress_start = current_ts
+                elif not stall_warned and (current_ts - zero_progress_start) >= ctx.cfg.stall_zero_progress_warn_s:
+                    stall_warned = True
+                    elapsed_s = int(current_ts - zero_progress_start)
+                    warn_text = (
+                        f"\u26a0\ufe0f <b>Download Stalled</b>\n\n"
+                        f"<code>{_h(title)}</code>\n\n"
+                        f"Download at 0% with no speed for {elapsed_s // 60}m {elapsed_s % 60}s\n\n"
+                        f"You may want to cancel and try a different torrent."
+                    )
+                    await tracker_send_fallback(ctx, tracker_msg, warn_text)
+                    try:
+                        ctx.store.log_health_event(
+                            user_id,
+                            torrent_hash,
+                            "stall_detected",
+                            "warn",
+                            json.dumps({"state": state, "elapsed_s": elapsed_s, "progress": progress}),
+                            title,
+                        )
+                    except Exception:
+                        pass
+            elif progress > 0.01 or dlspeed > 0:
+                zero_progress_start = None
+                if stall_warned:
+                    stall_warned = False  # Reset warning flag if progress resumes
 
             text = render_progress_text(
                 title,
@@ -413,34 +536,78 @@ async def track_download_progress(
                 )
                 await safe_tracker_edit(tracker_msg, done_text, reply_markup=None)
                 # Mark as notified so the background poller won't double-notify.
-                await asyncio.to_thread(ctx.store.mark_completion_notified, torrent_hash, title)
+                await asyncio.to_thread(ctx.store.mark_completion_notified, torrent_hash, title, user_id)
                 # Organize download into Plex-standard structure.
                 media_path = str(info.get("content_path") or info.get("save_path") or "").strip()
                 category = str(info.get("category") or "")
-                org_result = await asyncio.to_thread(
-                    _organize_download,
-                    media_path,
-                    category,
-                    ctx.cfg.tv_path,
-                    ctx.cfg.movies_path,
-                )
-                if org_result.moved:
+                try:
+                    org_result = await asyncio.to_thread(
+                        _organize_download,
+                        media_path,
+                        category,
+                        ctx.cfg.tv_path,
+                        ctx.cfg.movies_path,
+                    )
+                except OSError as e:
+                    if e.errno == _errno.ENOSPC:
+                        LOG.error("Disk full during organize for %s: %s", title, e)
+                        await tracker_send_fallback(
+                            ctx,
+                            tracker_msg,
+                            f"\u274c <b>Disk Full</b>\n\n"
+                            f"<code>{_h(title)}</code>\n\n"
+                            f"Cannot move file to Plex library \u2014 disk is full.\n"
+                            f"Free up space and the file will be organized on the next completion poll.",
+                        )
+                        try:
+                            ctx.store.log_health_event(
+                                user_id,
+                                torrent_hash,
+                                "organize_error",
+                                "critical",
+                                json.dumps({"error": "ENOSPC", "path": media_path}),
+                                title,
+                            )
+                        except Exception:
+                            pass
+                        org_result = None
+                    else:
+                        raise
+                if org_result is not None and org_result.moved:
                     media_path = org_result.new_path
+                if org_result is not None and not org_result.moved and "unknown category" in org_result.summary:
+                    LOG.warning("Unknown category '%s' for torrent %s", category, title)
+                    try:
+                        ctx.store.log_health_event(
+                            user_id,
+                            torrent_hash,
+                            "category_unknown",
+                            "warn",
+                            json.dumps({"category": category, "save_path": media_path}),
+                            title,
+                        )
+                    except Exception:
+                        LOG.debug("Failed to log category_unknown health event", exc_info=True)
                 # Trigger a Plex library scan for the (possibly new) download path.
                 plex_added = False
+                plex_failed = False
                 if ctx.plex.ready() and media_path:
                     try:
-                        plex_msg = await asyncio.to_thread(ctx.plex.refresh_for_path, media_path)
-                        LOG.info("Post-download Plex refresh: %s", plex_msg)
+                        plex_msg = await asyncio.to_thread(ctx.plex.purge_deleted_path, media_path)
+                        LOG.info("Post-download Plex refresh+trash: %s", plex_msg)
                         plex_added = True
                     except Exception:
                         LOG.warning("Post-download Plex refresh failed for %s", media_path, exc_info=True)
+                        plex_failed = True
                 notif_text = f"<b>\u2705 Download Complete</b>\n<code>{_h(title)}</code>"
-                if org_result.moved:
+                if org_result is not None and org_result.moved:
                     notif_text += f"\n<b>\U0001f4c1 Organized:</b> {_h(org_result.summary)}"
                 if plex_added:
                     notif_text += "\n\n<b>\U0001f4da Added to Plex</b>"
-                await tracker_send_fallback(ctx, tracker_msg, notif_text)
+                elif plex_failed:
+                    notif_text += "\n\n⚠️ <b>Plex scan failed</b> — may need manual refresh"
+                if org_result is not None:
+                    await tracker_send_fallback(ctx, tracker_msg, notif_text)
                 break
 
             tick += 1
@@ -495,18 +662,61 @@ async def completion_poller_job(ctx: HandlerContext, context: ContextTypes.DEFAU
 
         # Organize download into Plex-standard structure.
         media_path = str(info.get("content_path") or info.get("save_path") or "").strip()
-        org_result = await asyncio.to_thread(
-            _organize_download,
-            media_path,
-            category,
-            ctx.cfg.tv_path,
-            ctx.cfg.movies_path,
-        )
-        if org_result.moved:
+        try:
+            org_result = await asyncio.to_thread(
+                _organize_download,
+                media_path,
+                category,
+                ctx.cfg.tv_path,
+                ctx.cfg.movies_path,
+            )
+        except OSError as e:
+            if e.errno == _errno.ENOSPC:
+                LOG.error("Disk full during organize for %s: %s", name, e)
+                for uid in ctx.cfg.allowed_user_ids:
+                    try:
+                        await ctx.app.bot.send_message(
+                            chat_id=uid,
+                            text=f"\u274c <b>Disk Full</b>\n\n"
+                            f"<code>{_h(name)}</code>\n\n"
+                            f"Cannot move file to Plex library \u2014 disk is full.",
+                            parse_mode=_PM,
+                        )
+                    except Exception:
+                        pass
+                try:
+                    ctx.store.log_health_event(
+                        0,
+                        torrent_hash,
+                        "organize_error",
+                        "critical",
+                        json.dumps({"error": "ENOSPC", "path": media_path}),
+                        name,
+                    )
+                except Exception:
+                    pass
+                org_result = None
+            else:
+                raise
+        if org_result is not None and org_result.moved:
             media_path = org_result.new_path
+        if org_result is not None and not org_result.moved and "unknown category" in org_result.summary:
+            LOG.warning("Unknown category '%s' for torrent %s", category, name)
+            try:
+                ctx.store.log_health_event(
+                    0,
+                    torrent_hash,
+                    "category_unknown",
+                    "warn",
+                    json.dumps({"category": category, "save_path": media_path}),
+                    name,
+                )
+            except Exception:
+                LOG.debug("Failed to log category_unknown health event", exc_info=True)
 
         # Trigger Plex scan.
         plex_added = False
+        plex_failed = False
         if ctx.plex.ready() and media_path:
             try:
                 plex_msg = await asyncio.to_thread(ctx.plex.refresh_for_path, media_path)
@@ -514,6 +724,7 @@ async def completion_poller_job(ctx: HandlerContext, context: ContextTypes.DEFAU
                 plex_added = True
             except Exception:
                 LOG.warning("Completion poller Plex refresh failed for %s", media_path, exc_info=True)
+                plex_failed = True
 
         # Build notification.
         lines = ["<b>\u2705 Download Complete</b>", f"<code>{_h(name)}</code>"]
@@ -521,11 +732,14 @@ async def completion_poller_job(ctx: HandlerContext, context: ContextTypes.DEFAU
             lines.append(f"Category: <b>{_h(category)}</b>")
         if size > 0:
             lines.append(f"Size: <b>{human_size(size)}</b>")
-        if org_result.moved:
+        if org_result is not None and org_result.moved:
             lines.append(f"<b>\U0001f4c1 Organized:</b> {_h(org_result.summary)}")
         if plex_added:
             lines.append("")
             lines.append("<b>\U0001f4da Added to Plex</b>")
+        elif plex_failed:
+            lines.append("")
+            lines.append("⚠️ <b>Plex scan failed</b> — may need manual refresh")
         text = "\n".join(lines)
 
         # Send to all allowed users.
@@ -580,7 +794,7 @@ def result_to_url(result_row: dict[str, Any]) -> str:
     h = (result_row.get("hash") or "").strip().lower()
     name = (result_row.get("name") or "torrent").strip()
     if re.fullmatch(r"[a-f0-9]{40}", h):
-        return f"magnet:?xt=urn:btih:{h}&dn={requests.utils.quote(name)}"
+        return f"magnet:?xt=urn:btih:{h}&dn={urllib.parse.quote(name)}"
 
     for k in ("file_url", "url"):
         v = (result_row.get(k) or "").strip()
@@ -691,15 +905,59 @@ async def do_add(
     transport_ok, transport_reason = transport_result
     vpn_ok, vpn_reason = vpn_result
     if not ok:
+        try:
+            ctx.store.log_health_event(
+                user_id,
+                None,
+                "preflight_fail",
+                "error",
+                json.dumps({"check": "storage_categories", "reason": reason}),
+                str(row.get("name", "unknown")),
+            )
+        except Exception:
+            pass
         raise RuntimeError(f"Storage/category routing not ready: {reason}")
     if not transport_ok:
+        try:
+            ctx.store.log_health_event(
+                user_id,
+                None,
+                "preflight_fail",
+                "error",
+                json.dumps({"check": "qbt_transport", "reason": transport_reason}),
+                str(row.get("name", "unknown")),
+            )
+        except Exception:
+            pass
         raise RuntimeError(f"qBittorrent transport is not ready: {transport_reason}")
     if not vpn_ok:
+        try:
+            ctx.store.log_health_event(
+                user_id,
+                None,
+                "preflight_fail",
+                "error",
+                json.dumps({"check": "vpn", "reason": vpn_reason}),
+                str(row.get("name", "unknown")),
+            )
+        except Exception:
+            pass
         raise RuntimeError(f"VPN safety check failed: {vpn_reason}")
 
     target = targets(ctx)[choice]
     free_ok, free_reason = check_free_space(target["path"])
     if not free_ok:
+        try:
+            ctx.store.log_health_event(
+                user_id,
+                None,
+                "preflight_fail",
+                "error",
+                json.dumps({"check": "disk_space", "reason": free_reason, "path": target["path"]}),
+                str(row.get("name", "unknown")),
+            )
+        except Exception:
+            pass
         raise RuntimeError(free_reason)
     url = result_to_url(row)
     torrent_hash = extract_hash(row, url)
@@ -738,11 +996,13 @@ async def do_add(
     }
 
 
-async def on_cb_stop(bot_app: Any, *, data: str, q: Any, user_id: int) -> None:
+async def on_cb_stop(ctx: HandlerContext, *, data: str, q: Any, user_id: int) -> None:
     """Handle ``stop:*`` callback queries — cancel download and delete torrent."""
-    ctx = getattr(bot_app, "_ctx", bot_app)
     if data.startswith("stop:"):
         torrent_hash = data[5:]
+        if not re.fullmatch(r"[a-f0-9]{40}", torrent_hash):
+            await q.answer("Invalid hash", show_alert=True)
+            return
         key = (user_id, torrent_hash.lower())
         task = ctx.progress_tasks.get(key)
         if task and not task.done():
@@ -757,14 +1017,15 @@ async def on_cb_stop(bot_app: Any, *, data: str, q: Any, user_id: int) -> None:
         try:
             await asyncio.to_thread(ctx.qbt.delete_torrent, torrent_hash, delete_files=True)
             # Navigate to Command Center (replicating nav:home logic)
-            bot_app._clear_flow(user_id)
-            bot_app._cancel_pending_trackers_for_user(user_id)
-            if not bot_app.user_nav_ui.get(user_id):
-                db_cc = await asyncio.to_thread(bot_app.store.get_command_center, user_id)
-                if db_cc:
-                    bot_app.user_nav_ui[user_id] = db_cc
-            has_remembered = bool(bot_app.user_nav_ui.get(user_id))
-            await bot_app._render_command_center(q.message, user_id=user_id, use_remembered_ui=has_remembered)
+            flow_mod.clear_flow(ctx, user_id)
+            render_mod.cancel_pending_trackers_for_user(ctx, user_id)
+            # Delete the Live Monitor message now that the download is cancelled
+            try:
+                await q.message.delete()
+            except Exception:
+                pass
+            if ctx.navigate_to_command_center:
+                await ctx.navigate_to_command_center(q.message, user_id)
             # Send self-deleting confirmation notice (no buttons)
             notice = await q.message.chat.send_message(
                 f"\u2705 <b>{_h(torrent_name)}</b> removed and canceled.",
@@ -778,7 +1039,12 @@ async def on_cb_stop(bot_app: Any, *, data: str, q: Any, user_id: int) -> None:
                 except Exception:
                     pass
 
-            asyncio.create_task(_auto_delete(q.get_bot(), q.message.chat_id, notice.message_id))
+            del_task = asyncio.create_task(
+                _auto_delete(q.get_bot(), q.message.chat_id, notice.message_id),
+                name=f"auto-delete:{q.message.chat_id}:{notice.message_id}",
+            )
+            ctx.background_tasks.add(del_task)
+            del_task.add_done_callback(ctx.background_tasks.discard)
         except Exception as e:
             await q.message.edit_text(
                 f"<b>\u26a0\ufe0f Stop Failed</b>\n<i>{_h(str(e))}</i>", reply_markup=None, parse_mode=_PM

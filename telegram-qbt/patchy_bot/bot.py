@@ -5,17 +5,16 @@ from __future__ import annotations
 import argparse
 import asyncio
 import collections
+import concurrent.futures
 import logging
 import math
 import os
 import re
 import secrets
 import threading
-import urllib.parse
 from datetime import time as dt_time
 from typing import Any
 
-import requests
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import TelegramError
 from telegram.ext import (
@@ -140,6 +139,8 @@ class BotApp:
             remove_runner_lock=self.remove_runner_lock,
             state_lock=self._state_lock,
         )
+        self._ctx.render_command_center = self._render_command_center
+        self._ctx.navigate_to_command_center = self._navigate_to_command_center
 
     # ---------- Callback dispatcher registration ----------
 
@@ -186,6 +187,11 @@ class BotApp:
 
         await self._schedule_bootstrap(app)
 
+        # Explicit thread pool for asyncio.to_thread() calls (search, qBT ops, SQLite).
+        # Default is typically min(32, cpu+4); setting explicitly documents the intent.
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(concurrent.futures.ThreadPoolExecutor(max_workers=8))
+
         # Daily database backup at 3:00 AM local time (if BACKUP_DIR is configured)
         if self.cfg.backup_dir:
             self.app.job_queue.run_daily(
@@ -194,6 +200,106 @@ class BotApp:
                 name="daily-db-backup",
             )
             LOG.info("Database backup scheduled daily at 03:00 → %s", self.cfg.backup_dir)
+
+        # Daily health event cleanup at 4:00 AM
+        self.app.job_queue.run_daily(
+            self._health_event_cleanup_job,
+            time=dt_time(4, 0, 0),
+            name="health-event-cleanup",
+        )
+
+        # Periodic qBittorrent connectivity check (every 5 minutes)
+        self.app.job_queue.run_repeating(
+            self._qbt_health_check_job,
+            interval=300,
+            first=300,
+            name="qbt-health-check",
+            job_kwargs={"coalesce": True, "max_instances": 1, "misfire_grace_time": 60},
+        )
+
+        # Verify qBittorrent connectivity at startup
+        await self._ensure_qbt_connectivity()
+
+        await self._recover_missed_completions()
+
+    async def _recover_missed_completions(self) -> None:
+        """Check for downloads that completed while bot was offline."""
+        import json as _json
+
+        from .plex_organizer import organize_download
+
+        try:
+            torrents = await asyncio.to_thread(self._ctx.qbt.list_torrents, filter_name="completed", limit=200)
+            if not torrents:
+                return
+            recovered = 0
+            for torrent in torrents:
+                t_hash = str(torrent.get("hash") or "").strip().lower()
+                if not t_hash:
+                    continue
+                # Skip if already notified
+                already = await asyncio.to_thread(self._ctx.store.is_completion_notified, t_hash)
+                if already:
+                    continue
+                name = str(torrent.get("name") or "Unknown")
+                category = str(torrent.get("category") or "")
+                size = int(torrent.get("total_size", 0) or torrent.get("size", 0) or 0)
+                completion_on = int(torrent.get("completion_on", 0) or 0)
+                # Only recover completions from last 24 hours
+                if completion_on > 0 and (now_ts() - completion_on) > 86400:
+                    continue
+                LOG.info("Recovered missed completion: %s (%s)", name, t_hash[:8])
+                # Mark as notified FIRST to prevent duplicates
+                await asyncio.to_thread(self._ctx.store.mark_completion_notified, t_hash, name)
+                # Organize download
+                media_path = str(torrent.get("content_path") or torrent.get("save_path") or "").strip()
+                if category and media_path:
+                    try:
+                        org_result = await asyncio.to_thread(
+                            organize_download,
+                            media_path,
+                            category,
+                            self._ctx.cfg.tv_path,
+                            self._ctx.cfg.movies_path,
+                        )
+                        if org_result.moved:
+                            media_path = org_result.new_path
+                    except Exception as e:
+                        LOG.error("Organize failed for recovered torrent %s: %s", name, e)
+                # Notify the requesting user, or all allowed users if unknown
+                stored_uid = await asyncio.to_thread(self._ctx.store.get_completion_user_id, t_hash)
+                notify_uids = {stored_uid} if stored_uid > 0 else set(self._ctx.cfg.allowed_user_ids)
+                for uid in notify_uids:
+                    try:
+                        await self._ctx.app.bot.send_message(
+                            chat_id=uid,
+                            text=(
+                                f"\u2705 <b>Download Complete</b> (recovered)\n\n"
+                                f"<code>{_h(name)}</code>\n"
+                                f"Size: {human_size(size)}\n"
+                                f"Category: {_h(category)}\n\n"
+                                f"<i>This download completed while the bot was offline.</i>"
+                            ),
+                            parse_mode=_PM,
+                        )
+                    except Exception:
+                        pass
+                try:
+                    self._ctx.store.log_health_event(
+                        0,
+                        t_hash,
+                        "completion_crash_recovered",
+                        "info",
+                        _json.dumps({"name": name, "category": category}),
+                        name,
+                    )
+                except Exception:
+                    pass
+                recovered += 1
+            if recovered:
+                LOG.info("Recovered %d missed completion(s)", recovered)
+        except Exception:
+            LOG.error("Completion recovery failed", exc_info=True)
 
     async def _post_stop(self, app: Application) -> None:
         tasks: list[asyncio.Task] = []
@@ -212,6 +318,10 @@ class BotApp:
             collect(task)
         for task in self.pending_tracker_tasks.values():
             collect(task)
+        for task in self.command_center_refresh_tasks.values():
+            collect(task)
+        for task in self._ctx.background_tasks:
+            collect(task)
 
         for task in tasks:
             task.cancel()
@@ -220,6 +330,8 @@ class BotApp:
 
         self.progress_tasks.clear()
         self.pending_tracker_tasks.clear()
+        self.command_center_refresh_tasks.clear()
+        self._ctx.background_tasks.clear()
 
         # Close HTTP session pools to release file descriptors cleanly
         for client in (self.qbt, self.patchy_llm, self.tvmeta, self.plex):
@@ -704,6 +816,15 @@ class BotApp:
         result = await self._render_nav_ui(int(user_id), msg, text, reply_markup=kb, current_ui_message=ui_msg)
         self._start_command_center_refresh(int(user_id))
         return result
+
+    async def _navigate_to_command_center(self, msg: Any, user_id: int) -> Any:
+        """Recover CC location from DB if needed, then render the Command Center."""
+        if not self.user_nav_ui.get(user_id):
+            db_cc = await asyncio.to_thread(self.store.get_command_center, user_id)
+            if db_cc:
+                self.user_nav_ui[user_id] = db_cc
+        has_remembered = bool(self.user_nav_ui.get(user_id))
+        return await self._render_command_center(msg, user_id=user_id, use_remembered_ui=has_remembered)
 
     def _start_command_center_refresh(self, user_id: int) -> None:
         existing = self.command_center_refresh_tasks.get(user_id)
@@ -1724,6 +1845,8 @@ class BotApp:
             result = await self._schedule_download_episode(track, code)
             LOG.info("Schedule auto-acquire succeeded: %s -> %s", code, result.get("name"))
             return result
+        except schedule_handler.No1080pError:
+            raise
         except Exception as e:
             LOG.warning("Schedule auto-acquire failed for %s: %s", code, e)
             return None
@@ -1769,6 +1892,19 @@ class BotApp:
         except Exception:
             LOG.warning("Failed to send auto-queue notification", exc_info=True)
 
+    async def _schedule_notify_no_1080p(
+        self, track: dict[str, Any], code: str, miss_count: int, lower_res_count: int, backoff_s: int
+    ) -> None:
+        await schedule_handler.schedule_notify_no_1080p(
+            self._ctx,
+            track,
+            code,
+            miss_count,
+            lower_res_count,
+            backoff_s,
+            track_ephemeral_message_fn=self._track_ephemeral_message,
+        )
+
     def _schedule_missing_text(self, track: dict[str, Any], probe: dict[str, Any]) -> str:
         show = track.get("show_json") or probe.get("show") or {}
         codes = list(probe.get("actionable_missing_codes") or [])
@@ -1809,6 +1945,81 @@ class BotApp:
             LOG.info("Database backup created: %s (%d bytes)", path, size)
         except Exception as e:
             LOG.error("Database backup failed: %s", e, exc_info=True)
+
+    async def _health_event_cleanup_job(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """APScheduler job: remove old health events from the database."""
+        try:
+            cleaned = await asyncio.to_thread(
+                self.store.cleanup_old_health_events, self.cfg.health_event_retention_days
+            )
+            if cleaned:
+                LOG.info("Cleaned up %d old health events", cleaned)
+        except Exception as e:
+            LOG.error("Health event cleanup failed: %s", e, exc_info=True)
+
+    async def _ensure_qbt_connectivity(self) -> None:
+        """Verify qBittorrent is reachable at startup. Attempt service restart if not."""
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                info = await asyncio.to_thread(self.qbt.get_transfer_info)
+                status = str(info.get("connection_status") or "unknown")
+                LOG.info("qBittorrent connected (status=%s, attempt %d)", status, attempt)
+                return
+            except Exception as e:
+                LOG.warning("qBittorrent unreachable (attempt %d/%d): %s", attempt, max_attempts, e)
+                if attempt < max_attempts:
+                    try:
+                        result = await asyncio.to_thread(
+                            subprocess.run,
+                            ["sudo", "systemctl", "restart", "qbittorrent.service"],
+                            capture_output=True,
+                            text=True,
+                            timeout=30,
+                        )
+                        if result.returncode == 0:
+                            LOG.info("qBittorrent service restarted, waiting for startup...")
+                            await asyncio.sleep(5)
+                        else:
+                            LOG.warning("Failed to restart qBittorrent: %s", result.stderr.strip())
+                    except Exception as restart_err:
+                        LOG.warning("qBittorrent restart failed: %s", restart_err)
+        LOG.error(
+            "qBittorrent unreachable after %d attempts — downloads will fail until qBT is restored",
+            max_attempts,
+        )
+
+    async def _qbt_health_check_job(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Periodic job: verify qBittorrent is reachable every 5 minutes, restart if needed."""
+        try:
+            await asyncio.to_thread(self.qbt.get_transfer_info)
+            return
+        except Exception as e:
+            LOG.warning("qBT health check: unreachable (%s), attempting restart", e)
+
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ["sudo", "systemctl", "restart", "qbittorrent.service"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode == 0:
+                LOG.info("qBT health check: service restarted successfully")
+                await asyncio.sleep(5)
+                try:
+                    info = await asyncio.to_thread(self.qbt.get_transfer_info)
+                    LOG.info(
+                        "qBT health check: confirmed back online (status=%s)",
+                        info.get("connection_status", "unknown"),
+                    )
+                except Exception:
+                    LOG.error("qBT health check: still unreachable after restart")
+            else:
+                LOG.error("qBT health check: restart failed (%s)", result.stderr.strip())
+        except Exception as e:
+            LOG.error("qBT health check: restart attempt failed: %s", e)
 
     def _remove_build_job_verification(
         self, candidate: dict[str, Any], target_path: str, identity: dict[str, Any] | None
@@ -1908,7 +2119,26 @@ class BotApp:
         auto_acquired_codes: list[str] = []
         if should_auto and isinstance(target_codes_or_reason, list) and target_codes_or_reason:
             for target_code in target_codes_or_reason:
-                result = await self._schedule_attempt_auto_acquire(track, target_code)
+                try:
+                    result = await self._schedule_attempt_auto_acquire(track, target_code)
+                except schedule_handler.No1080pError as _e:
+                    no_1080p_miss = dict(auto_state.get("no_1080p_miss") or {})
+                    miss_count = int(no_1080p_miss.get(target_code) or 0) + 1
+                    no_1080p_miss[target_code] = miss_count
+                    auto_state["no_1080p_miss"] = no_1080p_miss
+                    backoff_s = schedule_handler.schedule_no_1080p_backoff_s(miss_count)
+                    auto_state["next_auto_retry_at"] = now_ts() + backoff_s
+                    LOG.info(
+                        "Schedule no-1080p miss %d for %s, backing off %ds",
+                        miss_count,
+                        target_code,
+                        backoff_s,
+                    )
+                    if miss_count == 3 and allow_notify:
+                        await self._schedule_notify_no_1080p(
+                            track, target_code, miss_count, _e.lower_res_count, backoff_s
+                        )
+                    continue
                 if result:
                     auto_acquired_codes.append(target_code)
                     pending.add(target_code)
@@ -1917,11 +2147,16 @@ class BotApp:
                     auto_state["retry_codes"] = retry_codes
                     auto_state["last_auto_code"] = target_code
                     auto_state["last_auto_at"] = now_ts()
+                    # Clear no-1080p miss counter on success
+                    no_1080p_miss = dict(auto_state.get("no_1080p_miss") or {})
+                    no_1080p_miss.pop(target_code, None)
+                    auto_state["no_1080p_miss"] = no_1080p_miss
                     if allow_notify:
                         await self._schedule_notify_auto_queued(track, target_code, result)
             if auto_acquired_codes:
                 auto_state["next_auto_retry_at"] = None
-            else:
+            elif auto_state.get("next_auto_retry_at") is None:
+                # Only set generic retry if No1080pError handler didn't already set a backoff
                 auto_state["next_auto_retry_at"] = now_ts() + self._schedule_retry_interval_s()
         elif not probe.get("actionable_missing_codes"):
             auto_state["next_auto_retry_at"] = None
@@ -2006,79 +2241,13 @@ class BotApp:
         return (exact_episode, exact_show, seeds, ts.format_score)
 
     async def _schedule_download_episode(self, track: dict[str, Any], code: str) -> dict[str, Any]:
-        m = re.fullmatch(r"S(\d{2})E(\d{2})", code)
-        if not m:
-            raise RuntimeError(f"Invalid episode code: {code}")
-        season = int(m.group(1))
-        episode = int(m.group(2))
-        show = track.get("show_json") or {}
-        query = f"{show.get('name')} {code}"
-        defaults = self.store.get_defaults(int(track.get("user_id") or 0), self.cfg)
-        raw_rows = await asyncio.to_thread(
-            self.qbt.search,
-            query,
-            plugin="enabled",
-            search_cat="tv",
-            timeout_s=self.cfg.search_timeout_s,
-            poll_interval_s=self.cfg.poll_interval_s,
-            early_exit_min_results=max(self.cfg.search_early_exit_min_results, 12),
-            early_exit_idle_s=self.cfg.search_early_exit_idle_s,
-            early_exit_max_wait_s=self.cfg.search_early_exit_max_wait_s,
+        return await schedule_handler.schedule_download_episode(
+            self._ctx,
+            track,
+            code,
+            apply_filters_fn=lambda rows, **kw: self._apply_filters(rows, media_type="episode", **kw),
+            do_add_fn=self._do_add,
         )
-        filtered = self._apply_filters(
-            raw_rows,
-            min_seeds=int(defaults.get("default_min_seeds") or 0),
-            min_size=None,
-            max_size=None,
-            min_quality=self.cfg.default_min_quality,
-            media_type="episode",
-        )
-        filtered = self._deduplicate_results(filtered)
-        raw_exact = [
-            row
-            for row in raw_rows
-            if self._schedule_row_matches_episode(str(row.get("fileName") or row.get("name") or ""), season, episode)
-        ]
-        exact = [
-            row
-            for row in filtered
-            if self._schedule_row_matches_episode(str(row.get("fileName") or row.get("name") or ""), season, episode)
-        ]
-        if not exact:
-            if raw_exact:
-                raise RuntimeError(
-                    f"Exact episode {code} was found, but every exact match failed the current TV filters"
-                )
-            raise RuntimeError(f"No exact qBittorrent result matched episode {code}")
-        # 1080p-only filter: keep only resolution_tier == 3 (1080p)
-        exact_1080p = [row for row in exact if getattr(row.get("_quality_score"), "resolution_tier", 0) == 3]
-        if not exact_1080p:
-            raise RuntimeError(
-                f"No 1080p result found for {code} — "
-                f"found {len(exact)} result(s) at other resolutions (schedule requires 1080p only)"
-            )
-        exact = exact_1080p
-        ranked = sorted(
-            exact,
-            key=lambda row: self._schedule_episode_rank_key(row, str(show.get("name") or ""), season, episode),
-            reverse=True,
-        )
-        search_id = self.store.save_search(
-            int(track.get("user_id") or 0),
-            query,
-            {
-                "query": query,
-                "plugin": "enabled",
-                "search_cat": "tv",
-                "media_hint": "tv",
-                "sort": "schedule-rank",
-                "order": "desc",
-                "limit": 10,
-            },
-            ranked[:10],
-            media_type="episode",
-        )
-        return await self._do_add(int(track.get("user_id") or 0), search_id, 1, "tv")
 
     async def _schedule_download_requested(self, msg: Any, track: dict[str, Any], codes: list[str]) -> None:
         probe = track.get("last_probe_json") or {}
@@ -2946,13 +3115,7 @@ class BotApp:
                     await msg.delete()
                 except Exception:
                     pass
-                # Recover CC location from DB if in-memory dict was lost (e.g. bot restart)
-                if not self.user_nav_ui.get(user_id):
-                    db_cc = await asyncio.to_thread(self.store.get_command_center, user_id)
-                    if db_cc:
-                        self.user_nav_ui[user_id] = db_cc
-                has_remembered = bool(self.user_nav_ui.get(user_id))
-                await self._render_command_center(msg, user_id=user_id, use_remembered_ui=has_remembered)
+                await self._navigate_to_command_center(msg, user_id)
                 return
             locked = self.store.record_auth_failure(user_id)
             if locked:
@@ -2967,20 +3130,10 @@ class BotApp:
             if low in {"cancel", "/cancel", "stop", "exit", "abort"}:
                 if flow.get("mode") == "remove":
                     self._clear_flow(user_id)
-                    if not self.user_nav_ui.get(user_id):
-                        db_cc = await asyncio.to_thread(self.store.get_command_center, user_id)
-                        if db_cc:
-                            self.user_nav_ui[user_id] = db_cc
-                    has_remembered = bool(self.user_nav_ui.get(user_id))
-                    await self._render_command_center(msg, user_id=user_id, use_remembered_ui=has_remembered)
+                    await self._navigate_to_command_center(msg, user_id)
                 elif flow.get("mode") == "schedule":
                     self._clear_flow(user_id)
-                    if not self.user_nav_ui.get(user_id):
-                        db_cc = await asyncio.to_thread(self.store.get_command_center, user_id)
-                        if db_cc:
-                            self.user_nav_ui[user_id] = db_cc
-                    has_remembered = bool(self.user_nav_ui.get(user_id))
-                    await self._render_command_center(msg, user_id=user_id, use_remembered_ui=has_remembered)
+                    await self._navigate_to_command_center(msg, user_id)
                 elif flow.get("mode") == "tv":
                     await self._cleanup_private_user_message(msg)
                     await self._render_tv_ui(
@@ -3338,62 +3491,6 @@ class BotApp:
     async def cmd_show(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await commands_handler.cmd_show(self, update, context)
 
-    @staticmethod
-    def _is_direct_torrent_link(url: str) -> bool:
-        u = (url or "").strip()
-        if not u:
-            return False
-        low = u.lower()
-        if low.startswith("magnet:?"):
-            return True
-        if not (low.startswith("http://") or low.startswith("https://")):
-            return False
-
-        parsed = urllib.parse.urlparse(u)
-        path = (parsed.path or "").lower()
-        if path.endswith(".torrent"):
-            return True
-
-        # Heuristic: known direct download endpoints
-        if "download" in path and "torrent" in path:
-            return True
-        if path.endswith("/dl") or path.endswith("/download"):
-            return True
-
-        return False
-
-    def _result_to_url(self, result_row: dict[str, Any]) -> str:
-        h = (result_row.get("hash") or "").strip().lower()
-        name = (result_row.get("name") or "torrent").strip()
-        if re.fullmatch(r"[a-f0-9]{40}", h):
-            return f"magnet:?xt=urn:btih:{h}&dn={requests.utils.quote(name)}"
-
-        for k in ("file_url", "url"):
-            v = (result_row.get(k) or "").strip()
-            if v and self._is_direct_torrent_link(v):
-                return v
-
-        # descr_link is usually a webpage, not a torrent payload. Only allow if it is direct.
-        d = (result_row.get("descr_link") or "").strip()
-        if d and self._is_direct_torrent_link(d):
-            return d
-
-        raise RuntimeError(
-            "Result source is a webpage, not a direct torrent/magnet link. Pick a different result/source."
-        )
-
-    @staticmethod
-    def _extract_hash(row: dict[str, Any], url: str) -> str | None:
-        h = str(row.get("hash") or "").strip().lower()
-        if re.fullmatch(r"[a-f0-9]{40}", h):
-            return h
-
-        m = re.search(r"btih:([A-Fa-f0-9]{40})", url)
-        if m:
-            return m.group(1).lower()
-
-        return None
-
     async def _resolve_hash_by_name(self, title: str, category: str, wait_s: int = 20) -> str | None:
         return await download_handler.resolve_hash_by_name(self._ctx, title, category, wait_s)
 
@@ -3492,13 +3589,12 @@ class BotApp:
         self._clear_flow(user_id)
         # Cancel pending trackers so they don't create monitor messages after cleanup
         self._cancel_pending_trackers_for_user(user_id)
-        # Recover CC location from DB if lost (e.g. bot restart).
-        if not self.user_nav_ui.get(user_id):
-            db_cc = await asyncio.to_thread(self.store.get_command_center, user_id)
-            if db_cc:
-                self.user_nav_ui[user_id] = db_cc
-        has_remembered = bool(self.user_nav_ui.get(user_id))
-        await self._render_command_center(q.message, user_id=user_id, use_remembered_ui=has_remembered)
+        # Delete the message that hosted this button press (may be a Live Monitor tracker_msg)
+        try:
+            await q.message.delete()
+        except Exception:
+            pass
+        await self._navigate_to_command_center(q.message, user_id)
 
     async def _on_cb_add(self, *, data: str, q: Any, user_id: int) -> None:
         _, sid, idx_raw = data.split(":", 2)
@@ -3614,7 +3710,7 @@ class BotApp:
         await self._render_nav_ui(user_id, q.message, text, reply_markup=kb, current_ui_message=q.message)
 
     async def _on_cb_stop(self, *, data: str, q: Any, user_id: int) -> None:
-        await download_handler.on_cb_stop(self, data=data, q=q, user_id=user_id)
+        await download_handler.on_cb_stop(self._ctx, data=data, q=q, user_id=user_id)
 
     def build_application(self) -> Application:
         app = (

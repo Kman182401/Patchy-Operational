@@ -2,7 +2,7 @@
 
 **Title:** Move plex_organizer.py into the package
 
-**Status:** pending
+**Status:** done
 
 **Dependencies:** None
 

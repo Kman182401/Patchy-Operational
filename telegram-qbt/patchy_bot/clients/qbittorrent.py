@@ -68,6 +68,16 @@ class QBClient:
         early_exit_idle_s: float = 2.5,
         early_exit_max_wait_s: float = 12.0,
     ) -> list[dict[str, Any]]:
+        """Search for torrents via qBT's built-in search plugins.
+
+        NOTE: This method uses synchronous time.sleep for polling and is
+        designed to be called via asyncio.to_thread(). It blocks one thread
+        from the executor pool for up to *timeout_s* seconds. The early_exit
+        parameters mitigate this by returning results faster when possible.
+
+        For multi-user scenarios, ensure the event loop's ThreadPoolExecutor
+        has enough workers to handle concurrent searches.
+        """
         start = self._request(
             "POST",
             "/api/v2/search/start",
@@ -223,7 +233,9 @@ class QBClient:
         return rows[0]
 
     def delete_torrent(self, torrent_hash: str, *, delete_files: bool = True) -> None:
-        self._request("POST", "/api/v2/torrents/delete", data={"hashes": torrent_hash, "deleteFiles": str(delete_files).lower()})
+        self._request(
+            "POST", "/api/v2/torrents/delete", data={"hashes": torrent_hash, "deleteFiles": str(delete_files).lower()}
+        )
 
     def list_torrents(
         self,
@@ -251,3 +263,11 @@ class QBClient:
         r = self._request("GET", "/api/v2/search/plugins")
         return r.json() if r.text.strip() else []
 
+    def get_torrent_trackers(self, torrent_hash: str) -> list[dict[str, Any]]:
+        """Get tracker list for a specific torrent."""
+        r = self._request("GET", "/api/v2/torrents/trackers", params={"hash": torrent_hash})
+        return r.json() if r.text.strip() else []
+
+    def reannounce_torrent(self, torrent_hash: str) -> None:
+        """Force tracker reannounce for a torrent."""
+        self._request("POST", "/api/v2/torrents/reannounce", data={"hashes": torrent_hash})

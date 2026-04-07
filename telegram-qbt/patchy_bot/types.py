@@ -72,5 +72,12 @@ class HandlerContext:
     remove_runner_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     state_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
+    # ---- Fire-and-forget background tasks (auto-delete notices, etc.) ----
+    background_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
+
     # ---- Application reference (set after build_application) ----
     app: Any = None
+
+    # ---- Callbacks (set after ctx creation) ----
+    render_command_center: Any = None
+    navigate_to_command_center: Any = None

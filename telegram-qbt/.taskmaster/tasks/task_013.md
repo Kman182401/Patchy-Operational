@@ -2,9 +2,9 @@
 
 **Title:** Final cleanup — remove dead code from bot.py
 
-**Status:** pending
+**Status:** done
 
-**Dependencies:** 4, 5, 6, 7, 8, 9, 10
+**Dependencies:** 4 ✓, 5 ✓, 6 ✓, 7 ✓, 8 ✓, 9 ✓, 10 ✓
 
 **Priority:** low
 

@@ -29,6 +29,17 @@ from ..utils import (
     normalize_title,
     now_ts,
 )
+from .search import deduplicate_results
+
+
+class No1080pError(Exception):
+    """Raised when search returns results but none meet the 1080p (tier 3) requirement."""
+
+    def __init__(self, code: str, lower_res_count: int) -> None:
+        super().__init__(f"No 1080p result for {code} ({lower_res_count} lower-res result(s) found)")
+        self.code = code
+        self.lower_res_count = lower_res_count
+
 
 LOG = logging.getLogger("qbtg")
 
@@ -96,6 +107,17 @@ def schedule_inventory_backoff_s(failures: int) -> int:
     if failures == 3:
         return 30 * 60
     return 60 * 60
+
+
+def schedule_no_1080p_backoff_s(miss_count: int) -> int:
+    """Return retry interval in seconds based on number of consecutive no-1080p misses."""
+    if miss_count < 3:
+        return 3600
+    if miss_count < 6:
+        return 14400
+    if miss_count < 10:
+        return 43200
+    return 86400
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +271,7 @@ def schedule_sanitize_auto_state(
     clean.setdefault("retry_codes", {})
     clean.setdefault("tracking_mode", "upcoming")
     clean.setdefault("next_code", None)
+    clean.setdefault("no_1080p_miss", {})
     next_retry = int(clean.get("next_auto_retry_at") or 0)
     has_actionable = bool(probe and probe.get("actionable_missing_codes"))
     if not has_actionable or next_retry <= now_ts():
@@ -1143,6 +1166,8 @@ async def schedule_download_episode(
         max_size=None,
         min_quality=ctx.cfg.default_min_quality,
     )
+
+    filtered = deduplicate_results(filtered)
     raw_exact = [
         row
         for row in raw_rows
@@ -1160,10 +1185,7 @@ async def schedule_download_episode(
     # 1080p-only filter: keep only resolution_tier == 3 (1080p)
     exact_1080p = [row for row in exact if getattr(row.get("_quality_score"), "resolution_tier", 0) == 3]
     if not exact_1080p:
-        raise RuntimeError(
-            f"No 1080p result found for {code} — "
-            f"found {len(exact)} result(s) at other resolutions (schedule requires 1080p only)"
-        )
+        raise No1080pError(code=code, lower_res_count=len(exact))
     exact = exact_1080p
     ranked = sorted(
         exact,
@@ -1183,6 +1205,7 @@ async def schedule_download_episode(
             "limit": 10,
         },
         ranked[:10],
+        media_type="episode",
     )
     return await do_add_fn(int(track.get("user_id") or 0), search_id, 1, "tv")
 
@@ -1267,6 +1290,7 @@ async def schedule_refresh_track(
     should_attempt_auto_fn: Any = None,
     attempt_auto_acquire_fn: Any = None,
     notify_auto_queued_fn: Any = None,
+    notify_no_1080p_fn: Any = None,
     notify_missing_fn: Any = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     track_id = str(track.get("track_id") or "")
@@ -1319,7 +1343,24 @@ async def schedule_refresh_track(
     auto_acquired_codes: list[str] = []
     if should_auto and isinstance(target_codes_or_reason, list) and target_codes_or_reason and attempt_auto_acquire_fn:
         for target_code in target_codes_or_reason:
-            result = await attempt_auto_acquire_fn(track, target_code)
+            try:
+                result = await attempt_auto_acquire_fn(track, target_code)
+            except No1080pError as _e:
+                no_1080p_miss = dict(auto_state.get("no_1080p_miss") or {})
+                miss_count = int(no_1080p_miss.get(target_code) or 0) + 1
+                no_1080p_miss[target_code] = miss_count
+                auto_state["no_1080p_miss"] = no_1080p_miss
+                backoff_s = schedule_no_1080p_backoff_s(miss_count)
+                auto_state["next_auto_retry_at"] = now_ts() + backoff_s
+                LOG.info(
+                    "Schedule no-1080p miss %d for %s, backing off %ds",
+                    miss_count,
+                    target_code,
+                    backoff_s,
+                )
+                if miss_count == 3 and allow_notify and notify_no_1080p_fn:
+                    await notify_no_1080p_fn(track, target_code, miss_count, _e.lower_res_count, backoff_s)
+                continue
             if result:
                 auto_acquired_codes.append(target_code)
                 pending.add(target_code)
@@ -1328,11 +1369,16 @@ async def schedule_refresh_track(
                 auto_state["retry_codes"] = retry_codes
                 auto_state["last_auto_code"] = target_code
                 auto_state["last_auto_at"] = now_ts()
+                # Clear no-1080p miss counter on success
+                no_1080p_miss = dict(auto_state.get("no_1080p_miss") or {})
+                no_1080p_miss.pop(target_code, None)
+                auto_state["no_1080p_miss"] = no_1080p_miss
                 if allow_notify and notify_auto_queued_fn:
                     await notify_auto_queued_fn(track, target_code, result)
         if auto_acquired_codes:
             auto_state["next_auto_retry_at"] = None
-        else:
+        elif auto_state.get("next_auto_retry_at") is None:
+            # Only set generic retry if No1080pError handler didn't already set a backoff
             auto_state["next_auto_retry_at"] = now_ts() + schedule_retry_interval_s()
     elif not probe.get("actionable_missing_codes"):
         auto_state["next_auto_retry_at"] = None
@@ -1472,6 +1518,47 @@ async def schedule_notify_auto_queued(
             start_pending_progress_tracker_fn(user_id, torrent_name, category, notif_msg)
     except Exception:
         LOG.warning("Failed to send auto-queue notification", exc_info=True)
+
+
+async def schedule_notify_no_1080p(
+    ctx: HandlerContext,
+    track: dict[str, Any],
+    code: str,
+    miss_count: int,
+    lower_res_count: int,
+    backoff_s: int,
+    *,
+    track_ephemeral_message_fn: Any,
+) -> None:
+    """Notify user that no 1080p results were found for an episode."""
+    if not ctx.app:
+        return
+    chat_id = int(track.get("chat_id") or 0)
+    user_id = int(track.get("user_id") or 0)
+    if not chat_id:
+        LOG.warning("schedule_notify_no_1080p skipped: no chat_id for track %s", track.get("track_id"))
+        return
+    show = track.get("show_json") or {}
+    show_name = str(show.get("name") or "Show")
+    backoff_label = _relative_time(now_ts() + backoff_s)
+    lower_note = (
+        f"Found {lower_res_count} result(s) at lower resolutions."
+        if lower_res_count > 0
+        else "No results found at any resolution."
+    )
+    text = (
+        "<b>\U0001f4e1 No 1080p Available Yet</b>\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        f"<b>{_h(show_name)}</b>  <code>{_h(code)}</code>\n\n"
+        f"{lower_note} None meet the 1080p requirement.\n\n"
+        f"\U0001f501 Attempt {miss_count} \u00b7 Next search {backoff_label}\n"
+        "<i>Auto-search will keep trying. You'll be notified if 1080p becomes available.</i>"
+    )
+    try:
+        sent = await ctx.app.bot.send_message(chat_id=chat_id, text=text, parse_mode=_PM)
+        track_ephemeral_message_fn(user_id, sent)
+    except Exception:
+        LOG.warning("schedule_notify_no_1080p failed for track %s", track.get("track_id"), exc_info=True)
 
 
 # ---------------------------------------------------------------------------

@@ -182,6 +182,9 @@ def check_free_space(
         st = os.statvfs(target_path)
         free = int(st.f_frsize * st.f_bfree)
     except OSError as e:
+        if not os.path.exists(target_path):
+            return False, f"target path does not exist: {target_path}"
+        LOG.warning("Disk space check failed for %s: %s (allowing download)", target_path, e)
         return True, f"disk check skipped ({e})"
     if free < block_bytes:
         return (
