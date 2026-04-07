@@ -2908,6 +2908,90 @@ class BotApp:
             search_meta, rows, page, page_size=self.cfg.page_size, nav_footer_fn=self._nav_footer
         )
 
+    # ---------- Theatrical release detection ----------
+
+    async def _detect_movie_release_status(
+        self,
+        query: str,
+        *,
+        region: str,
+    ) -> tuple:
+        """Classify a movie query's release status via TMDB.
+
+        Returns (status, tmdb_id, raw_title, year, theatrical_ts).
+        Returns (UNKNOWN, None, None, None, None) on any failure or no TMDB key.
+        Never raises.
+        """
+        from .clients.tv_metadata import MovieReleaseStatus
+
+        if not self.cfg.tmdb_api_key:
+            return MovieReleaseStatus.UNKNOWN, None, None, None, None
+
+        try:
+            movies = await asyncio.to_thread(self.tvmeta.search_movies, query, 1)
+        except Exception as exc:
+            LOG.warning("theatrical check search_movies(%r) failed: %s", query, exc)
+            return MovieReleaseStatus.UNKNOWN, None, None, None, None
+
+        if not movies:
+            return MovieReleaseStatus.UNKNOWN, None, None, None, None
+
+        top = movies[0]
+        tmdb_id: int = int(top["tmdb_id"])
+        title: str = str(top.get("title") or query)
+        year: int | None = top.get("year")
+
+        try:
+            dates = await asyncio.to_thread(self.tvmeta.get_movie_home_release, tmdb_id, region)
+        except Exception as exc:
+            LOG.warning("theatrical check get_movie_home_release(tmdb_id=%r) failed: %s", tmdb_id, exc)
+            return MovieReleaseStatus.UNKNOWN, tmdb_id, title, year, None
+
+        return dates.status, tmdb_id, title, year, dates.theatrical_ts
+
+    async def _show_theatrical_block(
+        self,
+        status_msg,
+        release_status,
+        movie_title: str,
+        tmdb_id: int,
+        theatrical_ts: int | None,
+    ) -> None:
+        """Edit status_msg into a theatrical-block notice with a Track button."""
+        from .clients.tv_metadata import MovieReleaseStatus
+
+        title_safe = _h(movie_title)
+
+        if release_status == MovieReleaseStatus.PRE_THEATRICAL:
+            if theatrical_ts and theatrical_ts > now_ts():
+                when = _relative_time(theatrical_ts)
+                body = (
+                    f"<b>🎬 Not Yet Released</b>\n\n"
+                    f"<b>{title_safe}</b> hasn't reached theaters yet — "
+                    f"theatrical release is {when}.\n\n"
+                    f"<i>No copies exist yet. Track it to auto-download when a quality release becomes available.</i>"
+                )
+            else:
+                body = (
+                    f"<b>🎬 Not Yet Released</b>\n\n"
+                    f"<b>{title_safe}</b> hasn't been released yet.\n\n"
+                    f"<i>No copies exist yet. Track it to auto-download when a quality release becomes available.</i>"
+                )
+        else:  # IN_THEATERS
+            body = (
+                f"<b>🎬 Currently In Theaters</b>\n\n"
+                f"<b>{title_safe}</b> is only available in theaters — "
+                f"no home release has been announced yet.\n\n"
+                f"<i>Only theater-recorded sources (TeleSync/CAM) exist right now. "
+                f"No WEB-DL, streaming, or Blu-ray rips are available.</i>"
+            )
+
+        track_btn = InlineKeyboardButton("🎬 Track this movie", callback_data=f"msch:pick:{tmdb_id}")
+        cancel_btn = InlineKeyboardButton("✖ Dismiss", callback_data="msch:cancel")
+        kb = InlineKeyboardMarkup([[track_btn], [cancel_btn]])
+
+        await status_msg.edit_text(body, reply_markup=kb, parse_mode=_PM)
+
     # ---------- Core actions ----------
 
     async def _run_search(
@@ -2968,6 +3052,57 @@ class BotApp:
             )
         else:
             status_msg = await msg.reply_text(searching_text, parse_mode=_PM)
+
+        # --- Theatrical detection (movies only) ---
+        # WAITING_HOME / HOME_AVAILABLE intentionally allow search — WEB-DL/screener
+        # rips often appear before official digital release date.
+        if media_hint == "movies":
+            from .clients.tv_metadata import MovieReleaseStatus
+
+            (
+                release_status,
+                det_tmdb_id,
+                det_title,
+                det_year,
+                det_theatrical_ts,
+            ) = await self._detect_movie_release_status(query, region=self.cfg.tmdb_region)
+
+            if release_status in (MovieReleaseStatus.IN_THEATERS, MovieReleaseStatus.PRE_THEATRICAL):
+                # Set up flow so msch:pick handler can find the candidate
+                self._set_flow(
+                    user_id,
+                    {
+                        "mode": "msch_add",
+                        "stage": "title",
+                        "candidates": [
+                            {
+                                "tmdb_id": det_tmdb_id,
+                                "title": det_title or query,
+                                "year": det_year,
+                            }
+                        ],
+                    },
+                )
+                display = f"{det_title} ({det_year})" if det_year else (det_title or query)
+                await self._show_theatrical_block(
+                    status_msg,
+                    release_status,
+                    display,
+                    det_tmdb_id or 0,
+                    det_theatrical_ts,
+                )
+                return
+
+            if release_status == MovieReleaseStatus.UNKNOWN and self.cfg.tmdb_api_key:
+                try:
+                    await status_msg.edit_text(
+                        f"<b>🔎 Searching for {_h(query)}…</b>\n"
+                        f"<i>⚠️ Could not verify release status — showing all available results.</i>",
+                        parse_mode=_PM,
+                    )
+                except Exception:
+                    pass  # non-critical — search continues regardless
+        # --- End theatrical detection ---
 
         try:
             plugin_scope = (plugin or "").strip() or "enabled"
