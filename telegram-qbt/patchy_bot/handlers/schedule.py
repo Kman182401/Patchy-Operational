@@ -2230,3 +2230,488 @@ async def on_cb_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> No
         return
 
     # Command center actions
+
+
+# ---------------------------------------------------------------------------
+# Movie schedule callbacks — ``msch:*`` prefix
+# ---------------------------------------------------------------------------
+
+
+async def on_cb_movie_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> None:  # noqa: C901
+    """Handle all ``msch:*`` callback-query prefixes.
+
+    *bot_app* is either the real ``BotApp`` instance or a test ``DummyBot``.
+    """
+    ctx = getattr(bot_app, "_ctx", bot_app)
+
+    # ------------------------------------------------------------------
+    # msch:cancel — abort an in-progress add-movie flow
+    # ------------------------------------------------------------------
+    if data == "msch:cancel":
+        flow = bot_app._get_flow(user_id)
+        if flow and flow.get("mode") == "msch_add":
+            bot_app._clear_flow(user_id)
+        await bot_app._render_command_center(q.message, user_id=user_id)
+        return
+
+    # ------------------------------------------------------------------
+    # msch:add — start the add-movie flow
+    # ------------------------------------------------------------------
+    if data == "msch:add":
+        bot_app._set_flow(user_id, {"mode": "msch_add", "stage": "title"})
+        await bot_app._render_schedule_ui(
+            user_id,
+            q.message,
+            None,
+            "\U0001f3ac <b>Track a Movie</b>\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\nType a movie title to search TMDB:",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\u274c Cancel", callback_data="msch:cancel")]]),
+            current_ui_message=q.message,
+        )
+        return
+
+    # ------------------------------------------------------------------
+    # msch:list — show all tracked movies for this user
+    # ------------------------------------------------------------------
+    if data == "msch:list":
+        tracks = await asyncio.to_thread(ctx.store.get_movie_tracks_for_user, user_id)
+        if not tracks:
+            await bot_app._render_nav_ui(
+                user_id,
+                q.message,
+                "<b>\U0001f3ac My Movies</b>\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\nNo movies tracked. Tap below to add one.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("\u2795 Track a Movie", callback_data="msch:add")]]
+                    + bot_app._nav_footer(back_data="menu:schedule", include_home=False)
+                ),
+                current_ui_message=q.message,
+            )
+            return
+        lines = [
+            "<b>\U0001f3ac My Movies</b>",
+            "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501",
+        ]
+        rows: list[list[InlineKeyboardButton]] = []
+        for track in tracks:
+            title = str(track.get("title") or "Unknown")
+            year = track.get("year")
+            date_type = str(track.get("release_date_type") or "")
+            release_ts = int(track.get("release_date_ts") or 0)
+            status = str(track.get("status") or "pending")
+            tid = str(track["track_id"])
+            now = now_ts()
+            if status == "downloading":
+                status_line = "\u2b07\ufe0f Downloading"
+            elif status == "done":
+                status_line = "\u2705 Downloaded"
+            else:
+                # Check release gate status
+                rel_status = str(track.get("release_status") or "unknown")
+                home_ts = track.get("home_release_ts")
+                if rel_status == "pre_theatrical":
+                    status_line = "\U0001f3ac Not yet released"
+                elif rel_status == "in_theaters":
+                    if home_ts:
+                        status_line = f"\U0001f3ac In theaters \u00b7 Home est. {_relative_time(int(home_ts))}"
+                    else:
+                        status_line = "\U0001f3ac In theaters"
+                elif rel_status == "waiting_home":
+                    if home_ts:
+                        status_line = f"\u23f3 Waiting \u00b7 Home release {_relative_time(int(home_ts))}"
+                    else:
+                        status_line = "\u23f3 Waiting for home release"
+                elif rel_status == "home_available":
+                    status_line = "\U0001f50d Searching for torrent\u2026"
+                elif rel_status == "unknown" and release_ts > now:
+                    # Fallback for tracks created before release gate feature
+                    label = date_type.capitalize() if date_type else "Release"
+                    status_line = f"\u23f3 Waiting \u2014 {label} {_relative_time(release_ts)}"
+                else:
+                    status_line = "\U0001f50d Searching for torrent\u2026"
+            year_str = f" ({year})" if year else ""
+            lines.append(f"\n<b>{_h(title)}{_h(year_str)}</b>\n   {status_line}")
+            rows.append([InlineKeyboardButton(f"\U0001f5d1 Remove {title}", callback_data=f"msch:rm_ask:{tid}")])
+        rows.append([InlineKeyboardButton("\u2795 Track a Movie", callback_data="msch:add")])
+        rows += bot_app._nav_footer(back_data="menu:schedule", include_home=False)
+        await bot_app._render_nav_ui(
+            user_id,
+            q.message,
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(rows),
+            current_ui_message=q.message,
+        )
+        return
+
+    # ------------------------------------------------------------------
+    # msch:pick:{tmdb_id} — user selected a movie from search results
+    # ------------------------------------------------------------------
+    if data.startswith("msch:pick:"):
+        tmdb_id_str = data.split(":", 2)[2]
+        flow = bot_app._get_flow(user_id)
+        candidates: list[dict[str, Any]] = list(flow.get("candidates") or []) if flow else []
+        candidate: dict[str, Any] | None = None
+        for c in candidates:
+            if str(c.get("tmdb_id")) == tmdb_id_str:
+                candidate = c
+                break
+        if not candidate:
+            await bot_app._render_schedule_ui(
+                user_id,
+                q.message,
+                flow,
+                "Could not find that movie in the search results. Please try searching again.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("\u274c Cancel", callback_data="msch:cancel")]]
+                ),
+                current_ui_message=q.message,
+            )
+            return
+        title = str(candidate.get("title") or "")
+        year: int | None = candidate.get("year")
+        tmdb_id = int(tmdb_id_str)
+        # Fetch release dates
+        region = str(getattr(ctx.cfg, "tmdb_region", None) or "US")
+        release_dates: dict[str, int] = await asyncio.to_thread(ctx.tvmeta.get_movie_release_dates, tmdb_id, region)
+        if not release_dates:
+            year_str = f" ({year})" if year else ""
+            await bot_app._render_schedule_ui(
+                user_id,
+                q.message,
+                flow,
+                f"No release dates found for <b>{_h(title)}{_h(year_str)}</b> in your region ({_h(region)}).\n\n"
+                f"Try a different title or check back later.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("\u274c Cancel", callback_data="msch:cancel")]]
+                ),
+                current_ui_message=q.message,
+            )
+            return
+        # Update flow with selected movie info
+        flow = flow or {"mode": "msch_add", "stage": "title"}
+        flow["tmdb_id"] = tmdb_id
+        flow["title"] = title
+        flow["year"] = year
+        flow["release_dates"] = release_dates
+        flow["stage"] = "pick_date"
+        bot_app._set_flow(user_id, flow)
+        year_str = f" ({year})" if year else ""
+        date_type_labels = {
+            "theatrical": "\U0001f3ac Theatrical",
+            "digital": "\U0001f4bf Digital",
+            "physical": "\U0001f4e6 Physical",
+        }
+        date_rows: list[list[InlineKeyboardButton]] = []
+        for dt, ts in release_dates.items():
+            label = date_type_labels.get(dt, dt.capitalize())
+            date_rows.append(
+                [
+                    InlineKeyboardButton(
+                        f"{label} \u2014 {_relative_time(ts)}", callback_data=f"msch:date:{tmdb_id}:{dt}"
+                    )
+                ]
+            )
+        date_rows.append([InlineKeyboardButton("\u274c Cancel", callback_data="msch:cancel")])
+        await bot_app._render_schedule_ui(
+            user_id,
+            q.message,
+            flow,
+            f"<b>{_h(title)}{_h(year_str)}</b>\n\nChoose which release date to track:",
+            reply_markup=InlineKeyboardMarkup(date_rows),
+            current_ui_message=q.message,
+        )
+        return
+
+    # ------------------------------------------------------------------
+    # msch:date:{tmdb_id}:{date_type} — user chose a release date type
+    # ------------------------------------------------------------------
+    if data.startswith("msch:date:"):
+        _, _, tmdb_id_str, date_type = data.split(":", 3)
+        tmdb_id = int(tmdb_id_str)
+        flow = bot_app._get_flow(user_id)
+        title = str((flow or {}).get("title") or "")
+        year = (flow or {}).get("year")
+        release_dates = dict((flow or {}).get("release_dates") or {})
+        release_ts = int(release_dates.get(date_type) or 0)
+        # Check for duplicate
+        already = await asyncio.to_thread(ctx.store.movie_track_exists_for_tmdb, user_id, tmdb_id)
+        if already:
+            bot_app._clear_flow(user_id)
+            await bot_app._render_nav_ui(
+                user_id,
+                q.message,
+                f"<b>{_h(title)}</b> is already being tracked.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("\U0001f3ac My Movies", callback_data="msch:list")]]
+                    + bot_app._nav_footer(back_data="menu:schedule", include_home=False)
+                ),
+                current_ui_message=q.message,
+            )
+            return
+        # Check Plex
+        in_plex = False
+        try:
+            plex_client = getattr(ctx, "plex", None)
+            if plex_client is not None and plex_client.ready():
+                sections = await asyncio.to_thread(plex_client._sections)
+                for section in sections:
+                    if str(section.get("type") or "") == "movie":
+                        root = await asyncio.to_thread(
+                            plex_client._get_xml,
+                            f"/library/sections/{section['key']}/all",
+                            params={"type": 1, "title": title},
+                        )
+                        if root.findall(".//*[@ratingKey]"):
+                            in_plex = True
+                            break
+        except Exception:
+            pass  # Plex unreachable, skip silently
+        # Update flow with chosen date
+        flow = flow or {"mode": "msch_add"}
+        flow["date_type"] = date_type
+        flow["release_date_ts"] = release_ts
+        flow["stage"] = "confirm_date"
+        bot_app._set_flow(user_id, flow)
+        year_str = f" ({year})" if year else ""
+        date_type_labels = {
+            "theatrical": "\U0001f3ac Theatrical",
+            "digital": "\U0001f4bf Digital",
+            "physical": "\U0001f4e6 Physical",
+        }
+        dt_label = date_type_labels.get(date_type, date_type.capitalize())
+        release_line = (
+            f"{dt_label} release: <b>{format_local_ts(release_ts)}</b>"
+            if release_ts
+            else f"{dt_label} release date unknown"
+        )
+        confirm_text = (
+            f"<b>\U0001f3ac Track Movie</b>\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\n"
+            f"<b>{_h(title)}{_h(year_str)}</b>\n{release_line}\n\n"
+            f"I'll start searching for a torrent after the release date."
+        )
+        confirm_rows: list[list[InlineKeyboardButton]] = []
+        if in_plex:
+            confirm_text += "\n\n\u26a0\ufe0f <i>This movie already appears to be in your Plex library.</i>"
+            confirm_rows.append(
+                [InlineKeyboardButton("\u2705 Track anyway", callback_data=f"msch:confirm:{tmdb_id}:{date_type}")]
+            )
+        else:
+            confirm_rows.append(
+                [InlineKeyboardButton("\u2705 Track it", callback_data=f"msch:confirm:{tmdb_id}:{date_type}")]
+            )
+        confirm_rows.append([InlineKeyboardButton("\u274c Cancel", callback_data="msch:cancel")])
+        await bot_app._render_schedule_ui(
+            user_id,
+            q.message,
+            flow,
+            confirm_text,
+            reply_markup=InlineKeyboardMarkup(confirm_rows),
+            current_ui_message=q.message,
+        )
+        return
+
+    # ------------------------------------------------------------------
+    # msch:confirm:{tmdb_id}:{date_type} — create the track record
+    # ------------------------------------------------------------------
+    if data.startswith("msch:confirm:"):
+        _, _, tmdb_id_str, date_type = data.split(":", 3)
+        tmdb_id = int(tmdb_id_str)
+        flow = bot_app._get_flow(user_id)
+        title = str((flow or {}).get("title") or "")
+        year = (flow or {}).get("year")
+        release_ts = int((flow or {}).get("release_date_ts") or 0)
+        search_query = f"{title} {year}" if year else title
+        await asyncio.to_thread(
+            ctx.store.create_movie_track,
+            user_id,
+            tmdb_id,
+            title,
+            year,
+            date_type,
+            release_ts,
+            search_query,
+        )
+        bot_app._clear_flow(user_id)
+        release_note = f" after {format_local_ts(release_ts)}" if release_ts else ""
+        await bot_app._render_nav_ui(
+            user_id,
+            q.message,
+            f"\u2705 Now tracking <b>{_h(title)}</b>. I'll search for it{release_note}.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\U0001f3e0 Home", callback_data="nav:home")]]),
+            current_ui_message=q.message,
+        )
+        return
+
+    # ------------------------------------------------------------------
+    # msch:rm_ask:{track_id} — confirm removal
+    # ------------------------------------------------------------------
+    if data.startswith("msch:rm_ask:"):
+        track_id = data.split(":", 2)[2]
+        track = await asyncio.to_thread(ctx.store.get_movie_track, track_id)
+        if not track or int(track.get("user_id") or 0) != user_id:
+            await bot_app._render_nav_ui(
+                user_id,
+                q.message,
+                "That movie track was not found.",
+                reply_markup=bot_app._home_only_keyboard(),
+                current_ui_message=q.message,
+            )
+            return
+        title = str(track.get("title") or "Unknown")
+        text = (
+            f"<b>\U0001f5d1 Remove Tracking?</b>\n"
+            f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\n"
+            f"Remove tracking for <b>{_h(title)}</b>?\n\n"
+            f"<i>This won't delete anything already downloaded.</i>"
+        )
+        kb = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("\U0001f5d1 Yes, remove", callback_data=f"msch:rm:{track_id}"),
+                    InlineKeyboardButton("\u274c Keep it", callback_data="msch:list"),
+                ],
+            ]
+        )
+        await bot_app._render_nav_ui(user_id, q.message, text, reply_markup=kb, current_ui_message=q.message)
+        return
+
+    # ------------------------------------------------------------------
+    # msch:rm:{track_id} — execute removal
+    # ------------------------------------------------------------------
+    if data.startswith("msch:rm:"):
+        track_id = data.split(":", 2)[2]
+        track = await asyncio.to_thread(ctx.store.get_movie_track, track_id)
+        if track and int(track.get("user_id") or 0) == user_id:
+            await asyncio.to_thread(ctx.store.delete_movie_track, track_id)
+            title = str(track.get("title") or "Unknown")
+            await q.answer(f"{title} removed")
+        # Re-render the list
+        tracks = await asyncio.to_thread(ctx.store.get_movie_tracks_for_user, user_id)
+        if not tracks:
+            await bot_app._render_nav_ui(
+                user_id,
+                q.message,
+                "<b>\U0001f3ac My Movies</b>\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\nNo movies tracked. Tap below to add one.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("\u2795 Track a Movie", callback_data="msch:add")]]
+                    + bot_app._nav_footer(back_data="menu:schedule", include_home=False)
+                ),
+                current_ui_message=q.message,
+            )
+            return
+        lines = [
+            "<b>\U0001f3ac My Movies</b>",
+            "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501",
+        ]
+        rm_rows: list[list[InlineKeyboardButton]] = []
+        now = now_ts()
+        for t in tracks:
+            t_title = str(t.get("title") or "Unknown")
+            t_year = t.get("year")
+            t_dt = str(t.get("release_date_type") or "")
+            t_ts = int(t.get("release_date_ts") or 0)
+            t_status = str(t.get("status") or "pending")
+            t_id = str(t["track_id"])
+            if t_status == "downloading":
+                t_status_line = "\u2b07\ufe0f Downloading"
+            elif t_status == "done":
+                t_status_line = "\u2705 Downloaded"
+            else:
+                # Check release gate status
+                t_rel_status = str(t.get("release_status") or "unknown")
+                t_home_ts = t.get("home_release_ts")
+                if t_rel_status == "pre_theatrical":
+                    t_status_line = "\U0001f3ac Not yet released"
+                elif t_rel_status == "in_theaters":
+                    if t_home_ts:
+                        t_status_line = f"\U0001f3ac In theaters \u00b7 Home est. {_relative_time(int(t_home_ts))}"
+                    else:
+                        t_status_line = "\U0001f3ac In theaters"
+                elif t_rel_status == "waiting_home":
+                    if t_home_ts:
+                        t_status_line = f"\u23f3 Waiting \u00b7 Home release {_relative_time(int(t_home_ts))}"
+                    else:
+                        t_status_line = "\u23f3 Waiting for home release"
+                elif t_rel_status == "home_available":
+                    t_status_line = "\U0001f50d Searching for torrent\u2026"
+                elif t_rel_status == "unknown" and t_ts > now:
+                    # Fallback for tracks created before release gate feature
+                    t_label = t_dt.capitalize() if t_dt else "Release"
+                    t_status_line = f"\u23f3 Waiting \u2014 {t_label} {_relative_time(t_ts)}"
+                else:
+                    t_status_line = "\U0001f50d Searching for torrent\u2026"
+            t_year_str = f" ({t_year})" if t_year else ""
+            lines.append(f"\n<b>{_h(t_title)}{_h(t_year_str)}</b>\n   {t_status_line}")
+            rm_rows.append([InlineKeyboardButton(f"\U0001f5d1 Remove {t_title}", callback_data=f"msch:rm_ask:{t_id}")])
+        rm_rows.append([InlineKeyboardButton("\u2795 Track a Movie", callback_data="msch:add")])
+        rm_rows += bot_app._nav_footer(back_data="menu:schedule", include_home=False)
+        await bot_app._render_nav_ui(
+            user_id,
+            q.message,
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(rm_rows),
+            current_ui_message=q.message,
+        )
+        return
+
+
+# ---------------------------------------------------------------------------
+# Movie schedule text input handler
+# ---------------------------------------------------------------------------
+
+
+async def on_text_movie_schedule(bot_app: Any, user_id: int, text: str, msg: Any, update: Any) -> bool:
+    """Handle text input when the user is in the msch_add flow.
+
+    Returns True if the input was consumed, False if the caller should
+    continue routing.
+    """
+    flow = bot_app._get_flow(user_id)
+    if not flow or flow.get("mode") != "msch_add":
+        return False
+
+    if flow.get("stage") != "title":
+        return False
+
+    ctx = getattr(bot_app, "_ctx", bot_app)
+
+    # Show a searching placeholder
+    await bot_app._render_schedule_ui(
+        user_id,
+        msg,
+        flow,
+        f"\U0001f50d Searching TMDB for <b>{_h(text)}</b>\u2026",
+        reply_markup=None,
+    )
+
+    results: list[dict[str, Any]] = await asyncio.to_thread(ctx.tvmeta.search_movies, text)
+
+    if not results:
+        await bot_app._render_schedule_ui(
+            user_id,
+            msg,
+            flow,
+            f"No results found for <b>{_h(text)}</b>. Try a different title.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\u274c Cancel", callback_data="msch:cancel")]]),
+        )
+        return True
+
+    # Store candidates in flow
+    flow["candidates"] = results
+    bot_app._set_flow(user_id, flow)
+
+    result_rows: list[list[InlineKeyboardButton]] = []
+    for r in results[:5]:
+        r_id = str(r.get("tmdb_id") or "")
+        r_title = str(r.get("title") or "")
+        r_year = r.get("year")
+        label = f"{r_title} ({r_year})" if r_year else r_title
+        result_rows.append([InlineKeyboardButton(label, callback_data=f"msch:pick:{r_id}")])
+    result_rows.append([InlineKeyboardButton("\u274c Cancel", callback_data="msch:cancel")])
+
+    await bot_app._render_schedule_ui(
+        user_id,
+        msg,
+        flow,
+        f"\U0001f3ac Results for <b>{_h(text)}</b>:",
+        reply_markup=InlineKeyboardMarkup(result_rows),
+    )
+    return True

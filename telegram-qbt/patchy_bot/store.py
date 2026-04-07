@@ -195,6 +195,27 @@ class Store:
                 CREATE INDEX IF NOT EXISTS idx_health_events_user ON download_health_events(user_id, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_health_events_type ON download_health_events(event_type, created_at DESC);
 
+                CREATE TABLE IF NOT EXISTS movie_tracks (
+                    track_id     TEXT PRIMARY KEY,
+                    user_id      INTEGER NOT NULL,
+                    tmdb_id      INTEGER NOT NULL,
+                    title        TEXT NOT NULL,
+                    year         INTEGER,
+                    release_date_type TEXT NOT NULL,
+                    release_date_ts   INTEGER NOT NULL,
+                    search_query TEXT NOT NULL,
+                    status       TEXT NOT NULL DEFAULT 'pending',
+                    torrent_hash TEXT,
+                    last_checked_ts INTEGER,
+                    next_check_ts   INTEGER,
+                    error_text   TEXT,
+                    notified     INTEGER NOT NULL DEFAULT 0,
+                    created_ts   INTEGER NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_movie_tracks_user ON movie_tracks(user_id, status);
+                CREATE INDEX IF NOT EXISTS idx_movie_tracks_pending ON movie_tracks(status, release_date_ts, next_check_ts);
+
                 CREATE TABLE IF NOT EXISTS command_center_ui (
                     user_id INTEGER PRIMARY KEY,
                     chat_id INTEGER NOT NULL,
@@ -237,6 +258,23 @@ class Store:
             """,
             (now_value, now_value),
         )
+        # ---- movie_tracks release gate columns ----
+        mt_cols = {row[1] for row in conn.execute("PRAGMA table_info(movie_tracks)")}
+        if "theatrical_ts" not in mt_cols:
+            conn.execute("ALTER TABLE movie_tracks ADD COLUMN theatrical_ts INTEGER")
+        if "digital_ts" not in mt_cols:
+            conn.execute("ALTER TABLE movie_tracks ADD COLUMN digital_ts INTEGER")
+        if "physical_ts" not in mt_cols:
+            conn.execute("ALTER TABLE movie_tracks ADD COLUMN physical_ts INTEGER")
+        if "home_release_ts" not in mt_cols:
+            conn.execute("ALTER TABLE movie_tracks ADD COLUMN home_release_ts INTEGER")
+        if "digital_estimated" not in mt_cols:
+            conn.execute("ALTER TABLE movie_tracks ADD COLUMN digital_estimated INTEGER DEFAULT 0")
+        if "release_status" not in mt_cols:
+            conn.execute("ALTER TABLE movie_tracks ADD COLUMN release_status TEXT DEFAULT 'unknown'")
+        if "last_release_check_ts" not in mt_cols:
+            conn.execute("ALTER TABLE movie_tracks ADD COLUMN last_release_check_ts INTEGER")
+
         conn.execute("PRAGMA optimize;")
         conn.commit()
 
@@ -436,6 +474,7 @@ class Store:
                         "group": ts.parsed.group,
                         "tier": ts.resolution_tier,
                         "label": quality_label(ts.parsed),
+                        "trash": ts.parsed.trash,
                     }
                 )
                 conn.execute(
@@ -1182,3 +1221,193 @@ class Store:
             pass
 
         return backup_path
+
+    # ------------------------------------------------------------------
+    # movie_tracks — persistent movie release tracking
+    # ------------------------------------------------------------------
+
+    def create_movie_track(
+        self,
+        user_id: int,
+        tmdb_id: int,
+        title: str,
+        year: int | None,
+        release_date_type: str,
+        release_date_ts: int,
+        search_query: str,
+    ) -> str:
+        """Create a movie track and return its track_id."""
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
+            track_id = secrets.token_hex(8)
+            conn.execute(
+                "INSERT INTO movie_tracks(track_id, user_id, tmdb_id, title, year, release_date_type, "
+                "release_date_ts, search_query, status, notified, created_ts) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?)",
+                (
+                    track_id,
+                    int(user_id),
+                    int(tmdb_id),
+                    str(title),
+                    year,
+                    str(release_date_type),
+                    int(release_date_ts),
+                    str(search_query),
+                    now_ts(),
+                ),
+            )
+            conn.commit()
+            return track_id
+
+    def get_movie_track(self, track_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
+            row = conn.execute("SELECT * FROM movie_tracks WHERE track_id = ?", (track_id,)).fetchone()
+            return dict(row) if row else None
+
+    def get_movie_tracks_for_user(self, user_id: int) -> list[dict[str, Any]]:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
+            rows = conn.execute(
+                "SELECT * FROM movie_tracks WHERE user_id = ? ORDER BY created_ts DESC",
+                (int(user_id),),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def get_pending_movie_tracks(self) -> list[dict[str, Any]]:
+        """Get pending tracks whose release date has passed and are due for check."""
+        now_value = now_ts()
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
+            rows = conn.execute(
+                "SELECT * FROM movie_tracks WHERE status = 'pending' AND release_date_ts <= ? "
+                "AND (next_check_ts IS NULL OR next_check_ts <= ?)",
+                (now_value, now_value),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def get_downloading_movie_tracks(self) -> list[dict[str, Any]]:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
+            rows = conn.execute("SELECT * FROM movie_tracks WHERE status = 'downloading'").fetchall()
+            return [dict(row) for row in rows]
+
+    def update_movie_track_status(
+        self,
+        track_id: str,
+        status: str | None = None,
+        torrent_hash: str | None = None,
+        notified: bool | None = None,
+        next_check_ts: int | None = None,
+        error_text: str | None = None,
+    ) -> None:
+        parts: list[str] = []
+        values: list[Any] = []
+        if status is not None:
+            parts.append("status = ?")
+            values.append(str(status))
+        if torrent_hash is not None:
+            parts.append("torrent_hash = ?")
+            values.append(str(torrent_hash))
+        if notified is not None:
+            parts.append("notified = ?")
+            values.append(1 if notified else 0)
+        if next_check_ts is not None:
+            parts.append("next_check_ts = ?")
+            values.append(int(next_check_ts))
+        if error_text is not None:
+            parts.append("error_text = ?")
+            values.append(str(error_text))
+        parts.append("last_checked_ts = ?")
+        values.append(now_ts())
+        if not parts:
+            return
+        values.append(track_id)
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
+            conn.execute(f"UPDATE movie_tracks SET {', '.join(parts)} WHERE track_id = ?", values)
+            conn.commit()
+
+    def delete_movie_track(self, track_id: str) -> None:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
+            conn.execute("DELETE FROM movie_tracks WHERE track_id = ?", (track_id,))
+            conn.commit()
+
+    def movie_track_exists_for_tmdb(self, user_id: int, tmdb_id: int) -> bool:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
+            row = conn.execute(
+                "SELECT 1 FROM movie_tracks WHERE user_id = ? AND tmdb_id = ?",
+                (int(user_id), int(tmdb_id)),
+            ).fetchone()
+            return row is not None
+
+    def update_movie_release_dates(
+        self,
+        track_id: str,
+        theatrical_ts: int | None,
+        digital_ts: int | None,
+        physical_ts: int | None,
+        home_release_ts: int | None,
+        digital_estimated: bool,
+        release_status: str,
+    ) -> None:
+        """Update release date tracking columns for a movie track."""
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
+            conn.execute(
+                "UPDATE movie_tracks SET "
+                "theatrical_ts = ?, digital_ts = ?, physical_ts = ?, "
+                "home_release_ts = ?, digital_estimated = ?, release_status = ?, "
+                "last_release_check_ts = ? "
+                "WHERE track_id = ?",
+                (
+                    theatrical_ts,
+                    digital_ts,
+                    physical_ts,
+                    home_release_ts,
+                    1 if digital_estimated else 0,
+                    str(release_status),
+                    now_ts(),
+                    track_id,
+                ),
+            )
+            conn.commit()
+
+    def get_movies_due_release_check(self, now_value: int, interval_s: int) -> list[dict[str, Any]]:
+        """Return movie tracks that need a TMDB release date re-check.
+
+        Returns tracks where release_status is NOT 'home_available' AND
+        last_release_check_ts is NULL or older than interval_s.
+        """
+        cutoff = now_value - interval_s
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
+            rows = conn.execute(
+                "SELECT * FROM movie_tracks WHERE status = 'pending' "
+                "AND (release_status IS NULL OR release_status != 'home_available') "
+                "AND (last_release_check_ts IS NULL OR last_release_check_ts < ?)",
+                (cutoff,),
+            ).fetchall()
+            return [dict(row) for row in rows]

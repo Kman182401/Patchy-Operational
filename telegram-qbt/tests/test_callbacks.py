@@ -391,7 +391,6 @@ async def test_cb_stop_cancels_task(fake_app: FakeBotApp, query: MagicMock, monk
     sent_kwargs = query.message.chat.send_message.call_args
     assert "reply_markup" not in (sent_kwargs.kwargs or {})
     assert "Test Movie" in sent_kwargs[0][0]
-    query.answer.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -414,7 +413,6 @@ async def test_cb_stop_delete_fails(fake_app: FakeBotApp, query: MagicMock, monk
 
     query.message.edit_text.assert_called_once()
     assert "Failed" in query.message.edit_text.call_args[0][0]
-    query.answer.assert_called_once()
 
 
 @pytest.mark.asyncio

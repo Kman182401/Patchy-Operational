@@ -23,6 +23,7 @@ class Config:
     qbt_username: str | None
     qbt_password: str | None
     tmdb_api_key: str | None
+    tmdb_region: str
     plex_base_url: str | None
     plex_token: str | None
     db_path: str
@@ -147,15 +148,16 @@ class Config:
             qbt_username=parse_env_optional(os.getenv("QBT_USERNAME")),
             qbt_password=parse_env_optional(os.getenv("QBT_PASSWORD")),
             tmdb_api_key=parse_env_optional(os.getenv("TMDB_API_KEY")),
+            tmdb_region=parse_env_text(os.getenv("TMDB_REGION"), "US"),
             plex_base_url=(parse_env_optional(os.getenv("PLEX_BASE_URL")) or "").rstrip("/") or None,
             plex_token=parse_env_optional(os.getenv("PLEX_TOKEN")),
             db_path=parse_env_text(os.getenv("DB_PATH"), "./state.sqlite3"),
             page_size=max(3, int(os.getenv("RESULT_PAGE_SIZE", "5"))),
             search_timeout_s=max(10, int(os.getenv("SEARCH_TIMEOUT_SECONDS", "45"))),
             poll_interval_s=max(0.4, float(os.getenv("POLL_INTERVAL_SECONDS", "0.6"))),
-            search_early_exit_min_results=max(0, int(os.getenv("SEARCH_EARLY_EXIT_MIN_RESULTS", "20"))),
+            search_early_exit_min_results=max(0, int(os.getenv("SEARCH_EARLY_EXIT_MIN_RESULTS", "50"))),
             search_early_exit_idle_s=max(1.0, float(os.getenv("SEARCH_EARLY_EXIT_IDLE_SECONDS", "2.5"))),
-            search_early_exit_max_wait_s=max(2.0, float(os.getenv("SEARCH_EARLY_EXIT_MAX_WAIT_SECONDS", "12.0"))),
+            search_early_exit_max_wait_s=max(2.0, float(os.getenv("SEARCH_EARLY_EXIT_MAX_WAIT_SECONDS", "25.0"))),
             default_limit=max(1, min(50, int(os.getenv("DEFAULT_RESULT_LIMIT", "10")))),
             default_sort=parse_env_text(os.getenv("DEFAULT_SORT"), "seeds").lower(),
             default_order=parse_env_text(os.getenv("DEFAULT_ORDER"), "desc").lower(),

@@ -6,3 +6,4 @@
 - [Progress tracking tests](project_progress_tests.md) -- 43 tests covering download progress rendering and async tracker loop
 - [Background runner tests](project_runner_tests.md) -- 31 tests covering completion poller, remove runner, schedule runner, and pure helpers
 - [Callback routing tests](project_callback_tests.md) -- 22 tests covering menu/flow/stop/rm/sch callbacks and CallbackDispatcher
+- [Movie schedule tests](project_movie_schedule_tests.md) -- 29 tests covering movie_tracks Store CRUD and TVMetadataClient search_movies/get_movie_release_dates

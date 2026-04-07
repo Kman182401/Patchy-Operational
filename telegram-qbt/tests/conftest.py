@@ -38,6 +38,7 @@ def mock_config(tmp_path) -> Config:
         qbt_username=None,
         qbt_password=None,
         tmdb_api_key=None,
+        tmdb_region="US",
         plex_base_url=None,
         plex_token=None,
         db_path=":memory:",

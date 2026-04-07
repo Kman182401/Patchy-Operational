@@ -1,0 +1,22 @@
+{
+  "version": "1.0",
+  "skills": {
+    "post-fix-memory": {
+      "type": "domain",
+      "enforcement": "suggest",
+      "priority": "high",
+      "promptTriggers": {
+        "keywords": [
+          "save this fix",
+          "remember this bug",
+          "log this issue",
+          "post-fix memory",
+          "commit this to memory",
+          "don't let this happen again",
+          "remember what went wrong",
+          "post fix memory"
+        ]
+      }
+    }
+  }
+}

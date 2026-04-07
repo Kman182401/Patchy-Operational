@@ -152,6 +152,7 @@ class BotApp:
         d.register_prefix("p:", self._on_cb_page)
         d.register_prefix("rm:", self._on_cb_remove)
         d.register_prefix("sch:", self._on_cb_schedule)
+        d.register_prefix("msch:", self._on_cb_movie_schedule)
         d.register_prefix("menu:", self._on_cb_menu)
         d.register_prefix("flow:", self._on_cb_flow)
         d.register_exact("dl:manage", self._on_cb_dl_manage)
@@ -187,8 +188,19 @@ class BotApp:
 
         await self._schedule_bootstrap(app)
 
-        # Explicit thread pool for asyncio.to_thread() calls (search, qBT ops, SQLite).
-        # Default is typically min(32, cpu+4); setting explicitly documents the intent.
+        # Explicit thread pool for asyncio.to_thread() calls (search, qBT API, SQLite).
+        #
+        # Current: 8 workers. Adequate for single-user deployment.
+        #
+        # Each search blocks a thread for up to 90s (qBT search polling).
+        # Progress trackers poll qBT every ~1s via to_thread (brief thread use).
+        # SQLite operations are fast but also use to_thread.
+        #
+        # Saturation scenario: 8 concurrent searches would exhaust the pool,
+        # blocking progress trackers and SQLite ops. Unlikely for single user.
+        #
+        # If concurrent_updates is enabled or multi-user support is added,
+        # increase to 16-32 workers. Monitor with asyncio debug logging.
         loop = asyncio.get_running_loop()
         loop.set_default_executor(concurrent.futures.ThreadPoolExecutor(max_workers=8))
 
@@ -1992,11 +2004,33 @@ class BotApp:
     async def _qbt_health_check_job(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Periodic job: verify qBittorrent is reachable every 5 minutes, restart if needed."""
         try:
-            await asyncio.to_thread(self.qbt.get_transfer_info)
-            return
+            info = await asyncio.to_thread(self.qbt.get_transfer_info)
         except Exception as e:
             LOG.warning("qBT health check: unreachable (%s), attempting restart", e)
+            await self._qbt_health_restart()
+            return
 
+        status = str(info.get("connection_status") or "unknown").strip().lower()
+        if status == "firewalled":
+            LOG.warning("qBT health check: status=%s — checking for stale interface binding", status)
+            try:
+                prefs = await asyncio.to_thread(self.qbt.get_preferences)
+                iface = str(prefs.get("current_network_interface") or "").strip()
+                if iface:
+                    LOG.warning(
+                        "qBT health check: clearing stale interface binding '%s' (OS kill-switch handles VPN routing)",
+                        iface,
+                    )
+                    await asyncio.to_thread(
+                        self.qbt.set_preferences,
+                        {"current_network_interface": "", "current_interface_address": ""},
+                    )
+            except Exception:
+                LOG.warning("qBT health check: failed to check/clear interface binding", exc_info=True)
+        return
+
+    async def _qbt_health_restart(self) -> None:
+        """Restart qbittorrent.service and verify it comes back online."""
         try:
             result = await asyncio.to_thread(
                 subprocess.run,
@@ -2046,6 +2080,8 @@ class BotApp:
                         processed += 1
                     except Exception:
                         LOG.warning("Schedule track refresh failed for %s", track.get("track_id"), exc_info=True)
+                # Check movie tracks in the same tick
+                await self._check_movie_tracks()
                 await asyncio.to_thread(
                     self.store.update_schedule_runner_status,
                     last_finished_at=now_ts(),
@@ -2069,6 +2105,312 @@ class BotApp:
                     metadata_source_health_json=self._schedule_source_snapshot("metadata"),
                     inventory_source_health_json=self._schedule_source_snapshot("inventory"),
                 )
+
+    # ------------------------------------------------------------------
+    # Movie track checking (called from _schedule_runner_job)
+    # ------------------------------------------------------------------
+
+    async def _check_movie_tracks(self) -> None:
+        """Check pending and downloading movie tracks."""
+        pending = await asyncio.to_thread(self.store.get_pending_movie_tracks)
+        for track in pending:
+            try:
+                await self._check_pending_movie_track(track)
+            except Exception:
+                LOG.warning("Movie track check failed for %s", track.get("track_id"), exc_info=True)
+
+        downloading = await asyncio.to_thread(self.store.get_downloading_movie_tracks)
+        for track in downloading:
+            try:
+                await self._check_downloading_movie_track(track)
+            except Exception:
+                LOG.warning("Movie Plex check failed for %s", track.get("track_id"), exc_info=True)
+
+    async def _check_movie_release_gate(self, track: dict[str, Any]) -> bool:
+        """Check if a movie's home release date has passed. Returns True if search should proceed."""
+        track_id = str(track.get("track_id") or "")
+        tmdb_id = int(track.get("tmdb_id") or 0)
+        title = str(track.get("title") or "")
+        release_status = str(track.get("release_status") or "unknown")
+
+        # Already confirmed home available — proceed immediately
+        if release_status == MovieReleaseStatus.HOME_AVAILABLE:
+            return True
+
+        # No TMDB ID — can't check, mark unknown and allow search (fall through to quality gate)
+        if not tmdb_id:
+            LOG.warning("Movie track %s (%s): no tmdb_id, skipping release gate", track_id, title)
+            return True
+
+        # Determine re-check interval based on current status
+        if release_status == MovieReleaseStatus.PRE_THEATRICAL:
+            recheck_interval = 24 * 3600  # 24 hours
+        else:
+            recheck_interval = 6 * 3600  # 6 hours for in_theaters, waiting_home, unknown
+
+        # Check if we need to re-fetch from TMDB
+        last_check = int(track.get("last_release_check_ts") or 0)
+        if last_check > 0 and (now_ts() - last_check) < recheck_interval:
+            # Not time to re-check yet. Use cached status to decide.
+            if release_status in (
+                MovieReleaseStatus.PRE_THEATRICAL,
+                MovieReleaseStatus.IN_THEATERS,
+                MovieReleaseStatus.WAITING_HOME,
+            ):
+                return False
+            # UNKNOWN — let it through to search (quality.py will filter CAM/TS)
+            return True
+
+        # Fetch fresh release dates from TMDB
+        try:
+            dates = await asyncio.to_thread(self._ctx.tvmeta.get_movie_home_release, tmdb_id, self.cfg.tmdb_region)
+        except Exception as e:
+            LOG.warning("Movie release gate TMDB check failed for %s: %s", track_id, e)
+            # Update last check time so we don't hammer TMDB
+            await asyncio.to_thread(
+                self.store.update_movie_release_dates,
+                track_id,
+                track.get("theatrical_ts"),
+                track.get("digital_ts"),
+                track.get("physical_ts"),
+                track.get("home_release_ts"),
+                bool(track.get("digital_estimated")),
+                release_status,
+            )
+            return release_status not in (
+                MovieReleaseStatus.PRE_THEATRICAL,
+                MovieReleaseStatus.IN_THEATERS,
+                MovieReleaseStatus.WAITING_HOME,
+            )
+
+        # Update DB with fresh dates
+        await asyncio.to_thread(
+            self.store.update_movie_release_dates,
+            track_id,
+            dates.theatrical_ts,
+            dates.digital_ts,
+            dates.physical_ts,
+            dates.home_release_ts,
+            dates.digital_estimated,
+            dates.status.value,
+        )
+
+        new_status = dates.status
+        LOG.info(
+            "Movie track %s (%s): release status = %s, home_release_ts = %s",
+            track_id,
+            title,
+            new_status.value,
+            dates.home_release_ts,
+        )
+
+        if new_status == MovieReleaseStatus.HOME_AVAILABLE:
+            return True
+
+        # Set next_check_ts based on status
+        if new_status == MovieReleaseStatus.WAITING_HOME and dates.home_release_ts:
+            # Wake up right when home release hits
+            next_check = min(dates.home_release_ts, now_ts() + recheck_interval)
+        elif new_status == MovieReleaseStatus.PRE_THEATRICAL:
+            next_check = now_ts() + 24 * 3600
+        else:
+            next_check = now_ts() + 6 * 3600
+
+        await asyncio.to_thread(
+            self.store.update_movie_track_status,
+            track_id,
+            next_check_ts=next_check,
+        )
+        return False
+
+    async def _check_pending_movie_track(self, track: dict[str, Any]) -> None:
+        """Search for a torrent for a pending movie track."""
+        track_id = str(track.get("track_id") or "")
+        search_query = str(track.get("search_query") or "")
+        user_id = int(track.get("user_id") or 0)
+        title = str(track.get("title") or "")
+        year = track.get("year")
+
+        # Release gate: skip torrent search if movie isn't on home video yet
+        should_search = await self._check_movie_release_gate(track)
+        if not should_search:
+            LOG.info(
+                "Movie track %s: skipping search (release gate: %s)",
+                track_id,
+                track.get("release_status", "unknown"),
+            )
+            return
+
+        LOG.info("Movie track check: searching for '%s'", search_query)
+
+        try:
+            raw_rows = await asyncio.to_thread(
+                self.qbt.search,
+                search_query,
+                plugin="enabled",
+                search_cat="movies",
+                timeout_s=self.cfg.search_timeout_s,
+                poll_interval_s=self.cfg.poll_interval_s,
+                early_exit_min_results=max(self.cfg.search_early_exit_min_results, 12),
+                early_exit_idle_s=self.cfg.search_early_exit_idle_s,
+                early_exit_max_wait_s=self.cfg.search_early_exit_max_wait_s,
+            )
+        except Exception as e:
+            LOG.warning("Movie torrent search failed for %s: %s", track_id, e)
+            await asyncio.to_thread(
+                self.store.update_movie_track_status,
+                track_id,
+                status="pending",
+                next_check_ts=now_ts() + 3600,
+                error_text=str(e),
+            )
+            return
+
+        defaults = await asyncio.to_thread(self.store.get_defaults, user_id, self.cfg)
+        filtered = self._apply_filters(
+            raw_rows,
+            media_type="movie",
+            min_seeds=int(defaults.get("default_min_seeds") or 0),
+            min_size=None,
+            max_size=None,
+            min_quality=self.cfg.default_min_quality,
+        )
+        filtered = search_handler.deduplicate_results(filtered)
+
+        # Pick best result by quality score
+        best: dict[str, Any] | None = None
+        best_score = (-1, -99999)
+        for row in filtered:
+            qs = row.get("_quality_score")
+            if qs and not qs.is_rejected:
+                score_key = (qs.resolution_tier, qs.format_score)
+                if score_key > best_score:
+                    best_score = score_key
+                    best = row
+
+        if best is None:
+            LOG.info("Movie track %s: no acceptable torrent found, retrying in 1h", track_id)
+            await asyncio.to_thread(
+                self.store.update_movie_track_status,
+                track_id,
+                status="pending",
+                next_check_ts=now_ts() + 3600,
+            )
+            return
+
+        # Build URL and add torrent
+        try:
+            url = download_handler.result_to_url(best)
+        except RuntimeError as e:
+            LOG.warning("Movie track %s: no usable URL: %s", track_id, e)
+            await asyncio.to_thread(
+                self.store.update_movie_track_status,
+                track_id,
+                status="pending",
+                next_check_ts=now_ts() + 3600,
+                error_text=str(e),
+            )
+            return
+
+        torrent_name = str(best.get("fileName") or best.get("name") or "")
+        try:
+            await asyncio.to_thread(
+                self.qbt.add_url,
+                url,
+                category=self.cfg.movies_category,
+                savepath=self.cfg.movies_path,
+            )
+        except Exception as e:
+            LOG.warning("Movie track %s: add torrent failed: %s", track_id, e)
+            await asyncio.to_thread(
+                self.store.update_movie_track_status,
+                track_id,
+                status="pending",
+                next_check_ts=now_ts() + 3600,
+                error_text=str(e),
+            )
+            return
+
+        torrent_hash = download_handler.extract_hash(best, url) or ""
+        LOG.info("Movie track %s: downloading '%s' (hash=%s)", track_id, torrent_name, torrent_hash)
+        await asyncio.to_thread(
+            self.store.update_movie_track_status,
+            track_id,
+            status="downloading",
+            torrent_hash=torrent_hash,
+        )
+
+        # Send notification
+        if self.app and user_id:
+            qs = best.get("_quality_score")
+            qlabel = quality_label(qs.parsed) if qs else ""
+            try:
+                await self.app.bot.send_message(
+                    chat_id=user_id,
+                    text=(
+                        f"⬇️ Found <b>{_h(title)}</b>"
+                        f"{f' ({year})' if year else ''}"
+                        f" — downloading now!\n\n"
+                        f"<code>{_h(torrent_name)}</code>\n"
+                        f"Quality: {_h(qlabel)}"
+                    ),
+                    parse_mode=_PM,
+                )
+                await asyncio.to_thread(
+                    self.store.update_movie_track_status,
+                    track_id,
+                    notified=True,
+                )
+            except Exception:
+                LOG.warning("Failed to send movie download notification", exc_info=True)
+
+    async def _check_downloading_movie_track(self, track: dict[str, Any]) -> None:
+        """Check if a downloading movie has appeared in Plex."""
+        track_id = str(track.get("track_id") or "")
+        title = str(track.get("title") or "")
+        year = track.get("year")
+
+        if not self.plex.ready():
+            return
+
+        in_plex = False
+        try:
+            sections = await asyncio.to_thread(self.plex._sections)
+            for section in sections:
+                if str(section.get("type") or "").lower() != "movie":
+                    continue
+                key = str(section.get("key") or "").strip()
+                if not key:
+                    continue
+                root = await asyncio.to_thread(
+                    self.plex._get_xml,
+                    f"/library/sections/{key}/all",
+                    params={"type": 1, "title": title},
+                )
+                for meta in root.findall(".//*[@ratingKey]"):
+                    meta_title = normalize_title(str(meta.attrib.get("title") or ""))
+                    want_title = normalize_title(title)
+                    meta_year = str(meta.attrib.get("year") or "").strip()
+                    if meta_title == want_title:
+                        if year and meta_year.isdigit() and int(meta_year) == year:
+                            in_plex = True
+                            break
+                        elif not year:
+                            in_plex = True
+                            break
+                if in_plex:
+                    break
+        except Exception as e:
+            LOG.warning("Movie Plex check failed for %s: %s", track_id, e)
+            return
+
+        if in_plex:
+            LOG.info("Movie track complete, in Plex: %s (%s)", title, year)
+            await asyncio.to_thread(self.store.delete_movie_track, track_id)
+
+    # ------------------------------------------------------------------
+    # TV schedule refresh (existing)
+    # ------------------------------------------------------------------
 
     async def _schedule_refresh_track(
         self, track: dict[str, Any], *, allow_notify: bool = False
@@ -3134,6 +3476,9 @@ class BotApp:
                 elif flow.get("mode") == "schedule":
                     self._clear_flow(user_id)
                     await self._navigate_to_command_center(msg, user_id)
+                elif flow.get("mode") == "msch_add":
+                    self._clear_flow(user_id)
+                    await self._navigate_to_command_center(msg, user_id)
                 elif flow.get("mode") == "tv":
                     await self._cleanup_private_user_message(msg)
                     await self._render_tv_ui(
@@ -3335,6 +3680,10 @@ class BotApp:
                     self._schedule_preview_text(probe),
                     reply_markup=self._schedule_preview_keyboard(probe),
                 )
+                return
+
+            if mode == "msch_add" and stage == "title":
+                await schedule_handler.on_text_movie_schedule(self, user_id, text, msg, update)
                 return
 
             if mode == "remove" and stage == "await_query":
@@ -3562,7 +3911,6 @@ class BotApp:
         if not q or not q.message:
             return
 
-        await q.answer()
         data = q.data or ""
         user_id = update.effective_user.id
 
@@ -3582,6 +3930,13 @@ class BotApp:
                 reply_markup=self._home_only_keyboard(),
                 current_ui_message=q.message,
             )
+        finally:
+            # Default acknowledgment — handlers that called q.answer(show_alert=True) will have
+            # already answered; this silently no-ops for those cases (BadRequest caught below).
+            try:
+                await q.answer()
+            except Exception:
+                pass
 
     # ---------- Callback handler methods ----------
 
@@ -3689,6 +4044,9 @@ class BotApp:
 
     async def _on_cb_schedule(self, *, data: str, q: Any, user_id: int) -> None:
         await schedule_handler.on_cb_schedule(self, data=data, q=q, user_id=user_id)
+
+    async def _on_cb_movie_schedule(self, *, data: str, q: Any, user_id: int) -> None:
+        await schedule_handler.on_cb_movie_schedule(self, data=data, q=q, user_id=user_id)
 
     async def _on_cb_menu(self, *, data: str, q: Any, user_id: int) -> None:
         await commands_handler.on_cb_menu(self, data=data, q=q, user_id=user_id)

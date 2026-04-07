@@ -305,6 +305,9 @@ class DummyBotApp:
     def _schedule_source_snapshot(self, key: str) -> str:
         return "{}"
 
+    async def _check_movie_tracks(self) -> None:
+        pass
+
 
 def _make_dummy_bot_app(monkeypatch: Any) -> DummyBotApp:
     """Build a DummyBotApp with a mocked store."""

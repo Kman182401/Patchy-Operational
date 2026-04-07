@@ -166,15 +166,16 @@ def sort_rows(rows: list[dict[str, Any]], key: str, order: str) -> list[dict[str
 
 
 def prioritize_results(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Pin the best 4K result at position #1, then 1080p-only for the rest.
+    """Rank results: best 4K first, then 1080p, then 720p and below.
 
-    Separates results into above-1080p and exactly-1080p buckets.
+    Separates results into above-1080p, exactly-1080p, and below-1080p buckets.
     At most one above-1080p result (the highest-seeded) is kept and
     placed first.  All remaining slots are filled with 1080p results
-    sorted by seed count descending.
+    then lower-resolution results, each group sorted by seed count descending.
     """
     above: list[dict[str, Any]] = []
     at_1080: list[dict[str, Any]] = []
+    below: list[dict[str, Any]] = []
 
     for r in rows:
         name = str(r.get("name") or r.get("fileName") or "")
@@ -183,17 +184,32 @@ def prioritize_results(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             above.append(r)
         elif tier == 1080:
             at_1080.append(r)
+        else:
+            below.append(r)
 
     def _seeds(x: dict[str, Any]) -> int:
         return int(x.get("nbSeeders") or x.get("seeders") or 0)
 
-    above.sort(key=_seeds, reverse=True)
-    at_1080.sort(key=_seeds, reverse=True)
+    def _is_trash(x: dict[str, Any]) -> bool:
+        ts = x.get("_quality_score")
+        if ts is not None:
+            return bool(getattr(ts, "parsed", None) and ts.parsed.trash)
+        return False
+
+    # Within each bucket: non-trash first (sorted by seeds desc),
+    # then trash sources last (sorted by seeds desc).
+    def _sort_key(x: dict[str, Any]) -> tuple[int, int]:
+        return (1 if _is_trash(x) else 0, -_seeds(x))
+
+    above.sort(key=_sort_key)
+    at_1080.sort(key=_sort_key)
+    below.sort(key=_sort_key)
 
     result: list[dict[str, Any]] = []
     if above:
         result.append(above[0])
     result.extend(at_1080)
+    result.extend(below)
     return result
 
 
@@ -371,6 +387,7 @@ def render_page(
                 q_data = None
 
         source_type = str(q_data.get("source") or "").strip() if q_data else ""
+        is_trash = bool(q_data.get("trash")) if q_data else False
         parts: list[str] = []
         res = str(q_data.get("resolution") or "").strip() if q_data else ""
         if res and res != "unknown":
@@ -399,11 +416,28 @@ def render_page(
         short_qlbl = " ".join(parts) if parts else "Unknown"
 
         lines.append(f"<b>{idx}.</b> <code>{_h(name)}</code>")
+        trash_tag = "⚠️ " if is_trash else ""
         lines.append(
-            f"   🌱 <b>{seeds}</b> seeds | 📡 {_h(source_type) if source_type else 'Unknown'} | 🎞 <code>{_h(short_qlbl)}</code> | 📦 <code>{size}</code> | 🌐 <i>{_h(site)}</i>"
+            f"   {trash_tag}🌱 <b>{seeds}</b> seeds | 📡 {_h(source_type) if source_type else 'Unknown'} | 🎞 <code>{_h(short_qlbl)}</code> | 📦 <code>{size}</code> | 🌐 <i>{_h(site)}</i>"
         )
         lines.append("")
 
+    # Show trash-source legend if any result on this page has the ⚠️ flag
+    if any(
+        bool(
+            (
+                json.loads(r.get("quality_json"))
+                if isinstance(r.get("quality_json"), str)
+                else r.get("quality_json") or {}
+            ).get("trash")
+        )
+        for r in view
+    ):
+        lines.append(
+            "<i>⚠️ = TeleSync / CAM source — recorded in a theater, not a digital release. "
+            "Expect lower picture and audio quality.</i>"
+        )
+        lines.append("")
     lines.append("<i>Tap Add on a result, then choose Movies or TV.</i>")
     text = "\n".join(lines)
 

@@ -195,8 +195,6 @@ def score_torrent(
     # ------------------------------------------------------------------
     # Hard rejections
     # ------------------------------------------------------------------
-    if parsed.trash:
-        return TorrentScore(tier, -9999, True, "garbage source (CAM/TS/SCR)", parsed)
     if parsed.upscaled:
         return TorrentScore(tier, -9999, True, "upscaled content", parsed)
     if (parsed.codec or "").lower() == "av1" and av1_reject:
@@ -205,6 +203,10 @@ def score_torrent(
         return TorrentScore(tier, -9999, True, "zero seeders", parsed)
 
     score = 0
+
+    # Trash sources (TS/CAM/SCR) — not rejected but heavily penalised
+    if parsed.trash:
+        score -= 200
 
     # ------------------------------------------------------------------
     # Source / release type points

@@ -35,6 +35,10 @@ from ._shared import (
 
 LOG = logging.getLogger("qbtg")
 
+# In-memory dedup for completion poller — resets on service restart.
+# The persistent DB layer (is_completion_notified) is the safety net.
+_poller_seen_hashes: set[str] = set()
+
 
 # ---------------------------------------------------------------------------
 # Progress rendering (pure functions — no ctx needed)
@@ -279,6 +283,27 @@ async def attach_progress_tracker_when_ready(
     try:
         torrent_hash = await resolve_hash_by_name(ctx, title, category, wait_s=35)
         if not torrent_hash:
+            try:
+                sent = await base_msg.reply_text(
+                    "\u26a0\ufe0f <b>Monitor Could Not Attach</b>\n\n"
+                    "Could not find the torrent hash after 35s.\n"
+                    "Use <code>/active</code> to check download status.",
+                    parse_mode=_PM,
+                )
+                track_ephemeral_message(ctx, user_id, sent)
+            except Exception:
+                LOG.warning("Failed to send pending tracker timeout notification", exc_info=True)
+            try:
+                ctx.store.log_health_event(
+                    user_id,
+                    None,
+                    "pending_tracker_timeout",
+                    "warn",
+                    json.dumps({"title": title, "category": category, "wait_s": 35}),
+                    title,
+                )
+            except Exception:
+                LOG.debug("Failed to log pending_tracker_timeout health event", exc_info=True)
             return
 
         tracker_msg = await base_msg.reply_text(
@@ -411,7 +436,7 @@ async def track_download_progress(
             raw_dls = max(0.0, float(int(info.get("dlspeed", 0) or 0)))
             raw_uls = max(0.0, float(int(info.get("upspeed", 0) or 0)))
 
-            if smooth_progress_pct is None:
+            if smooth_progress_pct is None or smooth_dls is None or smooth_uls is None:
                 smooth_progress_pct = raw_progress_pct
                 smooth_dls = raw_dls
                 smooth_uls = raw_uls
@@ -433,7 +458,16 @@ async def track_download_progress(
                 elif not stall_warned and (current_ts - metadata_stall_start) >= ctx.cfg.stall_metadata_warn_s:
                     stall_warned = True
                     elapsed_s = int(current_ts - metadata_stall_start)
-                    tracker_detail: dict[str, Any] = {"state": state, "elapsed_s": elapsed_s}
+                    tracker_detail: dict[str, Any] = {
+                        "state": state,
+                        "elapsed_s": elapsed_s,
+                        "reannounce_attempted": True,
+                    }
+                    try:
+                        await asyncio.to_thread(ctx.qbt.reannounce_torrent, torrent_hash)
+                    except Exception:
+                        tracker_detail["reannounce_attempted"] = False
+                        LOG.warning("Reannounce failed for stalled torrent %s", torrent_hash, exc_info=True)
                     try:
                         trackers = await asyncio.to_thread(ctx.qbt.get_torrent_trackers, torrent_hash)
                         failed = [t for t in trackers if t.get("status") == 4]
@@ -448,7 +482,7 @@ async def track_download_progress(
                         f"\u26a0\ufe0f <b>Download Stalled</b>\n\n"
                         f"<code>{_h(title)}</code>\n\n"
                         f"Stuck getting metadata for {elapsed_s // 60}m {elapsed_s % 60}s ({tracker_msg_text})\n\n"
-                        f"You may want to cancel and try a different torrent."
+                        f"Attempted tracker reannounce \u2014 if this doesn\u2019t help, you may want to cancel and try a different torrent."
                     )
                     await tracker_send_fallback(ctx, tracker_msg, warn_text)
                     try:
@@ -514,13 +548,6 @@ async def track_download_progress(
                     edit_error_streak = 0
                 else:
                     edit_error_streak += 1
-                    if edit_error_streak >= 5:
-                        await tracker_send_fallback(
-                            ctx,
-                            tracker_msg,
-                            "<b>\u26a0\ufe0f Monitor Paused</b>\n<i>Repeated Telegram timeouts.</i> Use <code>/active</code> for status.",
-                        )
-                        break
 
             if is_complete_torrent(info):
                 done_text = (
@@ -641,16 +668,30 @@ async def completion_poller_job(ctx: HandlerContext, context: ContextTypes.DEFAU
         LOG.warning("Completion poller: failed to list torrents", exc_info=True)
         return
 
+    now_ts_val = int(time.time())
+    COMPLETION_RECENCY_S = 86400  # 24 hours
+
     for info in torrents:
         torrent_hash = str(info.get("hash") or "").strip().lower()
         if not torrent_hash:
             continue
 
+        # In-memory dedup (fast path — avoids DB query for already-seen hashes)
+        if torrent_hash in _poller_seen_hashes:
+            continue
+
         if not is_complete_torrent(info):
+            continue
+
+        # Time-bounded: skip completions older than 24h (handled by _recover_missed_completions)
+        completion_on = int(info.get("completion_on", 0) or 0)
+        if completion_on > 0 and (now_ts_val - completion_on) > COMPLETION_RECENCY_S:
+            _poller_seen_hashes.add(torrent_hash)
             continue
 
         already = await asyncio.to_thread(ctx.store.is_completion_notified, torrent_hash)
         if already:
+            _poller_seen_hashes.add(torrent_hash)
             continue
 
         name = str(info.get("name") or "Unknown")
@@ -751,6 +792,7 @@ async def completion_poller_job(ctx: HandlerContext, context: ContextTypes.DEFAU
                 LOG.warning("Completion poller: failed to notify user %s for %s", uid, name, exc_info=True)
 
         LOG.info("Completion poller: notified for '%s' (hash=%s)", name, torrent_hash)
+        _poller_seen_hashes.add(torrent_hash)
 
     # Housekeeping: clean up old records once per run.
     try:
@@ -837,6 +879,8 @@ async def resolve_hash_by_name(ctx: HandlerContext, title: str, category: str, w
                 limit=150,
             )
             candidates: list[tuple[float, str]] = []
+            now_epoch = time.time()
+            RECENCY_WINDOW_S = 60
             for row in rows:
                 name = str(row.get("name") or "").strip().lower()
                 if not name:
@@ -844,18 +888,20 @@ async def resolve_hash_by_name(ctx: HandlerContext, title: str, category: str, w
                 h = str(row.get("hash") or "").strip().lower()
                 if not re.fullmatch(r"[a-f0-9]{40}", h):
                     continue
-                # Priority 1: exact match
+                added_on = int(row.get("added_on", 0) or 0)
+                is_recent = added_on == 0 or (now_epoch - added_on) <= RECENCY_WINDOW_S
+                # Priority 1: exact match (no recency filter)
                 if name == want:
                     return h
-                # Priority 2: normalized title match
+                # Priority 2: normalized title match (no recency filter)
                 name_norm = normalize_title(name)
                 if want_norm and name_norm == want_norm:
                     return h
-                # Priority 3: want contained in name (with length ratio check)
-                if want in name and len(want) >= len(name) * 0.4:
+                # Priority 3: want contained in name (recency required)
+                if is_recent and want in name and len(want) >= len(name) * 0.4:
                     candidates.append((len(want) / len(name), h))
-                # Priority 4: name contained in want (unusual)
-                elif name in want and len(name) >= len(want) * 0.6:
+                # Priority 4: name contained in want (recency required)
+                elif is_recent and name in want and len(name) >= len(want) * 0.6:
                     candidates.append((len(name) / len(want) * 0.8, h))
             if candidates:
                 candidates.sort(key=lambda c: c[0], reverse=True)
@@ -1049,5 +1095,4 @@ async def on_cb_stop(ctx: HandlerContext, *, data: str, q: Any, user_id: int) ->
             await q.message.edit_text(
                 f"<b>\u26a0\ufe0f Stop Failed</b>\n<i>{_h(str(e))}</i>", reply_markup=None, parse_mode=_PM
             )
-        await q.answer()
         return

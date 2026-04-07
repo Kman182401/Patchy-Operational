@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 
 LOG = logging.getLogger("qbtg.organizer")
 
@@ -171,14 +172,20 @@ def organize_tv(content_path: str, tv_root: str) -> OrganizeResult:
     files_moved = 0
 
     if os.path.isfile(content_path):
-        # Single file download
+        # Single file download — reject non-media files
+        ext = os.path.splitext(name)[1].lower()
+        if ext not in KEEP_EXTS:
+            LOG.warning("Organizer: skipping non-media file '%s' (ext=%s)", name, ext)
+            return OrganizeResult(False, content_path, f"not a media file: {ext}", 0)
         dst = os.path.join(season_dir, _strip_tracker_tags(name))
-        if not os.path.exists(dst):
+        try:
             shutil.move(content_path, dst)
             files_moved = 1
             return OrganizeResult(True, dst, f"{show_dir_name} S{season:02d} -> Season {season:02d}/", files_moved)
-        else:
-            return OrganizeResult(False, content_path, f"already exists: {os.path.basename(dst)}", 0)
+        except (FileExistsError, shutil.Error) as e:
+            if "already exists" in str(e).lower() or isinstance(e, FileExistsError):
+                return OrganizeResult(False, content_path, f"already exists: {os.path.basename(dst)}", 0)
+            raise
 
     elif os.path.isdir(content_path):
         # Directory download — move media files into season dir
@@ -189,10 +196,15 @@ def organize_tv(content_path: str, tv_root: str) -> OrganizeResult:
                 src = os.path.join(content_path, f)
                 clean_name = _strip_tracker_tags(f)
                 dst = os.path.join(season_dir, clean_name)
-                if not os.path.exists(dst):
+                try:
                     shutil.move(src, dst)
                     moved_files.append(clean_name)
                     files_moved += 1
+                except (FileExistsError, shutil.Error) as e:
+                    if "already exists" in str(e).lower() or isinstance(e, FileExistsError):
+                        LOG.warning("Organizer: file already exists, skipping: %s", dst)
+                    else:
+                        raise
             elif os.path.isdir(os.path.join(content_path, f)):
                 # Check subdirs for season packs (e.g., S01/, S02/)
                 subdir = os.path.join(content_path, f)
@@ -202,13 +214,19 @@ def organize_tv(content_path: str, tv_root: str) -> OrganizeResult:
                     sub_season_dir = os.path.join(tv_root, show_dir_name, f"Season {sub_season:02d}")
                     os.makedirs(sub_season_dir, exist_ok=True)
                     for sf in os.listdir(subdir):
-                        if os.path.splitext(sf)[1].lower() in KEEP_EXTS:
+                        sf_ext = os.path.splitext(sf)[1].lower()
+                        if sf_ext in KEEP_EXTS:
                             src = os.path.join(subdir, sf)
                             clean_sf = _strip_tracker_tags(sf)
                             dst = os.path.join(sub_season_dir, clean_sf)
-                            if not os.path.exists(dst):
+                            try:
                                 shutil.move(src, dst)
                                 files_moved += 1
+                            except (FileExistsError, shutil.Error) as e:
+                                if "already exists" in str(e).lower() or isinstance(e, FileExistsError):
+                                    LOG.warning("Organizer: season pack file already exists, skipping: %s", dst)
+                                else:
+                                    raise
 
         # Clean up empty source dir
         if files_moved > 0:
@@ -239,18 +257,30 @@ def organize_movie(content_path: str, movies_root: str) -> OrganizeResult:
     existing = _find_existing_movie_dir(movies_root, title, year)
 
     if os.path.isfile(content_path):
+        ext = os.path.splitext(name)[1].lower()
+        if ext not in VIDEO_EXTS:
+            LOG.warning("Organizer: skipping non-video file '%s' (ext=%s)", name, ext)
+            return OrganizeResult(False, content_path, f"not a video file: {ext}", 0)
         # Loose movie file — move into a directory
         movie_dir = os.path.join(movies_root, existing or target_name)
         os.makedirs(movie_dir, exist_ok=True)
-        ext = os.path.splitext(name)[1]
         dst_name = target_name + ext
         dst = os.path.join(movie_dir, dst_name)
-        if not os.path.exists(dst):
+        try:
             shutil.move(content_path, dst)
             return OrganizeResult(True, movie_dir, f"-> {target_name}/", 1)
-        return OrganizeResult(False, content_path, f"already exists: {dst_name}", 0)
+        except (FileExistsError, shutil.Error) as e:
+            if "already exists" in str(e).lower() or isinstance(e, FileExistsError):
+                return OrganizeResult(False, content_path, f"already exists: {dst_name}", 0)
+            raise
 
     elif os.path.isdir(content_path):
+        # Reject directories with no video files — prevent malware/fake torrents landing in Plex
+        has_video = any(os.path.splitext(f)[1].lower() in VIDEO_EXTS for f in os.listdir(content_path))
+        if not has_video:
+            LOG.warning("Organizer: no video files found in '%s', skipping", name)
+            return OrganizeResult(False, content_path, "no video files in download directory", 0)
+
         # Directory download — rename dir if needed, rename main video file
         clean_dirname = _strip_brackets(name)
         parsed_again = _parse_movie(clean_dirname)
@@ -340,7 +370,7 @@ def _try_remove_empty_tree(path: str, *, allowed_roots: tuple[str, ...] = ()) ->
         inside = False
         for root in allowed_roots:
             real_root = os.path.realpath(root)
-            if real_path.startswith(real_root + os.sep):
+            if PurePosixPath(real_path).is_relative_to(real_root) and real_path != real_root:
                 inside = True
                 break
         if not inside:

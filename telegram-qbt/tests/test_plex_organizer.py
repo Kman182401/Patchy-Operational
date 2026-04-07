@@ -129,7 +129,7 @@ class TestOrganizeMovie:
         assert not (target_dir / "The Matrix (1999).mkv").exists()
 
     def test_no_video_files(self, tmp_path):
-        """Directory with no video files is still moved, files_moved is 0."""
+        """Directory with no video files is rejected to prevent junk in Plex."""
         movies_root = tmp_path / "Movies"
         movies_root.mkdir()
         content = tmp_path / "The.Matrix.1999.1080p.BluRay.x264"
@@ -138,7 +138,6 @@ class TestOrganizeMovie:
 
         result = organize_movie(str(content), str(movies_root))
 
-        assert result.moved is True
+        assert result.moved is False
         assert result.files_moved == 0
-        target_dir = movies_root / "The Matrix (1999)"
-        assert target_dir.exists()
+        assert "no real video files" in result.summary or "no video files" in result.summary

@@ -134,11 +134,12 @@ def test_apply_filters_magnet_link_accepted() -> None:
     assert len(out) == 1
 
 
-def test_apply_filters_quality_scoring_rejects_cam() -> None:
-    """CAM releases are rejected by the quality scoring pipeline inside apply_filters."""
+def test_apply_filters_quality_scoring_keeps_cam_penalised() -> None:
+    """CAM releases pass through apply_filters but with a negative quality score."""
     rows = [_good_row(name="Movie.2024.HDCAM.x264-GROUP", seeds=500)]
     out = apply_filters(rows, min_seeds=1, min_size=None, max_size=None, min_quality=0)
-    assert len(out) == 0
+    assert len(out) == 1
+    assert out[0]["_quality_score"].format_score < 0
 
 
 # ===================================================================

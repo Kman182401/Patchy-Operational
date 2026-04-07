@@ -25,6 +25,8 @@ from patchy_bot.handlers.download import (
 )
 from patchy_bot.utils import _ACTIVE_DL_STATES
 
+# noqa: F401 — _dl_mod used in TestCompletionPollerJob._clear_seen_hashes fixture
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -705,6 +707,15 @@ _COMPLETE_TORRENT = {
 
 class TestCompletionPollerJob:
     """Tests for completion_poller_job — the background completion sweep."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_seen_hashes(self):
+        """Reset module-level dedup set between tests to prevent state pollution."""
+        import patchy_bot.handlers.download as dl
+
+        dl._poller_seen_hashes.clear()
+        yield
+        dl._poller_seen_hashes.clear()
 
     # ------------------------------------------------------------------
     # Helpers

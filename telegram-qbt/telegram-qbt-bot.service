@@ -13,5 +13,14 @@ ExecStart=/home/karson/Patchy_Bot/telegram-qbt/.venv/bin/python -m patchy_bot
 Restart=on-failure
 RestartSec=5
 
+# Security hardening
+ProtectSystem=strict
+NoNewPrivileges=true
+PrivateTmp=true
+ReadWritePaths=/home/karson/Patchy_Bot/telegram-qbt
+ReadWritePaths=/home/karson/Downloads
+ReadWritePaths=/home/karson/MySSD/Plex Videos
+ReadWritePaths=/home/karson/MySSD/Plex Movies
+
 [Install]
 WantedBy=multi-user.target

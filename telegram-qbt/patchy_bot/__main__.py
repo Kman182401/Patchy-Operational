@@ -63,13 +63,23 @@ def main() -> None:
             "max_active_downloads": max_dl,
             "max_active_torrents": max_torrents,
             "max_active_uploads": max_ul,
+            "dht": True,
+            "pex": True,
+            "upnp": True,
         }
-        if cfg.vpn_required_for_downloads and cfg.vpn_interface_name:
-            startup_prefs["current_network_interface"] = cfg.vpn_interface_name
-            LOG.info("Binding qBittorrent to VPN interface: %s", cfg.vpn_interface_name)
+        # NOTE: Do NOT bind qBT to the VPN interface here.
+        # The OS-level kill-switch (Surfshark policy routing, table 300000) already
+        # routes all qBT traffic through the VPN. Binding the interface additionally
+        # breaks libtorrent's DNS resolver (can't reach 127.0.0.1 from the VPN IP),
+        # causing "Host not found (authoritative)" for every tracker and stalling all downloads.
         bot.qbt.set_preferences(startup_prefs)
-        LOG.info("qBittorrent preferences applied (%d active DL, %d active torrents, %d active UL, interface=%s)",
-                 max_dl, max_torrents, max_ul, startup_prefs.get("current_network_interface", "unchanged"))
+        LOG.info(
+            "qBittorrent preferences applied (%d active DL, %d active torrents, %d active UL, interface=%s)",
+            max_dl,
+            max_torrents,
+            max_ul,
+            startup_prefs.get("current_network_interface", "unchanged"),
+        )
     except Exception as e:
         LOG.warning("Failed to apply qBittorrent preferences: %s", e)
 

@@ -450,20 +450,26 @@ async def cmd_schedule(bot: Any, update: Update, context: ContextTypes.DEFAULT_T
                 InlineKeyboardButton(f"📋 My Shows ({len(tracks)})", callback_data="sch:myshows"),
             ],
         ]
+        rows.append([InlineKeyboardButton("🎬 Movies", callback_data="msch:list")])
         rows += bot._nav_footer(back_data="nav:home", include_home=False)
         kb = InlineKeyboardMarkup(rows)
         await bot._render_schedule_ui(uid, msg, None, text, reply_markup=kb)
     else:
-        bot._schedule_start_flow(uid)
-        flow = bot._get_flow(uid) or {"mode": "schedule", "stage": "await_show", "tracking_mode": "upcoming"}
+        rows: list[list[InlineKeyboardButton]] = [
+            [InlineKeyboardButton("➕ Add New Show", callback_data="sch:addnew")],
+            [InlineKeyboardButton("🎬 Movies", callback_data="msch:list")],
+        ]
+        rows += bot._nav_footer(back_data="nav:home", include_home=False)
+        kb = InlineKeyboardMarkup(rows)
         await bot._render_schedule_ui(
             uid,
             msg,
-            flow,
-            "<b>✏️ Type a show name to search</b>\n"
+            None,
+            "<b>🗓️ Schedule</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
-            "Monitors your Plex library and auto-queues missing episodes as they air.\n\n"
-            "<i>Example: Severance</i>",
+            "Monitors your library and auto-downloads media as it becomes available.\n\n"
+            "No TV shows tracked yet.",
+            reply_markup=kb,
         )
 
 
