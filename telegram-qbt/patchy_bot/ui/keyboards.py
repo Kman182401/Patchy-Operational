@@ -99,8 +99,11 @@ def tv_filter_choice_keyboard() -> InlineKeyboardMarkup:
     """Keyboard presented when the user starts a TV search."""
     rows: list[list[InlineKeyboardButton]] = [
         [
-            InlineKeyboardButton("➕ Set Season/Episode", callback_data="flow:tv_filter_set"),
+            InlineKeyboardButton("➕ Set Season+Episode", callback_data="flow:tv_filter_set"),
             InlineKeyboardButton("⏭ Skip Filters", callback_data="flow:tv_filter_skip"),
+        ],
+        [
+            InlineKeyboardButton("📦 Full Season", callback_data="flow:tv_full_season"),
         ],
         [
             InlineKeyboardButton("📦 Full Series", callback_data="flow:tv_full_series"),
@@ -108,6 +111,70 @@ def tv_filter_choice_keyboard() -> InlineKeyboardMarkup:
     ]
     rows.extend(nav_footer(back_data="nav:home", include_home=False))
     return InlineKeyboardMarkup(rows)
+
+
+# ---------------------------------------------------------------------------
+# Post-add action keyboards
+# ---------------------------------------------------------------------------
+
+
+def post_add_movie_keyboard() -> InlineKeyboardMarkup:
+    """Keyboard shown after adding a movie search result."""
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🎬 Search Again", callback_data="moviepost:search_again")],
+            [InlineKeyboardButton("🏠 Home", callback_data="nav:home")],
+        ]
+    )
+
+
+def post_add_tv_standard_keyboard(
+    sid: str,
+    *,
+    next_ep_data: str | None = None,
+) -> InlineKeyboardMarkup:
+    """Keyboard shown after adding a standard TV episode."""
+    rows: list[list[InlineKeyboardButton]] = []
+    if next_ep_data:
+        rows.append([InlineKeyboardButton("⏭ Download Next Episode", callback_data=next_ep_data)])
+    rows.append([InlineKeyboardButton("📺 Download Another Episode", callback_data=f"tvpost:another_ep:{sid}")])
+    rows.append([InlineKeyboardButton("📺 Search Again", callback_data="tvpost:search_again")])
+    rows.append([InlineKeyboardButton("🏠 Home", callback_data="nav:home")])
+    return InlineKeyboardMarkup(rows)
+
+
+def post_add_tv_full_season_keyboard(sid: str) -> InlineKeyboardMarkup:
+    """Keyboard shown after adding a full season pack."""
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("📦 Download Another Season", callback_data=f"tvpost:another_season:{sid}")],
+            [InlineKeyboardButton("📺 Search Again", callback_data="tvpost:search_again")],
+            [InlineKeyboardButton("🏠 Home", callback_data="nav:home")],
+        ]
+    )
+
+
+def post_add_tv_full_series_keyboard() -> InlineKeyboardMarkup:
+    """Keyboard shown after adding a full series."""
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("📺 Search Again", callback_data="tvpost:search_again")],
+            [InlineKeyboardButton("🏠 Home", callback_data="nav:home")],
+        ]
+    )
+
+
+def tv_followup_same_season_keyboard(sid: str) -> InlineKeyboardMarkup:
+    """Yes/No choice for staying in the same season."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Yes", callback_data=f"tvpost:same_yes:{sid}"),
+                InlineKeyboardButton("No", callback_data=f"tvpost:same_no:{sid}"),
+            ],
+            [InlineKeyboardButton("🏠 Home", callback_data="nav:home")],
+        ]
+    )
 
 
 def media_picker_keyboard(sid: str, idx: int, *, back_data: str = "") -> InlineKeyboardMarkup:

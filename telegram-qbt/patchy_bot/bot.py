@@ -39,7 +39,7 @@ from .handlers import download as download_handler
 from .handlers import remove as remove_handler
 from .handlers import schedule as schedule_handler
 from .handlers import search as search_handler
-from .quality import score_torrent
+from .quality import is_season_pack, score_torrent
 from .rate_limiter import RateLimiter
 from .store import Store
 from .types import HandlerContext
@@ -157,6 +157,8 @@ class BotApp:
         d.register_prefix("flow:", self._on_cb_flow)
         d.register_exact("dl:manage", self._on_cb_dl_manage)
         d.register_prefix("stop:", self._on_cb_stop)
+        d.register_prefix("tvpost:", self._on_cb_tvpost)
+        d.register_prefix("moviepost:", self._on_cb_moviepost)
 
     # ---------- Telegram command discovery ----------
 
@@ -695,6 +697,15 @@ class BotApp:
 
     def _tv_title_prompt_text(self, season: int | None = None, episode: int | None = None) -> str:
         return text_mod.tv_title_prompt_text(season, episode)
+
+    def _tv_full_season_prompt_text(self, error: str | None = None) -> str:
+        return text_mod.tv_full_season_prompt_text(error)
+
+    def _tv_full_season_title_prompt_text(self, season: int) -> str:
+        return text_mod.tv_full_season_title_prompt_text(season)
+
+    def _tv_no_season_packs_text(self) -> str:
+        return text_mod.tv_no_season_packs_text()
 
     def _storage_probe_paths(self) -> list[str]:
         seen: set[str] = set()
@@ -2856,6 +2867,16 @@ class BotApp:
         return search_handler.parse_tv_filter(text)
 
     @staticmethod
+    def _parse_strict_season_episode(text: str) -> tuple[int, int] | None:
+        """Delegation stub -- logic lives in handlers/search.py."""
+        return search_handler.parse_strict_season_episode(text)
+
+    @staticmethod
+    def _parse_season_number(text: str) -> int | None:
+        """Delegation stub -- logic lives in handlers/search.py."""
+        return search_handler.parse_season_number(text)
+
+    @staticmethod
     def _build_tv_query(title: str, season: int | None, episode: int | None) -> str:
         """Delegation stub -- logic lives in handlers/search.py."""
         return search_handler.build_tv_query(title, season, episode)
@@ -2982,7 +3003,7 @@ class BotApp:
     async def _run_search(
         self,
         *,
-        update: Update,
+        update: Update | None = None,
         query: str,
         plugin: str = "enabled",
         search_cat: str = "all",
@@ -2999,16 +3020,19 @@ class BotApp:
         nav_user_id: int | None = None,
         current_nav_ui_message: Any | None = None,
     ) -> None:
-        msg = update.effective_message
-        if not msg:
+        msg = update.effective_message if update else None
+        if not msg and not current_nav_ui_message and not current_tv_ui_message:
             return
 
         # Cap query length to prevent abuse via Telegram's 4096-char message limit
         if len(query) > 200:
-            await msg.reply_text("Search query is too long (max 200 characters).", parse_mode=_PM)
+            if msg:
+                await msg.reply_text("Search query is too long (max 200 characters).", parse_mode=_PM)
             return
 
-        user_id = update.effective_user.id
+        user_id = nav_user_id or (update.effective_user.id if update and update.effective_user else 0)
+        if not user_id:
+            return
         defaults = self.store.get_defaults(user_id, self.cfg)
         min_seeds = int(min_seeds if min_seeds is not None else defaults["default_min_seeds"])
         min_quality = int(min_quality if min_quality is not None else self.cfg.default_min_quality)
@@ -3115,6 +3139,24 @@ class BotApp:
             filtered = self._deduplicate_results(filtered)
             ranked = self._sort_rows(filtered, key=sort_key, order=order)
             ranked = search_handler.prioritize_results(ranked)
+
+            # Task 4: Full Season — filter to season packs only before slicing
+            if isinstance(tv_flow, dict) and tv_flow.get("full_season"):
+                ranked = [r for r in ranked if is_season_pack(str(r.get("fileName") or r.get("name") or ""))]
+                if not ranked:
+                    no_packs_kb = InlineKeyboardMarkup(
+                        [
+                            [InlineKeyboardButton("📺 TV Search", callback_data="menu:tv")],
+                            [InlineKeyboardButton("🏠 Home", callback_data="nav:home")],
+                        ]
+                    )
+                    await status_msg.edit_text(
+                        self._tv_no_season_packs_text(),
+                        reply_markup=no_packs_kb,
+                        parse_mode=_PM,
+                    )
+                    return
+
             final_rows = ranked[:limit]
 
             if not final_rows:
@@ -3127,7 +3169,17 @@ class BotApp:
                 )
                 return
 
-            options = {
+            # Task 5: Save structured origin context with the search
+            _tv_mode: str | None = None
+            if media_hint == "tv" and isinstance(tv_flow, dict):
+                if tv_flow.get("full_season"):
+                    _tv_mode = "full_season"
+                elif tv_flow.get("full_series"):
+                    _tv_mode = "full_series"
+                else:
+                    _tv_mode = "standard"
+
+            options: dict[str, Any] = {
                 "query": query,
                 "plugin": plugin_scope,
                 "search_cat": search_cat,
@@ -3139,7 +3191,19 @@ class BotApp:
                 "order": order,
                 "limit": limit,
                 "media_hint": media_hint,
+                # Origin context
+                "source_ui": "tv" if media_hint == "tv" else ("movie" if media_hint == "movies" else "any"),
+                "guided_flow": tv_flow is not None,
             }
+            if _tv_mode is not None:
+                options["tv_mode"] = _tv_mode
+            if isinstance(tv_flow, dict):
+                if tv_flow.get("show_title"):
+                    options["show_title"] = tv_flow["show_title"]
+                if tv_flow.get("season") is not None:
+                    options["locked_season"] = tv_flow["season"]
+                if tv_flow.get("episode") is not None:
+                    options["locked_episode"] = tv_flow["episode"]
 
             # Map media_hint to score_torrent media_type for correct size ranges
             mt = "episode" if media_hint == "tv" else "movie"
@@ -3601,15 +3665,13 @@ class BotApp:
 
             if mode == "tv" and stage == "await_filter":
                 await self._cleanup_private_user_message(msg)
-                parsed = self._parse_tv_filter(text)
+                parsed = self._parse_strict_season_episode(text)
                 if parsed is None:
                     await self._render_tv_ui(
                         user_id,
                         msg,
                         flow,
-                        self._tv_filter_prompt_text(
-                            "<b>⚠️ Invalid Filter Format</b>\n<i>Use one of: S1E2 · season 1 episode 2 · season 1 · episode 2</i>"
-                        ),
+                        self._tv_filter_prompt_text(text_mod.tv_strict_filter_error_text()),
                         reply_markup=InlineKeyboardMarkup(self._nav_footer(back_data="menu:tv")),
                     )
                     return
@@ -3627,14 +3689,159 @@ class BotApp:
                 )
                 return
 
+            if mode == "tv" and stage == "await_full_season_number":
+                await self._cleanup_private_user_message(msg)
+                season = self._parse_season_number(text)
+                if season is None:
+                    await self._render_tv_ui(
+                        user_id,
+                        msg,
+                        flow,
+                        self._tv_full_season_prompt_text(
+                            "<b>⚠️ Could not read a season number.</b>\n<i>Try: 1 · S2 · season 3</i>"
+                        ),
+                        reply_markup=InlineKeyboardMarkup(self._nav_footer(back_data="menu:tv")),
+                    )
+                    return
+                flow["season"] = season
+                flow["stage"] = "await_full_season_title"
+                self._set_flow(user_id, flow)
+                await self._render_tv_ui(
+                    user_id,
+                    msg,
+                    flow,
+                    self._tv_full_season_title_prompt_text(season),
+                    reply_markup=InlineKeyboardMarkup(self._nav_footer(back_data="menu:tv")),
+                )
+                return
+
+            if mode == "tv" and stage == "await_full_season_title":
+                await self._cleanup_private_user_message(msg)
+                season = flow.get("season")
+                query = self._build_tv_query(text, season, None)
+                tv_flow = dict(flow)
+                tv_flow["show_title"] = text
+                self._clear_flow(user_id)
+                await self._run_search(update=update, query=query, media_hint="tv", tv_flow=tv_flow)
+                return
+
             if mode == "tv" and stage == "await_title":
                 await self._cleanup_private_user_message(msg)
                 query = self._build_tv_query(text, flow.get("season"), flow.get("episode"))
                 if flow.get("full_series"):
                     query = f"{query} COMPLETE SERIES"
                 tv_flow = dict(flow)
+                tv_flow["show_title"] = text
                 self._clear_flow(user_id)
                 await self._run_search(update=update, query=query, media_hint="tv", tv_flow=tv_flow)
+                return
+
+            # --- tv_followup flows (post-add another episode / another season) ---
+            if mode == "tv_followup" and stage == "await_episode_only":
+                await self._cleanup_private_user_message(msg)
+                ep = search_handler.parse_episode_number(text)
+                if ep is None:
+                    show_title = str(flow.get("show_title") or "")
+                    season = int(flow.get("locked_season") or 1)
+                    await self._render_nav_ui(
+                        user_id,
+                        msg,
+                        text_mod.tv_followup_episode_prompt_text(
+                            show_title,
+                            season,
+                            "<b>⚠️ Could not read an episode number.</b>\n<i>Try: 5 · E5 · episode 5</i>",
+                        ),
+                        reply_markup=InlineKeyboardMarkup(self._nav_footer(back_data="nav:home")),
+                    )
+                    return
+                show_title = str(flow.get("show_title") or "")
+                season = int(flow.get("locked_season") or 1)
+                query = self._build_tv_query(show_title, season, ep)
+                tv_flow = {
+                    "mode": "tv",
+                    "stage": "done",
+                    "season": season,
+                    "episode": ep,
+                    "show_title": show_title,
+                }
+                self._clear_flow(user_id)
+                await self._run_search(
+                    update=update,
+                    query=query,
+                    media_hint="tv",
+                    tv_flow=tv_flow,
+                    nav_user_id=user_id,
+                )
+                return
+
+            if mode == "tv_followup" and stage == "await_season_episode":
+                await self._cleanup_private_user_message(msg)
+                parsed = self._parse_strict_season_episode(text)
+                if parsed is None:
+                    show_title = str(flow.get("show_title") or "")
+                    await self._render_nav_ui(
+                        user_id,
+                        msg,
+                        text_mod.tv_followup_season_episode_prompt_text(
+                            show_title,
+                            text_mod.tv_strict_filter_error_text(),
+                        ),
+                        reply_markup=InlineKeyboardMarkup(self._nav_footer(back_data="nav:home")),
+                    )
+                    return
+                season, ep = parsed
+                show_title = str(flow.get("show_title") or "")
+                query = self._build_tv_query(show_title, season, ep)
+                tv_flow = {
+                    "mode": "tv",
+                    "stage": "done",
+                    "season": season,
+                    "episode": ep,
+                    "show_title": show_title,
+                }
+                self._clear_flow(user_id)
+                await self._run_search(
+                    update=update,
+                    query=query,
+                    media_hint="tv",
+                    tv_flow=tv_flow,
+                    nav_user_id=user_id,
+                )
+                return
+
+            if mode == "tv_followup" and stage == "await_season_for_pack":
+                await self._cleanup_private_user_message(msg)
+                season = self._parse_season_number(text)
+                if season is None:
+                    show_title = str(flow.get("show_title") or "")
+                    await self._render_nav_ui(
+                        user_id,
+                        msg,
+                        text_mod.tv_followup_season_prompt_text(
+                            show_title,
+                            "<b>⚠️ Could not read a season number.</b>\n<i>Try: 1 · S2 · season 3</i>",
+                        ),
+                        reply_markup=InlineKeyboardMarkup(self._nav_footer(back_data="nav:home")),
+                    )
+                    return
+                show_title = str(flow.get("show_title") or "")
+                query = self._build_tv_query(show_title, season, None)
+                tv_flow = {
+                    "mode": "tv",
+                    "stage": "done",
+                    "season": season,
+                    "episode": None,
+                    "show_title": show_title,
+                    "full_season": True,
+                }
+                self._clear_flow(user_id)
+                await self._run_search(
+                    update=update,
+                    query=query,
+                    media_hint="tv",
+                    tv_flow=tv_flow,
+                    nav_user_id=user_id,
+                )
                 return
 
             if mode == "schedule" and stage == "await_show":
@@ -4094,11 +4301,15 @@ class BotApp:
         summary = str(out["summary"])
         if not out.get("hash"):
             summary += "\n\n<i>Waiting for qBittorrent to assign a hash. A live monitor will attach automatically.</i>"
+
+        # Build post-add keyboard based on search origin context
+        post_kb = await self._build_post_add_keyboard(user_id, sid, choice)
+
         rendered = await self._render_nav_ui(
             user_id,
             rendered,
             summary,
-            reply_markup=None,
+            reply_markup=post_kb,
             current_ui_message=rendered,
         )
 
@@ -4111,6 +4322,82 @@ class BotApp:
             self._start_progress_tracker(user_id, out["hash"], tracker_msg, out["name"])
         else:
             self._start_pending_progress_tracker(user_id, out["name"], out["category"], rendered)
+
+    async def _build_post_add_keyboard(self, user_id: int, sid: str, choice: str) -> InlineKeyboardMarkup | None:
+        """Build the post-add follow-up keyboard based on search origin context."""
+        try:
+            payload = self.store.get_search(user_id, sid)
+            if not payload:
+                return self._home_only_keyboard()
+            search_meta, _ = payload
+            opts = search_meta.get("options") or {}
+            source_ui = str(opts.get("source_ui") or "")
+            tv_mode = str(opts.get("tv_mode") or "standard")
+            media_choice = self._normalize_media_choice(choice)
+
+            if media_choice == "movies" or source_ui == "movie":
+                return kb_mod.post_add_movie_keyboard()
+
+            if source_ui == "tv" or media_choice == "tv":
+                if tv_mode == "full_season":
+                    return kb_mod.post_add_tv_full_season_keyboard(sid)
+                if tv_mode == "full_series":
+                    return kb_mod.post_add_tv_full_series_keyboard()
+                # Standard TV — try to determine next episode
+                next_ep_data = await self._resolve_next_episode_callback(opts, sid)
+                return kb_mod.post_add_tv_standard_keyboard(sid, next_ep_data=next_ep_data)
+
+            return self._home_only_keyboard()
+        except Exception:
+            LOG.debug("Failed to build post-add keyboard", exc_info=True)
+            return self._home_only_keyboard()
+
+    async def _resolve_next_episode_callback(self, opts: dict[str, Any], sid: str) -> str | None:
+        """Try to determine the next released episode and return callback data, or None."""
+        try:
+            show_title = opts.get("show_title")
+            locked_season = opts.get("locked_season")
+            locked_episode = opts.get("locked_episode")
+            if not show_title or locked_season is None or locked_episode is None:
+                return None
+
+            candidates = await asyncio.to_thread(self.tvmeta.search_shows, show_title, 1)
+            if not candidates:
+                return None
+            show_id = candidates[0].get("id")
+            if not show_id:
+                return None
+
+            bundle = await asyncio.to_thread(self.tvmeta.get_show_bundle, show_id)
+            episodes = bundle.get("episodes") or []
+
+            # Find current episode index, then look for the next one
+            cur_idx: int | None = None
+            for i, ep in enumerate(episodes):
+                if ep.get("season") == locked_season and ep.get("number") == locked_episode:
+                    cur_idx = i
+                    break
+
+            if cur_idx is None:
+                return None
+
+            # Look for the next episode that has already aired
+            cur_ts = now_ts()
+            for ep in episodes[cur_idx + 1 :]:
+                s = ep.get("season", 0)
+                n = ep.get("number")
+                air_ts = ep.get("air_ts") or 0
+                if s <= 0 or n is None:
+                    continue
+                if air_ts > 0 and air_ts <= cur_ts:
+                    return f"tvpost:next_ep:{sid}:{s}:{n}"
+                # Hit an un-aired episode — stop looking
+                return None
+
+            return None
+        except Exception:
+            LOG.debug("Next-episode resolution failed", exc_info=True)
+            return None
 
     async def _on_cb_page(self, *, data: str, q: Any, user_id: int) -> None:
         _, sid, page_raw = data.split(":", 2)
@@ -4129,6 +4416,155 @@ class BotApp:
             disable_web_page_preview=True,
             current_ui_message=q.message,
         )
+
+    async def _on_cb_moviepost(self, *, data: str, q: Any, user_id: int) -> None:
+        """Handle ``moviepost:*`` callbacks — post-add actions for movies."""
+        if data == "moviepost:search_again":
+            await commands_handler.on_cb_menu(self, data="menu:movie", q=q, user_id=user_id)
+
+    async def _on_cb_tvpost(self, *, data: str, q: Any, user_id: int) -> None:
+        """Handle ``tvpost:*`` callbacks — post-add actions for TV."""
+        if data == "tvpost:search_again":
+            await commands_handler.on_cb_menu(self, data="menu:tv", q=q, user_id=user_id)
+            return
+
+        # Download Another Episode — ask same season?
+        if data.startswith("tvpost:another_ep:"):
+            sid = data.split(":", 2)[2]
+            payload = self.store.get_search(user_id, sid)
+            if not payload:
+                await q.answer("Search expired", show_alert=True)
+                return
+            opts = payload[0].get("options") or {}
+            show_title = str(opts.get("show_title") or "")
+            locked_season = opts.get("locked_season")
+            if not show_title:
+                await commands_handler.on_cb_menu(self, data="menu:tv", q=q, user_id=user_id)
+                return
+            self._set_flow(
+                user_id,
+                {
+                    "mode": "tv_followup",
+                    "stage": "same_season_choice",
+                    "show_title": show_title,
+                    "locked_season": locked_season,
+                    "search_id": sid,
+                },
+            )
+            season_display = int(locked_season) if locked_season is not None else 1
+            await self._render_nav_ui(
+                user_id,
+                q.message,
+                text_mod.tv_followup_same_season_text(show_title, season_display),
+                reply_markup=kb_mod.tv_followup_same_season_keyboard(sid),
+                current_ui_message=q.message,
+            )
+            return
+
+        # Same season = Yes
+        if data.startswith("tvpost:same_yes:"):
+            sid = data.split(":", 2)[2]
+            flow = self._get_flow(user_id)
+            if not flow or flow.get("mode") != "tv_followup":
+                await commands_handler.on_cb_menu(self, data="menu:tv", q=q, user_id=user_id)
+                return
+            flow["stage"] = "await_episode_only"
+            self._set_flow(user_id, flow)
+            show_title = str(flow.get("show_title") or "")
+            season = int(flow.get("locked_season") or 1)
+            await self._render_nav_ui(
+                user_id,
+                q.message,
+                text_mod.tv_followup_episode_prompt_text(show_title, season),
+                reply_markup=InlineKeyboardMarkup(self._nav_footer(back_data="nav:home")),
+                current_ui_message=q.message,
+            )
+            return
+
+        # Same season = No
+        if data.startswith("tvpost:same_no:"):
+            flow = self._get_flow(user_id)
+            if not flow or flow.get("mode") != "tv_followup":
+                await commands_handler.on_cb_menu(self, data="menu:tv", q=q, user_id=user_id)
+                return
+            flow["stage"] = "await_season_episode"
+            self._set_flow(user_id, flow)
+            show_title = str(flow.get("show_title") or "")
+            await self._render_nav_ui(
+                user_id,
+                q.message,
+                text_mod.tv_followup_season_episode_prompt_text(show_title),
+                reply_markup=InlineKeyboardMarkup(self._nav_footer(back_data="nav:home")),
+                current_ui_message=q.message,
+            )
+            return
+
+        # Download Another Season
+        if data.startswith("tvpost:another_season:"):
+            sid = data.split(":", 2)[2]
+            payload = self.store.get_search(user_id, sid)
+            if not payload:
+                await q.answer("Search expired", show_alert=True)
+                return
+            opts = payload[0].get("options") or {}
+            show_title = str(opts.get("show_title") or "")
+            if not show_title:
+                await commands_handler.on_cb_menu(self, data="menu:tv", q=q, user_id=user_id)
+                return
+            self._set_flow(
+                user_id,
+                {
+                    "mode": "tv_followup",
+                    "stage": "await_season_for_pack",
+                    "show_title": show_title,
+                    "search_id": sid,
+                },
+            )
+            await self._render_nav_ui(
+                user_id,
+                q.message,
+                text_mod.tv_followup_season_prompt_text(show_title),
+                reply_markup=InlineKeyboardMarkup(self._nav_footer(back_data="nav:home")),
+                current_ui_message=q.message,
+            )
+            return
+
+        # Download Next Episode — pre-resolved season/episode in callback data
+        if data.startswith("tvpost:next_ep:"):
+            parts = data.split(":")
+            # tvpost:next_ep:{sid}:{season}:{episode}
+            if len(parts) < 5:
+                return
+            sid = parts[2]
+            next_season = int(parts[3])
+            next_episode = int(parts[4])
+            payload = self.store.get_search(user_id, sid)
+            if not payload:
+                await q.answer("Search expired", show_alert=True)
+                return
+            opts = payload[0].get("options") or {}
+            show_title = str(opts.get("show_title") or "")
+            if not show_title:
+                await commands_handler.on_cb_menu(self, data="menu:tv", q=q, user_id=user_id)
+                return
+            query = self._build_tv_query(show_title, next_season, next_episode)
+            tv_flow = {
+                "mode": "tv",
+                "stage": "done",
+                "season": next_season,
+                "episode": next_episode,
+                "show_title": show_title,
+            }
+            self._clear_flow(user_id)
+            await self._run_search(
+                update=None,
+                query=query,
+                media_hint="tv",
+                tv_flow=tv_flow,
+                nav_user_id=user_id,
+                current_nav_ui_message=q.message,
+            )
+            return
 
     async def _on_cb_remove(self, *, data: str, q: Any, user_id: int) -> None:
         await remove_handler.on_cb_remove(self, data=data, q=q, user_id=user_id)

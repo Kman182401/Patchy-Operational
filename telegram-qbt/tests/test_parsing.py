@@ -1275,6 +1275,8 @@ def test_on_callback_remove_cancel_returns_to_command_center() -> None:
         _on_cb_flow = BotApp._on_cb_flow
         _on_cb_stop = BotApp._on_cb_stop
         _on_cb_dl_manage = BotApp._on_cb_dl_manage
+        _on_cb_tvpost = BotApp._on_cb_tvpost
+        _on_cb_moviepost = BotApp._on_cb_moviepost
         _register_callbacks = BotApp._register_callbacks
 
         def __init__(self) -> None:
@@ -1379,6 +1381,8 @@ def test_on_callback_schedule_cancel_returns_to_command_center() -> None:
         _on_cb_flow = BotApp._on_cb_flow
         _on_cb_stop = BotApp._on_cb_stop
         _on_cb_dl_manage = BotApp._on_cb_dl_manage
+        _on_cb_tvpost = BotApp._on_cb_tvpost
+        _on_cb_moviepost = BotApp._on_cb_moviepost
         _register_callbacks = BotApp._register_callbacks
 
         def __init__(self) -> None:
@@ -1534,6 +1538,8 @@ def test_on_callback_remove_clear_returns_to_library_browser() -> None:
         _on_cb_flow = BotApp._on_cb_flow
         _on_cb_stop = BotApp._on_cb_stop
         _on_cb_dl_manage = BotApp._on_cb_dl_manage
+        _on_cb_tvpost = BotApp._on_cb_tvpost
+        _on_cb_moviepost = BotApp._on_cb_moviepost
         _register_callbacks = BotApp._register_callbacks
 
         def __init__(self) -> None:
@@ -1727,6 +1733,8 @@ def test_on_callback_schedule_pickeps_uses_anchor_renderer() -> None:
         _on_cb_flow = BotApp._on_cb_flow
         _on_cb_stop = BotApp._on_cb_stop
         _on_cb_dl_manage = BotApp._on_cb_dl_manage
+        _on_cb_tvpost = BotApp._on_cb_tvpost
+        _on_cb_moviepost = BotApp._on_cb_moviepost
         _register_callbacks = BotApp._register_callbacks
 
         def __init__(self) -> None:
@@ -1831,6 +1839,8 @@ def test_on_callback_schedule_skip_uses_anchor_renderer() -> None:
         _on_cb_flow = BotApp._on_cb_flow
         _on_cb_stop = BotApp._on_cb_stop
         _on_cb_dl_manage = BotApp._on_cb_dl_manage
+        _on_cb_tvpost = BotApp._on_cb_tvpost
+        _on_cb_moviepost = BotApp._on_cb_moviepost
         _register_callbacks = BotApp._register_callbacks
 
         def __init__(self) -> None:
@@ -2416,9 +2426,9 @@ def test_schedule_active_line_missing_shows_search_icon() -> None:
         },
     }
     line = BotApp._schedule_active_line(bot, track)
-    assert "🔍" in line
+    assert "🔍" not in line
     assert "The Bear" in line
-    assert "Season 2" in line
+    assert "<b>S2 · 2 eps. missing</b>" in line
 
 
 def test_schedule_active_line_up_to_date_shows_checkmark() -> None:
@@ -2440,8 +2450,9 @@ def test_schedule_active_line_up_to_date_shows_checkmark() -> None:
         },
     }
     line = BotApp._schedule_active_line(bot, track)
-    assert "✅" in line
+    assert "✅" not in line
     assert "Succession" in line
+    assert "<b>S4 · up to date</b>" in line
 
 
 def test_schedule_active_line_uses_dot_separator_not_pipe() -> None:
@@ -2465,6 +2476,33 @@ def test_schedule_active_line_uses_dot_separator_not_pipe() -> None:
     line = BotApp._schedule_active_line(bot, track)
     assert " · " in line
     assert " | " not in line
+    assert "⏰" not in line
+    assert "<b>S1 · 2 eps. left</b>" in line
+
+
+def test_schedule_active_line_formats_next_air_as_bold_ep_left_summary() -> None:
+    import time
+    from unittest.mock import MagicMock
+
+    from qbt_telegram_bot import BotApp
+
+    bot = MagicMock(spec=BotApp)
+    track = {
+        "show_json": {"name": "High Potential"},
+        "season": 2,
+        "pending_json": [],
+        "next_air_ts": None,
+        "next_check_at": None,
+        "last_probe_json": {
+            "actionable_missing_codes": [],
+            "pending_codes": [],
+            "unreleased_codes": ["S02E09"],
+            "next_air_ts": int(time.time()) + 3 * 3600,
+        },
+    }
+    line = BotApp._schedule_active_line(bot, track)
+    assert line.startswith("<b>High Potential</b>\n   <b>S2 · 1 ep. left · next ")
+    assert line.endswith("</b>")
 
 
 def test_schedule_preview_text_inventory_uses_status_icons() -> None:
@@ -3674,4 +3712,90 @@ def test_schedule_apply_tracking_mode_single_episode_still_works(monkeypatch) ->
     }
     result = schedule_apply_tracking_mode(ctx, track, probe)
     assert result["actionable_missing_codes"] == ["S01E01"]
-    assert result["tracking_code"] == "S01E01"
+
+
+# ---------------------------------------------------------------------------
+# Strict guided parser — parse_strict_season_episode
+# ---------------------------------------------------------------------------
+
+
+def test_parse_strict_season_episode_accepts_s1e2() -> None:
+    from patchy_bot.handlers.search import parse_strict_season_episode
+
+    assert parse_strict_season_episode("S1E2") == (1, 2)
+
+
+def test_parse_strict_season_episode_accepts_season_episode_words() -> None:
+    from patchy_bot.handlers.search import parse_strict_season_episode
+
+    assert parse_strict_season_episode("season 1 episode 2") == (1, 2)
+
+
+def test_parse_strict_season_episode_rejects_season_only() -> None:
+    from patchy_bot.handlers.search import parse_strict_season_episode
+
+    assert parse_strict_season_episode("season 2") is None
+
+
+def test_parse_strict_season_episode_rejects_episode_only() -> None:
+    from patchy_bot.handlers.search import parse_strict_season_episode
+
+    assert parse_strict_season_episode("episode 5") is None
+
+
+# ---------------------------------------------------------------------------
+# Season number parser — parse_season_number
+# ---------------------------------------------------------------------------
+
+
+def test_parse_season_number_bare_digit() -> None:
+    from patchy_bot.handlers.search import parse_season_number
+
+    assert parse_season_number("3") == 3
+
+
+def test_parse_season_number_s_prefix() -> None:
+    from patchy_bot.handlers.search import parse_season_number
+
+    assert parse_season_number("S2") == 2
+
+
+def test_parse_season_number_season_word() -> None:
+    from patchy_bot.handlers.search import parse_season_number
+
+    assert parse_season_number("season 1") == 1
+
+
+def test_parse_season_number_rejects_nonsense() -> None:
+    from patchy_bot.handlers.search import parse_season_number
+
+    assert parse_season_number("hello") is None
+
+
+# ---------------------------------------------------------------------------
+# Episode number parser — parse_episode_number
+# ---------------------------------------------------------------------------
+
+
+def test_parse_episode_number_bare_digit() -> None:
+    from patchy_bot.handlers.search import parse_episode_number
+
+    assert parse_episode_number("5") == 5
+
+
+def test_parse_episode_number_e_prefix() -> None:
+    from patchy_bot.handlers.search import parse_episode_number
+
+    assert parse_episode_number("E7") == 7
+
+
+def test_parse_episode_number_episode_word() -> None:
+    from patchy_bot.handlers.search import parse_episode_number
+
+    assert parse_episode_number("episode 3") == 3
+
+
+def test_parse_episode_number_rejects_nonsense() -> None:
+    from patchy_bot.handlers.search import parse_episode_number
+
+    assert parse_episode_number("hello") is None

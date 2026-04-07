@@ -1577,20 +1577,14 @@ def schedule_active_line(track: dict[str, Any]) -> str:
     pending = len(track.get("pending_json") or probe.get("pending_codes") or [])
     unreleased = len(probe.get("unreleased_codes") or [])
     if actionable > 0:
-        lead = "\U0001f50d"
-        status = f"<b>{actionable} missing</b>"
+        status = f"{actionable} ep. missing" if actionable == 1 else f"{actionable} eps. missing"
     elif pending > 0:
-        lead = "\u2b07\ufe0f"
-        status = f"<b>{pending} downloading</b>"
+        status = f"{pending} downloading"
     elif unreleased > 0:
-        lead = "\u23f0"
-        status = "waiting on release"
+        status = f"{unreleased} ep. left" if unreleased == 1 else f"{unreleased} eps. left"
     else:
-        lead = "\u2705"
         status = "up to date"
     details: list[str] = [status]
-    if unreleased > 0:
-        details.append(f"{unreleased} unreleased")
     next_air_ts = int(track.get("next_air_ts") or probe.get("next_air_ts") or 0)
     if next_air_ts > 0:
         details.append(f"next {_relative_time(next_air_ts)}")
@@ -1600,11 +1594,11 @@ def schedule_active_line(track: dict[str, Any]) -> str:
     if probe.get("metadata_stale"):
         details.append("\u26a0\ufe0f stale data")
     detail_line = " \u00b7 ".join(details[:3])
-    return f"{lead} <b>{_h(name)}</b>\n   Season {season} \u00b7 {detail_line}"
+    return f"<b>{_h(name)}</b>\n   <b>S{season} \u00b7 {_h(detail_line)}</b>"
 
 
 def schedule_paused_line(name: str, season: int) -> str:
-    return f"\u23f8 <b>{_h(name)}</b>\n   Season {season} \u00b7 <i>paused</i>"
+    return f"<b>{_h(name)}</b>\n   <b>S{season} \u00b7 paused</b>"
 
 
 # ---------------------------------------------------------------------------

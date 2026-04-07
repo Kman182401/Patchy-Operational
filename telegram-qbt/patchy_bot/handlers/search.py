@@ -243,6 +243,76 @@ def parse_tv_filter(text: str) -> tuple[int | None, int | None] | None:
     return None
 
 
+def parse_strict_season_episode(text: str) -> tuple[int, int] | None:
+    """Parse text that contains BOTH a season AND an episode number.
+
+    Accepts: S1E2, s1e2, season 1 episode 2, season 1 ep 2, etc.
+    Returns (season, episode) only when both are present; None otherwise.
+    """
+    t = text.strip().lower()
+
+    # SxEy / S01E02 style
+    m = re.search(r"\bs(?:eason\s*)?(\d{1,2})\s*[\-\s_]?e(?:p(?:isode\s*)?)?(\d{1,2})\b", t)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+
+    # "season N episode M" / "season N ep M"
+    ms = re.search(r"\bseason\s*(\d{1,2})\b", t)
+    me = re.search(r"\b(?:episode|ep)\s*(\d{1,2})\b", t)
+    if ms and me:
+        return int(ms.group(1)), int(me.group(1))
+
+    return None
+
+
+def parse_season_number(text: str) -> int | None:
+    """Parse a bare season number from text.
+
+    Accepts: "1", "S1", "s1", "season 1", "Season 1".
+    Returns the season number or None.
+    """
+    t = text.strip().lower()
+
+    # "season N" or "s N"
+    m = re.search(r"\bseason\s*(\d{1,2})\b", t)
+    if m:
+        return int(m.group(1))
+
+    # "sN" or "s N" shorthand (standalone so we don't eat "s1e2")
+    m = re.search(r"\bs(\d{1,2})\b", t)
+    if m:
+        return int(m.group(1))
+
+    # bare integer
+    m = re.fullmatch(r"\s*(\d{1,2})\s*", t)
+    if m:
+        return int(m.group(1))
+
+    return None
+
+
+def parse_episode_number(text: str) -> int | None:
+    """Parse a bare episode number from text.
+
+    Accepts: "5", "E5", "e5", "episode 5", "ep 5".
+    """
+    t = text.strip().lower()
+
+    m = re.search(r"\b(?:episode|ep)\s*(\d{1,3})\b", t)
+    if m:
+        return int(m.group(1))
+
+    m = re.search(r"\be(\d{1,3})\b", t)
+    if m:
+        return int(m.group(1))
+
+    m = re.fullmatch(r"\s*(\d{1,3})\s*", t)
+    if m:
+        return int(m.group(1))
+
+    return None
+
+
 def build_tv_query(title: str, season: int | None, episode: int | None) -> str:
     """Build a TV search query string from title and optional season/episode."""
     title = title.strip()

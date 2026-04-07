@@ -28,28 +28,22 @@ def tv_track_line(track: dict) -> str:
     season = int(track.get("season") or probe.get("season") or 1)
 
     if enabled is not None and not enabled:
-        return f"\u23f8 <b>{_h(name)}</b>\n   Season {season} \u00b7 <i>paused</i>"
+        return f"<b>{_h(name)}</b>\n   <b>S{season} \u00b7 paused</b>"
 
     actionable = len(probe.get("actionable_missing_codes") or [])
     pending = len(track.get("pending_json") or probe.get("pending_codes") or [])
     unreleased = len(probe.get("unreleased_codes") or [])
 
     if actionable > 0:
-        lead = "\U0001f50d"
-        status = f"<b>{actionable} missing</b>"
+        status = f"{actionable} ep. missing" if actionable == 1 else f"{actionable} eps. missing"
     elif pending > 0:
-        lead = "\u2b07\ufe0f"
-        status = f"<b>{pending} downloading</b>"
+        status = f"{pending} downloading"
     elif unreleased > 0:
-        lead = "\u23f0"
-        status = "waiting on release"
+        status = f"{unreleased} ep. left" if unreleased == 1 else f"{unreleased} eps. left"
     else:
-        lead = "\u2705"
         status = "up to date"
 
     details: list[str] = [status]
-    if unreleased > 0:
-        details.append(f"{unreleased} unreleased")
     next_air_ts = int(track.get("next_air_ts") or probe.get("next_air_ts") or 0)
     if next_air_ts > 0:
         details.append(f"next {_relative_time(next_air_ts)}")
@@ -59,7 +53,7 @@ def tv_track_line(track: dict) -> str:
     if probe.get("metadata_stale"):
         details.append("\u26a0\ufe0f stale data")
     detail_line = " \u00b7 ".join(details[:3])
-    return f"{lead} <b>{_h(name)}</b>\n   Season {season} \u00b7 {detail_line}"
+    return f"<b>{_h(name)}</b>\n   <b>S{season} \u00b7 {_h(detail_line)}</b>"
 
 
 def movie_track_line(track: dict) -> str:
@@ -133,23 +127,59 @@ def tv_filter_choice_text() -> str:
     return (
         "<b>📺 TV Search</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "Send the show title to search.\n"
-        "You can optionally lock the search to a season or episode first.\n\n"
+        "Choose a search mode below, or skip filters to search by title only.\n\n"
         "<i>Example: Severance</i>"
     )
 
 
 def tv_filter_prompt_text(error: str | None = None) -> str:
-    """Prompt asking the user to type a season/episode filter."""
+    """Prompt asking the user to type a season AND episode filter (both required)."""
     lines = [
-        "<b>📺 TV Filter</b>",
+        "<b>📺 Set Season + Episode</b>",
         "",
-        "Send the season/episode filter.",
-        "<i>Examples: S1E2 · season 1 episode 2 · season 2 · episode 5</i>",
+        "Send both the season and episode number.",
+        "<i>Examples: S1E2 · season 1 episode 2</i>",
     ]
     if error:
         lines.extend(["", error])
     return "\n".join(lines)
+
+
+def tv_strict_filter_error_text() -> str:
+    """Error shown when the user provides only a season or only an episode number."""
+    return "<b>⚠️ Both season and episode are required.</b>\n<i>Example: S1E2 or season 1 episode 2</i>"
+
+
+def tv_full_season_prompt_text(error: str | None = None) -> str:
+    """Prompt asking the user to enter a season number for the Full Season flow."""
+    lines = [
+        "<b>📺 Full Season</b>",
+        "",
+        "Send the season number.",
+        "<i>Examples: 1 · S2 · season 3</i>",
+    ]
+    if error:
+        lines.extend(["", error])
+    return "\n".join(lines)
+
+
+def tv_full_season_title_prompt_text(season: int) -> str:
+    """Prompt asking the user to enter the show title after choosing a season."""
+    return (
+        f"<b>📺 Full Season — S{season:02d}</b>\n\n"
+        "Send the show title to search.\n"
+        f"Results will be filtered to Season {season} packs only.\n\n"
+        "<i>Example: Severance</i>"
+    )
+
+
+def tv_no_season_packs_text() -> str:
+    """Shown when a Full Season search finds no season-pack results."""
+    return (
+        "<b>📭 No Season Packs Found</b>\n\n"
+        "<i>No complete season packs were found for this search. "
+        "Try Skip Filters or Set Season+Episode to find individual episodes.</i>"
+    )
 
 
 def tv_title_prompt_text(season: int | None = None, episode: int | None = None) -> str:
@@ -162,6 +192,55 @@ def tv_title_prompt_text(season: int | None = None, episode: int | None = None) 
         lines.append("")
     lines.append("Send the show title to search.")
     lines.append("<i>Example: Severance</i>")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Post-add follow-up text
+# ---------------------------------------------------------------------------
+
+
+def tv_followup_same_season_text(show_title: str, season: int) -> str:
+    """Ask whether the user wants to stay in the same season."""
+    return f"<b>📺 {_h(show_title)} — S{season:02d}</b>\n\nStay in the same season?"
+
+
+def tv_followup_episode_prompt_text(show_title: str, season: int, error: str | None = None) -> str:
+    """Prompt for just an episode number within a known season."""
+    lines = [
+        f"<b>📺 {_h(show_title)} — S{season:02d}</b>",
+        "",
+        "Send the episode number.",
+        "<i>Examples: 5 · E5 · episode 5</i>",
+    ]
+    if error:
+        lines.extend(["", error])
+    return "\n".join(lines)
+
+
+def tv_followup_season_episode_prompt_text(show_title: str, error: str | None = None) -> str:
+    """Prompt for both season and episode number."""
+    lines = [
+        f"<b>📺 {_h(show_title)}</b>",
+        "",
+        "Send the season and episode number.",
+        "<i>Examples: S1E2 · season 1 episode 2</i>",
+    ]
+    if error:
+        lines.extend(["", error])
+    return "\n".join(lines)
+
+
+def tv_followup_season_prompt_text(show_title: str, error: str | None = None) -> str:
+    """Prompt for a season number (for another-season follow-up)."""
+    lines = [
+        f"<b>📺 {_h(show_title)}</b>",
+        "",
+        "Send the season number.",
+        "<i>Examples: 1 · S2 · season 3</i>",
+    ]
+    if error:
+        lines.extend(["", error])
     return "\n".join(lines)
 
 

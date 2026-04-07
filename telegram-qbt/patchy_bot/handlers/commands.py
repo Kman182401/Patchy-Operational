@@ -1119,6 +1119,19 @@ async def on_cb_flow(bot_app: Any, *, data: str, q: Any, user_id: int) -> None:
         )
         return
 
+    if data == "flow:tv_full_season":
+        flow = {"mode": "tv", "stage": "await_full_season_number", "season": None, "episode": None, "full_season": True}
+        bot_app._set_flow(user_id, flow)
+        await bot_app._render_tv_ui(
+            user_id,
+            q.message,
+            flow,
+            bot_app._tv_full_season_prompt_text(),
+            reply_markup=InlineKeyboardMarkup(bot_app._nav_footer(back_data="menu:tv")),
+            current_ui_message=q.message,
+        )
+        return
+
     if data == "flow:tv_full_series":
         flow = {"mode": "tv", "stage": "await_title", "season": None, "episode": None, "full_series": True}
         bot_app._set_flow(user_id, flow)
