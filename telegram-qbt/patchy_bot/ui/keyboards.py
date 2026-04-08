@@ -215,6 +215,8 @@ def tracked_list_keyboard(
     nav_prefix: str = "sch",
     add_callback: str = "",
     add_label: str = "",
+    switch_callback: str = "",
+    switch_label: str = "",
     back_data: str = "menu:schedule",
 ) -> InlineKeyboardMarkup:
     """Build the full keyboard for a tracked-list screen.
@@ -270,6 +272,10 @@ def tracked_list_keyboard(
     # --- add new button ---
     if add_callback and add_label:
         rows.append([InlineKeyboardButton(add_label, callback_data=add_callback)])
+
+    # --- switch button (toggle between Shows / Movies) ---
+    if switch_callback and switch_label:
+        rows.append([InlineKeyboardButton(switch_label, callback_data=switch_callback)])
 
     # --- nav footer ---
     rows.extend(nav_footer(back_data=back_data, include_home=True))

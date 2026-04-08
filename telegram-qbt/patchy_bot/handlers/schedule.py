@@ -2305,7 +2305,7 @@ async def on_cb_movie_schedule(bot_app: Any, *, data: str, q: Any, user_id: int)
             user_id,
             q.message,
             None,
-            "\U0001f3ac <b>Track a Movie</b>\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\nType a movie title to search TMDB:",
+            "\U0001f3ac <b>Track a Movie</b>\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\nEnter the name of the movie below",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\u274c Cancel", callback_data="msch:cancel")]]),
             current_ui_message=q.message,
         )
