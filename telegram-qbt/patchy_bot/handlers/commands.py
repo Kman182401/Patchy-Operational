@@ -444,20 +444,22 @@ async def cmd_schedule(bot: Any, update: Update, context: ContextTypes.DEFAULT_T
         )
         if paused:
             text += f" · <b>{len(paused)}</b> paused"
+        movie_tracks = await asyncio.to_thread(bot.store.get_movie_tracks_for_user, uid)
+        total_tracking = len(tracks) + len(movie_tracks)
         rows: list[list[InlineKeyboardButton]] = [
             [
-                InlineKeyboardButton("➕ Add New Show", callback_data="sch:addnew"),
-                InlineKeyboardButton(f"📋 My Shows ({len(tracks)})", callback_data="sch:myshows"),
+                InlineKeyboardButton("📺 Add New Show", callback_data="sch:addnew"),
+                InlineKeyboardButton("🎬 Add New Movie", callback_data="msch:add"),
             ],
+            [InlineKeyboardButton(f"📋 Active Tracking ({total_tracking})", callback_data="sch:myshows")],
         ]
-        rows.append([InlineKeyboardButton("🎬 Movies", callback_data="msch:list")])
         rows += bot._nav_footer(back_data="nav:home", include_home=False)
         kb = InlineKeyboardMarkup(rows)
         await bot._render_schedule_ui(uid, msg, None, text, reply_markup=kb)
     else:
         rows: list[list[InlineKeyboardButton]] = [
             [InlineKeyboardButton("➕ Add New Show", callback_data="sch:addnew")],
-            [InlineKeyboardButton("🎬 Movies", callback_data="msch:list")],
+            [InlineKeyboardButton("➕ Add New Movie", callback_data="msch:add")],
         ]
         rows += bot._nav_footer(back_data="nav:home", include_home=False)
         kb = InlineKeyboardMarkup(rows)
@@ -987,12 +989,24 @@ async def on_cb_menu(bot_app: Any, *, data: str, q: Any, user_id: int) -> None:
             )
             if paused:
                 text += f" \u00b7 <b>{len(paused)}</b> paused"
+            movie_tracks_cb = await asyncio.to_thread(ctx.store.get_movie_tracks_for_user, user_id)
             rows: list[list[InlineKeyboardButton]] = [
                 [
                     InlineKeyboardButton("\u2795 Add New Show", callback_data="sch:addnew"),
-                    InlineKeyboardButton(f"\U0001f4cb My Shows ({len(tracks)})", callback_data="sch:myshows"),
+                    InlineKeyboardButton(f"\U0001f4cb Active Tracking ({len(tracks)})", callback_data="sch:myshows"),
                 ],
             ]
+            if movie_tracks_cb:
+                rows.append(
+                    [
+                        InlineKeyboardButton("\u2795 Add New Movie", callback_data="msch:add"),
+                        InlineKeyboardButton(
+                            f"\U0001f3ac My Movies ({len(movie_tracks_cb)})", callback_data="msch:list"
+                        ),
+                    ]
+                )
+            else:
+                rows.append([InlineKeyboardButton("\u2795 Add New Movie", callback_data="msch:add")])
             rows += bot_app._nav_footer(back_data="nav:home", include_home=False)
             kb = InlineKeyboardMarkup(rows)
             await bot_app._render_nav_ui(user_id, q.message, text, reply_markup=kb, current_ui_message=q.message)

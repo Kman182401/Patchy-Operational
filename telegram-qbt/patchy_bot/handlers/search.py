@@ -29,6 +29,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from ..malware import scan_search_result
 from ..quality import score_torrent
 from ..utils import _h, human_size, quality_tier
 from .download import is_direct_torrent_link
@@ -100,6 +101,17 @@ def apply_filters(
         ts = score_torrent(name, size, seeds, media_type=media_type)
         if ts.is_rejected:
             continue
+
+        # Malware / fake-content heuristic filter
+        malware_scan = scan_search_result(
+            name=name,
+            size_bytes=size,
+            quality_tier=quality_tier(name),
+            media_type=media_type,
+        )
+        if malware_scan.is_blocked:
+            continue
+
         # Reject non-English results (empty = assumed English, or must contain 'en')
         if ts.parsed.languages and "en" not in ts.parsed.languages:
             continue

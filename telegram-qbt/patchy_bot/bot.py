@@ -643,11 +643,45 @@ class BotApp:
             post_add_rows=post_add_rows,
         )
 
-    def _start_pending_progress_tracker(self, user_id: int, title: str, category: str, base_msg: Any) -> None:
-        download_handler.start_pending_progress_tracker(self._ctx, user_id, title, category, base_msg)
+    def _start_pending_progress_tracker(
+        self,
+        user_id: int,
+        title: str,
+        category: str,
+        base_msg: Any,
+        *,
+        header: str | None = None,
+        post_add_rows: list[list[Any]] | None = None,
+    ) -> None:
+        download_handler.start_pending_progress_tracker(
+            self._ctx,
+            user_id,
+            title,
+            category,
+            base_msg,
+            header=header,
+            post_add_rows=post_add_rows,
+        )
 
-    async def _attach_progress_tracker_when_ready(self, user_id: int, title: str, category: str, base_msg: Any) -> None:
-        await download_handler.attach_progress_tracker_when_ready(self._ctx, user_id, title, category, base_msg)
+    async def _attach_progress_tracker_when_ready(
+        self,
+        user_id: int,
+        title: str,
+        category: str,
+        base_msg: Any,
+        *,
+        header: str | None = None,
+        post_add_rows: list[list[Any]] | None = None,
+    ) -> None:
+        await download_handler.attach_progress_tracker_when_ready(
+            self._ctx,
+            user_id,
+            title,
+            category,
+            base_msg,
+            header=header,
+            post_add_rows=post_add_rows,
+        )
 
     def _stop_download_keyboard(
         self, torrent_hash: str, post_add_rows: list[list[Any]] | None = None
@@ -1559,11 +1593,26 @@ class BotApp:
         if actionable:
             rows.append([InlineKeyboardButton(f"⬇️ Download Season {chosen_season}", callback_data="sch:confirm:all")])
         if other_season_actionable or len(series_actionable) > len(actionable):
-            rows.append([InlineKeyboardButton("⬇️ Download entire series", callback_data="sch:confirm:series")])
+            rows.append([InlineKeyboardButton("⬇️ Download Missing Episodes", callback_data="sch:confirm:series")])
         if has_any_missing:
             rows.append([InlineKeyboardButton("🎯 Choose specific episodes", callback_data="sch:confirm:pick")])
-        if len(list(probe.get("available_seasons") or [])) > 1:
-            rows.append([InlineKeyboardButton("🔀 Change Season", callback_data="sch:season")])
+        # Season navigation arrows (replaces old "Change Season" button)
+        avail: list[int] = sorted(int(x) for x in (probe.get("available_seasons") or []) if int(x) > 0)
+        current: int = int(probe.get("season") or 1)
+        if len(avail) > 1 and current in avail:
+            idx = avail.index(current)
+            prev_season: int | None = avail[idx - 1] if idx > 0 else None
+            next_season: int | None = avail[idx + 1] if idx < len(avail) - 1 else None
+            arrow_row: list[InlineKeyboardButton] = []
+            if prev_season is not None:
+                arrow_row.append(InlineKeyboardButton("◀️", callback_data=f"sch:nav:{prev_season}"))
+            else:
+                arrow_row.append(InlineKeyboardButton("◀️", callback_data="sch:noop"))
+            if next_season is not None:
+                arrow_row.append(InlineKeyboardButton("▶️", callback_data=f"sch:nav:{next_season}"))
+            else:
+                arrow_row.append(InlineKeyboardButton("▶️", callback_data="sch:noop"))
+            rows.append(arrow_row)
         rows.append([InlineKeyboardButton("🏠 Home", callback_data="nav:home")])
         rows.extend(self._nav_footer(include_home=False))
         return InlineKeyboardMarkup(rows)
@@ -3913,6 +3962,8 @@ class BotApp:
                     "\n".join(lines),
                     reply_markup=self._schedule_candidate_keyboard(candidates),
                 )
+                # Clean up user's typed show-name message
+                await self._cleanup_private_user_message(msg)
                 return
 
             if mode == "schedule" and stage in {"choose_show", "confirm"}:
@@ -3955,60 +4006,8 @@ class BotApp:
                     "\n".join(lines),
                     reply_markup=self._schedule_candidate_keyboard(candidates),
                 )
-                return
-
-            if mode == "schedule" and stage == "await_season_pick":
-                if not text.isdigit():
-                    await self._render_schedule_ui(
-                        user_id,
-                        msg,
-                        flow,
-                        "Send a season number from the available season list shown above.",
-                        reply_markup=None,
-                    )
-                    return
-                wanted_season = int(text)
-                available = [int(x) for x in list(flow.get("selected_show", {}).get("available_seasons") or [])]
-                if available and wanted_season not in available:
-                    await self._render_schedule_ui(
-                        user_id,
-                        msg,
-                        flow,
-                        "That season is not available for this show. Send one of: "
-                        + ", ".join(str(x) for x in available),
-                        reply_markup=None,
-                    )
-                    return
-                await self._render_schedule_ui(
-                    user_id, msg, flow, "🔄 Re-checking that season against Plex/library inventory…", reply_markup=None
-                )
-                try:
-                    bundle = await asyncio.to_thread(
-                        self._schedule_get_show_bundle,
-                        int(flow.get("selected_show", {}).get("id") or 0),
-                        False,
-                        False,
-                    )
-                    raw_probe = await asyncio.to_thread(self._schedule_probe_bundle, bundle, None, wanted_season)
-                    probe = self._schedule_apply_tracking_mode(
-                        {"auto_state_json": {"tracking_mode": str(flow.get("tracking_mode") or "upcoming")}},
-                        raw_probe,
-                    )
-                except Exception as e:
-                    await self._render_schedule_ui(user_id, msg, flow, f"Season check failed: {e}", reply_markup=None)
-                    return
-                flow["stage"] = "confirm"
-                flow["season"] = wanted_season
-                flow["selected_show"] = self._schedule_show_info(bundle)
-                flow["probe"] = probe
-                self._set_flow(user_id, flow)
-                await self._render_schedule_ui(
-                    user_id,
-                    msg,
-                    flow,
-                    self._schedule_preview_text(probe),
-                    reply_markup=self._schedule_preview_keyboard(probe),
-                )
+                # Clean up user's typed show-name message
+                await self._cleanup_private_user_message(msg)
                 return
 
             if mode == "msch_add" and stage == "title":
@@ -4355,6 +4354,7 @@ class BotApp:
                 post_add_rows=post_add_rows,
             )
         else:
+            pending_header = summary
             summary += "\n\n<i>Waiting for qBittorrent to assign a hash. A live monitor will attach automatically.</i>"
             rendered = await self._render_nav_ui(
                 user_id,
@@ -4363,7 +4363,14 @@ class BotApp:
                 reply_markup=post_kb,
                 current_ui_message=rendered,
             )
-            self._start_pending_progress_tracker(user_id, out["name"], out["category"], rendered)
+            self._start_pending_progress_tracker(
+                user_id,
+                out["name"],
+                out["category"],
+                rendered,
+                header=pending_header,
+                post_add_rows=post_add_rows,
+            )
 
     async def _build_post_add_keyboard(self, user_id: int, sid: str, choice: str) -> InlineKeyboardMarkup | None:
         """Build the post-add follow-up keyboard based on search origin context."""

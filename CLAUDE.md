@@ -66,6 +66,11 @@ Use project agents when the task naturally fits their domain. Do not force subag
 - `security-agent`: auth, rate limits, path safety, validation, security review.
 - `taskmaster-sync-agent`: only when the user wants Task Master kept in sync.
 
+## Known Pitfalls
+
+- Always HTML-escape dynamic values (torrent names, paths, API responses) with `_h()` before inserting into Telegram messages with `parse_mode=HTML`. Raw `<`/`>` in release names break rendering.
+- When adding parameters to a progress tracker code path, always update BOTH the immediate path and the pending (deferred-hash) path in `handlers/download.py`. The pending path is a separate async chain that is easy to forget.
+
 ## Working Rules
 
 - Keep instructions concise and operational.

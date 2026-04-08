@@ -19,11 +19,12 @@ from typing import Any
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
+from ..malware import scan_download
 from ..plex_organizer import organize_download as _organize_download
 from ..types import HandlerContext
 from ..ui import flow as flow_mod
 from ..ui import rendering as render_mod
-from ..utils import _PM, _h, human_size, normalize_title
+from ..utils import _PM, _h, human_size, normalize_title, quality_tier
 from ._shared import (
     check_free_space,
     ensure_media_categories,
@@ -294,19 +295,45 @@ def start_progress_tracker(
     ctx.progress_tasks[key] = task
 
 
-def start_pending_progress_tracker(ctx: HandlerContext, user_id: int, title: str, category: str, base_msg: Any) -> None:
+def start_pending_progress_tracker(
+    ctx: HandlerContext,
+    user_id: int,
+    title: str,
+    category: str,
+    base_msg: Any,
+    *,
+    header: str | None = None,
+    post_add_rows: list[list[Any]] | None = None,
+) -> None:
     """Launch a pending-monitor task that waits for qBT to assign a hash, then attaches a live monitor."""
     key = (user_id, category.lower(), title.strip().lower())
     existing = ctx.pending_tracker_tasks.get(key)
     if existing and not existing.done():
         return
 
-    task = asyncio.create_task(attach_progress_tracker_when_ready(ctx, user_id, title, category, base_msg))
+    task = asyncio.create_task(
+        attach_progress_tracker_when_ready(
+            ctx,
+            user_id,
+            title,
+            category,
+            base_msg,
+            header=header,
+            post_add_rows=post_add_rows,
+        )
+    )
     ctx.pending_tracker_tasks[key] = task
 
 
 async def attach_progress_tracker_when_ready(
-    ctx: HandlerContext, user_id: int, title: str, category: str, base_msg: Any
+    ctx: HandlerContext,
+    user_id: int,
+    title: str,
+    category: str,
+    base_msg: Any,
+    *,
+    header: str | None = None,
+    post_add_rows: list[list[Any]] | None = None,
 ) -> None:
     """Poll qBT until the torrent hash is available, then start a live progress tracker."""
     key = (user_id, category.lower(), title.strip().lower())
@@ -336,12 +363,29 @@ async def attach_progress_tracker_when_ready(
                 LOG.debug("Failed to log pending_tracker_timeout health event", exc_info=True)
             return
 
-        tracker_msg = await base_msg.reply_text(
-            "<b>\U0001f4e1 Live Monitor Attached</b>\n<i>Tracking download progress\u2026</i>",
-            reply_markup=stop_download_keyboard(torrent_hash),
-            parse_mode=_PM,
+        # When we have a header, edit the existing message to show combined content.
+        # Without a header, reply with a new message (old behavior — avoids clobbering
+        # shared messages like the schedule batch summary).
+        stop_kb = stop_download_keyboard(torrent_hash, post_add_rows=post_add_rows)
+        initial_text = "<b>\U0001f4e1 Live Monitor Attached</b>\n<i>Tracking download progress\u2026</i>"
+        if header:
+            initial_text = f"{header}\n\n{initial_text}"
+            try:
+                await base_msg.edit_text(initial_text, reply_markup=stop_kb, parse_mode=_PM)
+            except Exception:
+                LOG.debug("Failed to edit base_msg for pending monitor; falling back to reply", exc_info=True)
+                base_msg = await base_msg.reply_text(initial_text, reply_markup=stop_kb, parse_mode=_PM)
+        else:
+            base_msg = await base_msg.reply_text(initial_text, reply_markup=stop_kb, parse_mode=_PM)
+        start_progress_tracker(
+            ctx,
+            user_id,
+            torrent_hash,
+            base_msg,
+            title,
+            header=header,
+            post_add_rows=post_add_rows,
         )
-        start_progress_tracker(ctx, user_id, torrent_hash, tracker_msg, title)
     except Exception:
         LOG.warning("Deferred live monitor attach failed", exc_info=True)
     finally:
@@ -1049,6 +1093,31 @@ async def do_add(
         except Exception:
             pass
         raise RuntimeError(free_reason)
+    # --- Malware / fake-content gate ---
+    _torrent_name = str(row.get("name") or "")
+    _torrent_size = int(row.get("size") or 0)
+    _torrent_hash_key = str(row.get("hash") or row.get("fileHash") or _torrent_name)
+    _media_type = "episode" if choice == "tv" else "movie"
+    malware_scan = scan_download(
+        name=_torrent_name,
+        size_bytes=_torrent_size,
+        quality_tier=quality_tier(_torrent_name),
+        media_type=_media_type,
+        files=[],  # file list not available at this stage
+    )
+    if malware_scan.is_blocked:
+        try:
+            ctx.store.log_malware_block(
+                torrent_hash=_torrent_hash_key,
+                torrent_name=_torrent_name,
+                stage="download",
+                reasons=malware_scan.reasons,
+            )
+        except Exception:
+            pass  # logging failure must not block the user response
+        reasons_text = "\n".join(f"• {r}" for r in malware_scan.reasons)
+        raise RuntimeError(f"Download blocked — suspicious content detected:\n{reasons_text}")
+    # --- end malware gate ---
     url = result_to_url(row)
     torrent_hash = extract_hash(row, url)
     try:
@@ -1069,11 +1138,11 @@ async def do_add(
         hash_note = "\n\u23f3 Hash is still being assigned by qBittorrent \u2014 live monitor will auto-attach shortly."
 
     summary = (
-        f"\u2705 Added #{idx}: {row['name']}\n"
-        f"Library: {target['label']}\n"
-        f"Category: {target['category']}\n"
-        f"Path: {target['path']}\n"
-        f"qBittorrent: {resp}"
+        f"\u2705 Added #{idx}: {_h(str(row['name']))}\n"
+        f"Library: {_h(str(target['label']))}\n"
+        f"Category: {_h(str(target['category']))}\n"
+        f"Path: {_h(str(target['path']))}\n"
+        f"qBittorrent: {_h(str(resp))}"
         f"{hash_note}"
     )
 

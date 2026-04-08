@@ -227,6 +227,17 @@ class Store:
                 CREATE INDEX IF NOT EXISTS idx_schedule_due ON schedule_tracks(enabled, next_check_at);
                 CREATE INDEX IF NOT EXISTS idx_schedule_user_enabled ON schedule_tracks(user_id, enabled, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_remove_jobs_due ON remove_jobs(status, next_retry_at);
+
+                CREATE TABLE IF NOT EXISTS malware_scan_log (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    torrent_hash TEXT NOT NULL,
+                    torrent_name TEXT NOT NULL,
+                    stage        TEXT NOT NULL CHECK(stage IN ('search', 'download')),
+                    reasons      TEXT NOT NULL,
+                    blocked_at   INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_malware_hash ON malware_scan_log(torrent_hash);
+                CREATE INDEX IF NOT EXISTS idx_malware_blocked_at ON malware_scan_log(blocked_at);
                 """
         )
         # Add user_id to notified_completions if missing
@@ -418,6 +429,43 @@ class Store:
                 params,
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def log_malware_block(
+        self,
+        torrent_hash: str,
+        torrent_name: str,
+        stage: str,
+        reasons: list[str],
+    ) -> None:
+        """Log a blocked torrent to the malware scan log."""
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
+            conn.execute(
+                "INSERT INTO malware_scan_log"
+                "(torrent_hash, torrent_name, stage, reasons, blocked_at) "
+                "VALUES(?, ?, ?, ?, ?)",
+                (torrent_hash, torrent_name, stage, json.dumps(reasons), now_ts()),
+            )
+            conn.commit()
+
+    def get_malware_log(self, limit: int = 50) -> list[dict]:
+        """Retrieve recent malware scan log entries."""
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
+            rows = conn.execute(
+                "SELECT * FROM malware_scan_log ORDER BY blocked_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            result = []
+            for row in rows:
+                d = dict(row)
+                d["reasons"] = json.loads(d["reasons"])
+                result.append(d)
+            return result
 
     def cleanup_old_health_events(self, retention_days: int = 30) -> int:
         """Delete health events older than retention_days. Return count deleted."""

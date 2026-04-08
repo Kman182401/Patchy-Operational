@@ -739,11 +739,28 @@ def schedule_preview_keyboard(probe: dict[str, Any], nav_footer_fn: Any) -> Inli
             [InlineKeyboardButton(f"\u2b07\ufe0f Download Season {chosen_season}", callback_data="sch:confirm:all")]
         )
     if other_season_actionable or len(series_actionable) > len(actionable):
-        rows.append([InlineKeyboardButton("\u2b07\ufe0f Download entire series", callback_data="sch:confirm:series")])
+        rows.append(
+            [InlineKeyboardButton("\u2b07\ufe0f Download Missing Episodes", callback_data="sch:confirm:series")]
+        )
     if has_any_missing:
         rows.append([InlineKeyboardButton("\U0001f3af Choose specific episodes", callback_data="sch:confirm:pick")])
-    if len(list(probe.get("available_seasons") or [])) > 1:
-        rows.append([InlineKeyboardButton("\U0001f500 Change Season", callback_data="sch:season")])
+    # Season navigation arrows (replaces old "Change Season" button)
+    avail: list[int] = sorted(int(x) for x in (probe.get("available_seasons") or []) if int(x) > 0)
+    current: int = int(probe.get("season") or 1)
+    if len(avail) > 1 and current in avail:
+        idx = avail.index(current)
+        prev_season: int | None = avail[idx - 1] if idx > 0 else None
+        next_season: int | None = avail[idx + 1] if idx < len(avail) - 1 else None
+        arrow_row: list[InlineKeyboardButton] = []
+        if prev_season is not None:
+            arrow_row.append(InlineKeyboardButton("\u25c0\ufe0f", callback_data=f"sch:nav:{prev_season}"))
+        else:
+            arrow_row.append(InlineKeyboardButton("\u25c0\ufe0f", callback_data="sch:noop"))
+        if next_season is not None:
+            arrow_row.append(InlineKeyboardButton("\u25b6\ufe0f", callback_data=f"sch:nav:{next_season}"))
+        else:
+            arrow_row.append(InlineKeyboardButton("\u25b6\ufe0f", callback_data="sch:noop"))
+        rows.append(arrow_row)
     rows.append([InlineKeyboardButton("\U0001f3e0 Home", callback_data="nav:home")])
     rows.extend(nav_footer_fn(include_home=False))
     return InlineKeyboardMarkup(rows)
@@ -1638,33 +1655,53 @@ async def on_cb_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> No
         )
         return
 
-    if data == "sch:season":
+    if data == "sch:noop":
+        await q.answer()
+        return
+
+    if data.startswith("sch:nav:"):
+        target_season = int(data.split(":")[2])
         flow = bot_app._get_flow(user_id)
         if not flow or flow.get("mode") != "schedule" or flow.get("stage") != "confirm":
-            await bot_app._render_schedule_ui(
-                user_id,
-                q.message,
-                {"mode": "schedule", "stage": "await_show"},
-                "<b>\u23f0 Session Expired</b>\nThat schedule setup is no longer active.\n<i>Start /schedule again.</i>",
-                reply_markup=None,
-                current_ui_message=q.message,
-            )
+            await q.answer()
             return
-        available = list(
-            (flow.get("probe") or {}).get("available_seasons")
-            or flow.get("selected_show", {}).get("available_seasons")
-            or []
-        )
-        flow["stage"] = "await_season_pick"
+        available = [int(x) for x in (flow.get("probe") or {}).get("available_seasons") or []]
+        if target_season not in available:
+            await q.answer()
+            return
+        show_id = int(flow.get("selected_show", {}).get("id") or 0)
+        if not show_id:
+            await q.answer("Show data missing")
+            return
+        try:
+            bundle = await asyncio.to_thread(
+                bot_app._schedule_get_show_bundle,
+                show_id,
+                False,
+                False,
+            )
+            raw_probe = await asyncio.to_thread(bot_app._schedule_probe_bundle, bundle, None, target_season)
+            probe = bot_app._schedule_apply_tracking_mode(
+                {"auto_state_json": {"tracking_mode": str(flow.get("tracking_mode") or "upcoming")}},
+                raw_probe,
+            )
+        except Exception as exc:
+            LOG.debug("sch:nav probe failed: %s", exc)
+            await q.answer("Could not load that season")
+            return
+        flow["stage"] = "confirm"
+        flow["season"] = target_season
+        flow["probe"] = probe
         bot_app._set_flow(user_id, flow)
         await bot_app._render_schedule_ui(
             user_id,
             q.message,
             flow,
-            "Send the season number to track. Available seasons: " + ", ".join(str(x) for x in available),
-            reply_markup=None,
+            bot_app._schedule_preview_text(probe),
+            reply_markup=schedule_preview_keyboard(probe, bot_app._nav_footer),
             current_ui_message=q.message,
         )
+        await q.answer()
         return
 
     if data == "sch:confirm:all":
