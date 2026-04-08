@@ -132,7 +132,7 @@ Sonnet — UI work follows established patterns with clear conventions.
 - Use `frontend-design` skill for UI layout decisions
 - Use `architecture` skill for new UI flow planning
 
-## Coding Conventions (Mandatory)
+## Key Patterns & Constraints
 
 1. **HTML parse mode everywhere:** `_PM = "HTML"` — NEVER use MarkdownV2
 2. **HTML escaping:** Always use `_h(text)` from `utils.py` for user-supplied text — torrent names contain `<>` characters

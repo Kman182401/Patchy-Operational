@@ -69,8 +69,8 @@ The abstraction must hide this difference completely.
 
 ## Integration Boundaries
 
-| Primary Consumer | How |
-|-----------------|-----|
+| Called By | When |
+|-----------|------|
 | plex-agent | Designs the interface that plex-agent will adopt |
 
 | Calls | When |

@@ -58,6 +58,11 @@ class FakeBotApp:
     def _cancel_pending_trackers_for_user(self, user_id: int) -> None:
         pass  # no-op for tests
 
+    async def _on_cb_nav_home(self, *, data: str, q: Any, user_id: int) -> None:
+        self._clear_flow(user_id)
+        self._cancel_pending_trackers_for_user(user_id)
+        await self._navigate_to_command_center(q.message, user_id, current_ui_message=q.message)
+
     # -- Nav UI tracking (Command Center location) --
 
     user_nav_ui: dict[int, Any] = {}
@@ -95,8 +100,8 @@ class FakeBotApp:
     async def _render_command_center(self, *args: Any, **kwargs: Any) -> None:
         self.render_calls.append(("command_center", args, kwargs))
 
-    async def _navigate_to_command_center(self, msg: Any, user_id: int) -> None:
-        self.render_calls.append(("command_center", (msg,), {"user_id": user_id}))
+    async def _navigate_to_command_center(self, msg: Any, user_id: int, **kwargs: Any) -> None:
+        self.render_calls.append(("command_center", (msg,), {"user_id": user_id, **kwargs}))
 
     async def _open_remove_browse_root(self, *args: Any, **kwargs: Any) -> None:
         self.render_calls.append(("remove_browse_root", args, kwargs))
@@ -446,6 +451,56 @@ async def test_cb_stop_tv_category_navigates_to_cc(
     # Confirmation notice should mention the torrent name
     query.message.chat.send_message.assert_called_once()
     assert "Test.Show.S01E01" in query.message.chat.send_message.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_nav_home_edits_message_in_place(fake_app: FakeBotApp, query: MagicMock) -> None:
+    """nav:home must never call delete() — it edits the message in-place."""
+    fake_app._set_flow(USER_ID, {"mode": "schedule", "stage": "main"})
+
+    await fake_app._on_cb_nav_home(data="nav:home", q=query, user_id=USER_ID)
+
+    # delete must never be called
+    query.message.delete.assert_not_called()
+    # Should navigate to command center with current_ui_message
+    cc_calls = [(args, kwargs) for name, args, kwargs in fake_app.render_calls if name == "command_center"]
+    assert len(cc_calls) >= 1
+    _, kwargs = cc_calls[0]
+    assert kwargs.get("current_ui_message") is query.message
+
+
+@pytest.mark.asyncio
+async def test_stop_callback_edits_tracker_in_place(
+    fake_app: FakeBotApp, query: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """stop:hash must never call delete() — it edits the tracker message in-place."""
+    torrent_hash = "d" * 40
+    call_count = 0
+
+    async def fake_to_thread(fn, *args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return {"category": "Movies", "name": "Test Movie"}
+        if call_count == 2:
+            return None  # delete_torrent
+        return None
+
+    monkeypatch.setattr("patchy_bot.handlers.download.asyncio.to_thread", fake_to_thread)
+
+    notice_mock = MagicMock()
+    notice_mock.message_id = 999
+    query.message.chat.send_message = AsyncMock(return_value=notice_mock)
+
+    await on_cb_stop(fake_app._ctx, data=f"stop:{torrent_hash}", q=query, user_id=USER_ID)
+
+    # delete must never be called on the tracker message
+    query.message.delete.assert_not_called()
+    # Should navigate to command center with current_ui_message
+    cc_calls = [(args, kwargs) for name, args, kwargs in fake_app.render_calls if name == "command_center"]
+    assert len(cc_calls) >= 1
+    _, kwargs = cc_calls[0]
+    assert kwargs.get("current_ui_message") is query.message
 
 
 # ---------------------------------------------------------------------------

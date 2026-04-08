@@ -66,8 +66,8 @@ QBClient uses `threading.Lock()` (`self._lock`) for thread-safe operations. This
 
 ## Integration Boundaries
 
-| Validates Against | Why |
-|-------------------|-----|
+| Called By | When |
+|-----------|------|
 | search-download-agent | Sole consumer of torrent clients — all design decisions must work with its usage patterns |
 
 | Calls | When |
