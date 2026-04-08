@@ -2432,7 +2432,7 @@ class BotApp:
             qs = best.get("_quality_score")
             qlabel = quality_label(qs.parsed) if qs else ""
             try:
-                await self.app.bot.send_message(
+                notif_msg = await self.app.bot.send_message(
                     chat_id=user_id,
                     text=(
                         f"⬇️ Found <b>{_h(title)}</b>"
@@ -2448,6 +2448,16 @@ class BotApp:
                     track_id,
                     notified=True,
                 )
+                if torrent_hash:
+                    tracker_msg = await self.app.bot.send_message(
+                        chat_id=user_id,
+                        text=f"<b>📡 Live Monitor Attached</b>\n<i>Tracking {_h(torrent_name)} download progress…</i>",
+                        reply_markup=self._stop_download_keyboard(torrent_hash),
+                        parse_mode=_PM,
+                    )
+                    self._start_progress_tracker(user_id, torrent_hash, tracker_msg, torrent_name)
+                else:
+                    self._start_pending_progress_tracker(user_id, torrent_name, self.cfg.movies_category, notif_msg)
             except Exception:
                 LOG.warning("Failed to send movie download notification", exc_info=True)
 
@@ -4281,6 +4291,10 @@ class BotApp:
 
     async def _on_cb_nav_home(self, *, data: str, q: Any, user_id: int) -> None:
         self._clear_flow(user_id)
+        # Cancel active progress pollers so they stop editing this message
+        for key, task in list(self.progress_tasks.items()):
+            if key[0] == user_id and not task.done():
+                task.cancel()
         # Cancel pending trackers so they don't create monitor messages after cleanup
         self._cancel_pending_trackers_for_user(user_id)
         # Edit q.message in-place — no delete, no blank flash

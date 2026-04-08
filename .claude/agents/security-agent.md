@@ -108,3 +108,17 @@ class RateLimiter:
 4. **HTML escaping:** All user-visible text must use `_h()` — flag any raw insertion as HIGH
 5. **Rate limiter thread safety:** `threading.Lock` in RateLimiter must be preserved
 6. **Auth table isolation:** Only security-agent has authority over `user_auth` and `auth_attempts` schema decisions
+
+## Automated Tooling
+
+When completing a full security review, invoke the orchestrator after your manual checklist:
+
+After completing the manual security review checklist above, invoke the
+`security-scan-orchestrator` agent to run automated tooling (Bandit, Semgrep,
+pip-audit, Safety, trufflehog, Trivy, Grype, Ruff, mypy, pytest-cov).
+The orchestrator will feed results into the 007 scoring pipeline and produce
+a full HTML report in reports/security/.
+
+The security-agent's manual review covers `authn_authz` and `data_protection`
+domains (not covered by automated tools). The orchestrator covers the remaining
+6 domains. Together they provide full 007 score coverage.

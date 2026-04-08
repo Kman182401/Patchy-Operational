@@ -2290,7 +2290,7 @@ async def on_cb_movie_schedule(bot_app: Any, *, data: str, q: Any, user_id: int)
     ctx = getattr(bot_app, "_ctx", bot_app)
 
     # ------------------------------------------------------------------
-    # msch:cancel — abort an in-progress add-movie flow
+    # msch:cancel — go back from an in-progress add-movie flow
     # ------------------------------------------------------------------
     if data == "msch:cancel":
         flow = bot_app._get_flow(user_id)
@@ -2310,7 +2310,7 @@ async def on_cb_movie_schedule(bot_app: Any, *, data: str, q: Any, user_id: int)
             q.message,
             _flow,
             "\U0001f3ac <b>Track a Movie</b>\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\nEnter the name of the movie below",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\u274c Cancel", callback_data="msch:cancel")]]),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back", callback_data="msch:cancel")]]),
             current_ui_message=q.message,
         )
         return
@@ -2507,9 +2507,7 @@ async def on_cb_movie_schedule(bot_app: Any, *, data: str, q: Any, user_id: int)
                 q.message,
                 flow,
                 "Could not find that movie in the search results. Please try searching again.",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("\u274c Cancel", callback_data="msch:cancel")]]
-                ),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back", callback_data="msch:cancel")]]),
                 current_ui_message=q.message,
             )
             return
@@ -2527,9 +2525,7 @@ async def on_cb_movie_schedule(bot_app: Any, *, data: str, q: Any, user_id: int)
                 flow,
                 f"No release dates found for <b>{_h(title)}{_h(year_str)}</b> in your region ({_h(region)}).\n\n"
                 f"Try a different title or check back later.",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("\u274c Cancel", callback_data="msch:cancel")]]
-                ),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back", callback_data="msch:cancel")]]),
                 current_ui_message=q.message,
             )
             return
@@ -2557,7 +2553,7 @@ async def on_cb_movie_schedule(bot_app: Any, *, data: str, q: Any, user_id: int)
                     )
                 ]
             )
-        date_rows.append([InlineKeyboardButton("\u274c Cancel", callback_data="msch:cancel")])
+        date_rows.append([InlineKeyboardButton("↩️ Back", callback_data="msch:cancel")])
         await bot_app._render_schedule_ui(
             user_id,
             q.message,
@@ -2645,7 +2641,7 @@ async def on_cb_movie_schedule(bot_app: Any, *, data: str, q: Any, user_id: int)
             confirm_rows.append(
                 [InlineKeyboardButton("\u2705 Track it", callback_data=f"msch:confirm:{tmdb_id}:{date_type}")]
             )
-        confirm_rows.append([InlineKeyboardButton("\u274c Cancel", callback_data="msch:cancel")])
+        confirm_rows.append([InlineKeyboardButton("↩️ Back", callback_data="msch:cancel")])
         await bot_app._render_schedule_ui(
             user_id,
             q.message,
@@ -2755,18 +2751,7 @@ async def on_text_movie_schedule(bot_app: Any, user_id: int, text: str, msg: Any
 
     ctx = getattr(bot_app, "_ctx", bot_app)
 
-    # ── clean up the "Track a Movie" prompt and the user's typed message ──
-    _stored_chat = flow.get("schedule_ui_chat_id")
-    _stored_msgid = flow.get("schedule_ui_message_id")
-    if _stored_chat and _stored_msgid:
-        try:
-            await ctx.app.bot.delete_message(chat_id=_stored_chat, message_id=_stored_msgid)
-        except Exception:
-            pass
-        flow.pop("schedule_ui_chat_id", None)
-        flow.pop("schedule_ui_message_id", None)
-        bot_app._set_flow(user_id, flow)
-
+    # ── clean up the user's typed message ──
     await bot_app._cleanup_private_user_message(msg)
 
     # Show a searching placeholder
@@ -2786,7 +2771,7 @@ async def on_text_movie_schedule(bot_app: Any, user_id: int, text: str, msg: Any
             msg,
             flow,
             f"No results found for <b>{_h(text)}</b>. Try a different title.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\u274c Cancel", callback_data="msch:cancel")]]),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back", callback_data="msch:cancel")]]),
         )
         return True
 
@@ -2801,7 +2786,7 @@ async def on_text_movie_schedule(bot_app: Any, user_id: int, text: str, msg: Any
         r_year = r.get("year")
         label = f"{r_title} ({r_year})" if r_year else r_title
         result_rows.append([InlineKeyboardButton(label, callback_data=f"msch:pick:{r_id}")])
-    result_rows.append([InlineKeyboardButton("\u274c Cancel", callback_data="msch:cancel")])
+    result_rows.append([InlineKeyboardButton("↩️ Back", callback_data="msch:cancel")])
 
     await bot_app._render_schedule_ui(
         user_id,
