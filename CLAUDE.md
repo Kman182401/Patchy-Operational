@@ -65,6 +65,12 @@ Use project agents when the task naturally fits their domain. Do not force subag
 - `test-agent`: tests, pytest failures, coverage, test utilities.
 - `security-agent`: auth, rate limits, path safety, validation, security review.
 - `taskmaster-sync-agent`: only when the user wants Task Master kept in sync.
+- `movie-tracking-agent`: movie release tracking, TMDB movie search, `msch:` callbacks, movie schedule features.
+- `monitoring-metrics-agent`: health checks, alerting, log analysis, service monitoring, error rate tracking.
+- `torrent-client-abstraction-agent`: Transmission/rTorrent support, torrent client interface design, multi-client architecture.
+- `media-library-abstraction-agent`: Jellyfin/Emby support, media library interface design, multi-library architecture.
+- `performance-optimization-agent`: SQLite optimization, query analysis, runner profiling, caching strategy.
+- `release-manager-agent`: versioning, releases, changelogs, rollback procedures, deployment coordination.
 
 ## Known Pitfalls
 

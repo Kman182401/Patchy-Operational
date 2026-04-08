@@ -868,7 +868,12 @@ class BotApp:
             self._start_command_center_refresh(int(user_id))
 
     async def _render_command_center(
-        self, msg: Any, user_id: int | None = None, *, use_remembered_ui: bool = False
+        self,
+        msg: Any,
+        user_id: int | None = None,
+        *,
+        use_remembered_ui: bool = False,
+        current_ui_message: Any | None = None,
     ) -> Any:
         ok, reason = await asyncio.to_thread(self._ensure_media_categories)
         text = await asyncio.to_thread(self._start_text, ok, reason)
@@ -883,19 +888,25 @@ class BotApp:
             if user_id is not None:
                 self._start_command_center_refresh(int(user_id))
             return result
-        # When use_remembered_ui=True, pass current_ui_message=None so _render_nav_ui
-        # uses the remembered user_nav_ui entry (the original CC) instead of msg.
-        ui_msg = None if use_remembered_ui else msg
+        # current_ui_message wins over use_remembered_ui when provided
+        if current_ui_message is not None:
+            ui_msg = current_ui_message
+        else:
+            ui_msg = None if use_remembered_ui else msg
         result = await self._render_nav_ui(int(user_id), msg, text, reply_markup=kb, current_ui_message=ui_msg)
         self._start_command_center_refresh(int(user_id))
         return result
 
-    async def _navigate_to_command_center(self, msg: Any, user_id: int) -> Any:
+    async def _navigate_to_command_center(
+        self, msg: Any, user_id: int, *, current_ui_message: Any | None = None
+    ) -> Any:
         """Recover CC location from DB if needed, then render the Command Center."""
         if not self.user_nav_ui.get(user_id):
             db_cc = await asyncio.to_thread(self.store.get_command_center, user_id)
             if db_cc:
                 self.user_nav_ui[user_id] = db_cc
+        if current_ui_message is not None:
+            return await self._render_command_center(msg, user_id=user_id, current_ui_message=current_ui_message)
         has_remembered = bool(self.user_nav_ui.get(user_id))
         return await self._render_command_center(msg, user_id=user_id, use_remembered_ui=has_remembered)
 
@@ -4272,12 +4283,8 @@ class BotApp:
         self._clear_flow(user_id)
         # Cancel pending trackers so they don't create monitor messages after cleanup
         self._cancel_pending_trackers_for_user(user_id)
-        # Delete the message that hosted this button press (may be a Live Monitor tracker_msg)
-        try:
-            await q.message.delete()
-        except Exception:
-            pass
-        await self._navigate_to_command_center(q.message, user_id)
+        # Edit q.message in-place — no delete, no blank flash
+        await self._navigate_to_command_center(q.message, user_id, current_ui_message=q.message)
 
     async def _on_cb_add(self, *, data: str, q: Any, user_id: int) -> None:
         _, sid, idx_raw = data.split(":", 2)

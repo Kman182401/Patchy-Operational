@@ -1178,13 +1178,9 @@ async def on_cb_stop(ctx: HandlerContext, *, data: str, q: Any, user_id: int) ->
             # Navigate to Command Center (replicating nav:home logic)
             flow_mod.clear_flow(ctx, user_id)
             render_mod.cancel_pending_trackers_for_user(ctx, user_id)
-            # Delete the Live Monitor message now that the download is cancelled
-            try:
-                await q.message.delete()
-            except Exception:
-                pass
+            # Edit the tracker message in-place — no delete, no blank flash
             if ctx.navigate_to_command_center:
-                await ctx.navigate_to_command_center(q.message, user_id)
+                await ctx.navigate_to_command_center(q.message, user_id, current_ui_message=q.message)
             # Send self-deleting confirmation notice (no buttons)
             notice = await q.message.chat.send_message(
                 f"\u2705 <b>{_h(torrent_name)}</b> removed and canceled.",

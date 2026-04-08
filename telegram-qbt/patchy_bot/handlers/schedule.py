@@ -2069,6 +2069,7 @@ async def on_cb_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> No
                 reply_markup=InlineKeyboardMarkup(
                     [
                         [InlineKeyboardButton("\u2795 Add New Show", callback_data="sch:addnew")],
+                        [InlineKeyboardButton("\U0001f3ac My Movies", callback_data="msch:list")],
                     ]
                     + bot_app._nav_footer(back_data="menu:schedule", include_home=True)
                 ),
@@ -2124,6 +2125,8 @@ async def on_cb_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> No
             nav_prefix="sch",
             add_callback="sch:addnew",
             add_label="\u2795 Add New Show",
+            switch_callback="msch:list",
+            switch_label="\U0001f3ac My Movies",
             back_data="menu:schedule",
         )
         await bot_app._render_nav_ui(
@@ -2332,6 +2335,7 @@ async def on_cb_movie_schedule(bot_app: Any, *, data: str, q: Any, user_id: int)
                 reply_markup=InlineKeyboardMarkup(
                     [
                         [InlineKeyboardButton("\u2795 Track a Movie", callback_data="msch:add")],
+                        [InlineKeyboardButton("\U0001f4fa My Shows", callback_data="sch:myshows")],
                     ]
                     + bot_app._nav_footer(back_data="menu:schedule", include_home=True)
                 ),
@@ -2383,6 +2387,8 @@ async def on_cb_movie_schedule(bot_app: Any, *, data: str, q: Any, user_id: int)
             nav_prefix="msch",
             add_callback="msch:add",
             add_label="\u2795 Track a Movie",
+            switch_callback="sch:myshows",
+            switch_label="\U0001f4fa My Shows",
             back_data="menu:schedule",
         )
         await bot_app._render_nav_ui(
