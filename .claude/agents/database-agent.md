@@ -14,7 +14,7 @@ Sonnet — data layer work is medium complexity.
 
 ## Tool Permissions
 
-- **Read/Write:** `patchy_bot/store.py` exclusively
+- **Read/Write:** `patchy_bot/store.py` (primary owner; performance-optimization-agent may write with database-agent approval)
 - **Bash:** SQLite CLI inspection (`sqlite3 state.sqlite3`), `pytest`
 - **Read-only:** Any source file for context
 - **No:** `systemctl` commands

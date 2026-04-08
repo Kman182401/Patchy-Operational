@@ -18,7 +18,11 @@
       "Bash(systemctl cat:*)",
       "Bash(journalctl:*)"
     ],
-    "deny": ["Read(./.env)", "Read(./.env.*)", "Read(./secrets/**)"]
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./secrets/**)"
+    ]
   },
   "respectGitignore": true,
   "alwaysThinkingEnabled": true,
@@ -29,6 +33,28 @@
           {
             "type": "command",
             "command": "if find /home/karson/Patchy_Bot/telegram-qbt/patchy_bot /home/karson/Patchy_Bot/telegram-qbt/tests -name '*.py' -mmin -2 2>/dev/null | grep -q .; then cd /home/karson/Patchy_Bot/telegram-qbt && .venv/bin/python -m pytest tests/ -q --tb=short 2>&1 | tail -20; fi"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/karson/Patchy_Bot/.claude/hooks/memory-recorder.sh"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/karson/Patchy_Bot/.claude/hooks/session-finalizer.sh"
           }
         ]
       }

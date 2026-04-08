@@ -96,3 +96,4 @@ None directly — reads `remove_jobs`, `schedule_tracks` as needed for cross-dom
 5. **Section discovery:** Sections are cached per-request; types include `movie` and `show`
 6. **`autoEmptyTrash=1`:** Required Plex server setting to prevent ghost media entries after file replacement
 7. **Path matching:** Uses `_norm_media_path()` for consistent comparison; `_path_matches_remove_target()` handles both exact and parent-directory matches
+8. **Secret safety:** Never expose `PLEX_TOKEN` or `PLEX_BASE_URL` credentials in any output

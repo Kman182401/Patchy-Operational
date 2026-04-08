@@ -84,3 +84,46 @@ Use project agents when the task naturally fits their domain. Do not force subag
 - Prefer the project-local skill when it overlaps a generic/global one.
 - For Python changes in `telegram-qbt/`, run `pytest -q` from that project when tests cover the touched area.
 - Keep `qbt_telegram_bot.py` import compatibility intact unless the user explicitly wants it changed.
+
+---
+
+## Memory System
+
+### Session Start Protocol (MANDATORY)
+At the start of every Claude Code session on Patchy Bot, before doing any work:
+1. Read `.claude/memory/MEMORY.md` — loads current project context and quick reference
+2. Read the last 2 entries in `.claude/memory/sessions.md` — loads recent handoff state
+
+### During Work — Write to Memory Files
+Write to the appropriate memory file whenever one of these events occurs:
+
+| Event | File to update |
+|-------|---------------|
+| Architectural or design decision made | `.claude/memory/decisions.md` |
+| Bug found and fixed | `.claude/memory/bugs.md` |
+| Non-obvious pattern, convention, or gotcha discovered | `.claude/memory/patterns.md` |
+| Wrapping up / about to stop work | `.claude/memory/sessions.md` |
+
+After writing to any category file, also update the matching one-line summary in `.claude/memory/MEMORY.md`.
+
+### Entry Format (all files)
+```
+## [YYYY-MM-DD HH:MM] Brief descriptive title
+- **Context:** What was happening / what task was in progress
+- **Finding/Decision:** What was decided, fixed, or discovered
+- **Rationale:** Why this choice (for decisions only)
+- **Files affected:** List of files changed
+- **Impact:** What this affects going forward
+```
+
+### What the Hooks Do Automatically
+- **PostToolUse** (`memory-recorder.sh`): Appends a JSON line to `.event-buffer.jsonl` after every tool use — full audit trail, no action needed
+- **Stop** (`session-finalizer.sh`): Auto-writes a session-end entry to `sessions.md` from the event buffer if you didn't write one manually; rotates the buffer
+
+### Memory File Locations
+All memory files live in: `~/Patchy_Bot/.claude/memory/`
+- `MEMORY.md` — master index (read first every session)
+- `decisions.md` — design decisions + rationale
+- `bugs.md` — bugs found + fixes
+- `patterns.md` — conventions + gotchas
+- `sessions.md` — session handoffs

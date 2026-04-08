@@ -1,6 +1,6 @@
 ---
 description: "Use for versioning, releases, changelogs, rollback procedures, deployment coordination, or release readiness checks. Best fit when the task mentions release, version, changelog, rollback, or deployment."
-tools: Read, Bash, Grep, Glob, Write, Edit
+tools: Read, Bash, Grep, Glob
 ---
 
 # Release Manager Agent

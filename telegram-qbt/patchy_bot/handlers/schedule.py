@@ -2254,7 +2254,7 @@ async def on_cb_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> No
             [
                 [
                     InlineKeyboardButton("Yes, stop tracking", callback_data=f"sch:del:{tid}"),
-                    InlineKeyboardButton("Cancel", callback_data=f"sch:sel:{tid}"),
+                    InlineKeyboardButton("↩️ Back", callback_data=f"sch:sel:{tid}"),
                 ],
             ]
         )
@@ -2304,10 +2304,11 @@ async def on_cb_movie_schedule(bot_app: Any, *, data: str, q: Any, user_id: int)
     # ------------------------------------------------------------------
     if data == "msch:add":
         bot_app._set_flow(user_id, {"mode": "msch_add", "stage": "title"})
+        _flow = bot_app._get_flow(user_id)
         await bot_app._render_schedule_ui(
             user_id,
             q.message,
-            None,
+            _flow,
             "\U0001f3ac <b>Track a Movie</b>\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\nEnter the name of the movie below",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\u274c Cancel", callback_data="msch:cancel")]]),
             current_ui_message=q.message,
@@ -2753,6 +2754,20 @@ async def on_text_movie_schedule(bot_app: Any, user_id: int, text: str, msg: Any
         return False
 
     ctx = getattr(bot_app, "_ctx", bot_app)
+
+    # ── clean up the "Track a Movie" prompt and the user's typed message ──
+    _stored_chat = flow.get("schedule_ui_chat_id")
+    _stored_msgid = flow.get("schedule_ui_message_id")
+    if _stored_chat and _stored_msgid:
+        try:
+            await ctx.app.bot.delete_message(chat_id=_stored_chat, message_id=_stored_msgid)
+        except Exception:
+            pass
+        flow.pop("schedule_ui_chat_id", None)
+        flow.pop("schedule_ui_message_id", None)
+        bot_app._set_flow(user_id, flow)
+
+    await bot_app._cleanup_private_user_message(msg)
 
     # Show a searching placeholder
     await bot_app._render_schedule_ui(

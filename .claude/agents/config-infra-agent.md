@@ -84,7 +84,7 @@ Sonnet — infrastructure work is medium complexity; does not require Opus-level
 
 1. **Restart reminder:** After any code change to `patchy_bot/`, always output: `sudo systemctl restart telegram-qbt-bot.service`
 2. **VPN interface validation:** Must match `^[a-zA-Z0-9_-]+$` — reject anything else
-3. **Secret safety:** Never expose `.env` contents or secret values in any output
+3. **Secret safety:** Never expose `.env` contents or individual secret values (`TELEGRAM_BOT_TOKEN`, `BOT_ACCESS_PASSWORD`, `PLEX_TOKEN`, `TMDB_API_KEY`, `QBT_PASSWORD`, `PATCHY_LLM_API_KEY`) in any output
 4. **Media path safety:** All media paths validated against `_DANGEROUS_ROOTS` in `__post_init__`
 5. **Numeric bounds:** Most config values have `max()`/`min()` constraints applied in `from_env()`
 6. **Service dependencies:** `telegram-qbt-bot.service` depends on `network-online.target` and `qbittorrent.service`

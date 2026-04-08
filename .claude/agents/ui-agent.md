@@ -17,6 +17,7 @@ Sonnet — UI work follows established patterns with clear conventions.
 - **Read/Write:** `patchy_bot/ui/text.py`, `patchy_bot/ui/keyboards.py`, `patchy_bot/ui/rendering.py`, `patchy_bot/ui/flow.py`, `patchy_bot/handlers/_shared.py`, `patchy_bot/handlers/commands.py`
 - **Bash:** `pytest` execution
 - **Read-only:** All other source files for context
+- **No:** `systemctl` commands
 
 ## Domain Ownership
 
