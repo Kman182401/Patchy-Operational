@@ -344,7 +344,19 @@ def remove_selected_paths(flow: dict[str, Any] | None) -> set[str]:
 
 
 def remove_selection_count(flow: dict[str, Any] | None) -> int:
-    return len(remove_selection_items(flow))
+    return len(remove_confirm_summary_items(remove_selection_items(flow)))
+
+
+def remove_selected_show_candidate(flow: dict[str, Any] | None) -> dict[str, Any] | None:
+    candidate = dict((flow or {}).get("selected") or {})
+    if (
+        candidate
+        and str(candidate.get("root_key") or "") == "tv"
+        and str(candidate.get("remove_kind") or "") == "show"
+        and bool(candidate.get("is_dir"))
+    ):
+        return remove_enrich_candidate(candidate)
+    return None
 
 
 def remove_candidate_members(candidate: dict[str, Any]) -> list[dict[str, Any]]:
@@ -673,8 +685,13 @@ def remove_show_actions_text(show_candidate: dict[str, Any], series_selected: bo
 def remove_season_actions_text(season_candidate: dict[str, Any]) -> str:
     season_candidate = remove_enrich_candidate(season_candidate)
     show_name = str(season_candidate.get("show_name") or "Show")
+    season_number = int(season_candidate.get("season_number") or 0)
+    if season_number > 0:
+        title = f"{show_name} Season {season_number}"
+    else:
+        title = f"{show_name} {remove_display_name(season_candidate)}".strip()
     return (
-        "<b>\U0001f4c2 Season Delete Options</b>\n\n"
+        f"<b>\U0001f4c2 {_h(title)}</b>\n\n"
         f"Series: {_h(show_name)}\n"
         f"Selected season: {remove_candidate_text(season_candidate)}\n\n"
         "<i>Choose whether to remove the entire season or browse individual episodes.</i>"
@@ -747,7 +764,12 @@ def remove_show_action_keyboard(series_selected: bool, selected_count: int) -> I
     rows.append([InlineKeyboardButton(f"\U0001f9fe Review Selection ({selected_count})", callback_data="rm:review")])
     if selected_count > 0:
         rows.append([InlineKeyboardButton("\U0001f9f9 Clear Selection", callback_data="rm:clear")])
-    rows.append([InlineKeyboardButton("\U0001f3e0 Home", callback_data="nav:home")])
+    rows.append(
+        [
+            InlineKeyboardButton("\u2b05\ufe0f Back", callback_data="rm:back:item"),
+            InlineKeyboardButton("\U0001f3e0 Home", callback_data="nav:home"),
+        ]
+    )
     rows.extend(nav_footer(include_home=False))
     return InlineKeyboardMarkup(compact_action_rows(rows))
 
@@ -2462,6 +2484,63 @@ async def on_cb_remove(bot_app: Any, *, data: str, q: Any, user_id: int) -> None
         await render_remove_search_results(bot_app, user_id, q.message, flow, current_ui_message=q.message)
         return
 
+    if data == "rm:back:item":
+        flow = bot_app._get_flow(user_id)
+        if not flow or flow.get("mode") != "remove":
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                {"mode": "remove", "selected_items": []},
+                "That remove flow has expired. Start /remove again.",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
+        candidates = list(flow.get("candidates") or [])
+        if not candidates:
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                "That remove flow has expired. Start /remove again.",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
+        flow["stage"] = "choose_item"
+        flow.pop("selected_child", None)
+        flow.pop("season_items", None)
+        flow.pop("episode_items", None)
+        bot_app._set_flow(user_id, flow)
+        if flow.get("browse_category"):
+            label = "Movies" if str(flow.get("browse_category") or "") == "movies" else "Shows"
+            selected_paths = remove_selected_paths(flow)
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                remove_list_text(
+                    f"\U0001f4da {label} in Plex/library",
+                    candidates,
+                    0,
+                    hint="Tap items to toggle them, or page through the library.",
+                    selected_paths=selected_paths,
+                ),
+                reply_markup=remove_paginated_keyboard(
+                    candidates,
+                    0,
+                    item_prefix="rm:pick",
+                    nav_prefix="rm:bpage",
+                    back_callback="rm:browse",
+                    selected_paths=selected_paths,
+                    compact_browse_footer=True,
+                ),
+                current_ui_message=q.message,
+            )
+        else:
+            await render_remove_search_results(bot_app, user_id, q.message, flow, current_ui_message=q.message)
+        return
+
     if data == "rm:review":
         flow = bot_app._get_flow(user_id)
         if not flow or flow.get("mode") != "remove":
@@ -2503,13 +2582,29 @@ async def on_cb_remove(bot_app: Any, *, data: str, q: Any, user_id: int) -> None
                 current_ui_message=q.message,
             )
             return
+        selected_show = remove_selected_show_candidate(flow)
         flow["selected_items"] = []
-        flow.pop("selected", None)
         flow.pop("selected_child", None)
         flow.pop("season_items", None)
         flow.pop("episode_items", None)
+        if selected_show is None:
+            flow.pop("selected", None)
+        else:
+            flow["selected"] = selected_show
         bot_app._set_flow(user_id, flow)
-        await bot_app._open_remove_browse_root(user_id, q.message, current_ui_message=q.message)
+        if selected_show is not None:
+            flow["stage"] = "show_actions"
+            bot_app._set_flow(user_id, flow)
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                remove_show_actions_text(selected_show, False),
+                reply_markup=remove_show_action_keyboard(False, remove_selection_count(flow)),
+                current_ui_message=q.message,
+            )
+        else:
+            await bot_app._open_remove_browse_root(user_id, q.message, current_ui_message=q.message)
         return
 
     if data == "rm:confirm":

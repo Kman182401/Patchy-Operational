@@ -617,12 +617,13 @@ def test_remove_show_action_screen_displays_series_selected_in_text_not_button(t
     assert "Entire series is selected for deletion" in text
     assert [[button.text for button in row] for row in selected_keyboard] == [
         ["🧾 Review Selection (1)", "🧹 Clear Selection"],
-        ["🏠 Home"],
+        ["⬅️ Back", "🏠 Home"],
     ]
     assert [[button.text for button in row] for row in unselected_keyboard] == [
         ["🗑 Select Entire Series", "📂 Browse Seasons"],
-        ["🧾 Review Selection (1)", "🧹 Clear Selection"],
-        ["🏠 Home"],
+        ["🧾 Review Selection (1)"],
+        ["🧹 Clear Selection"],
+        ["⬅️ Back", "🏠 Home"],
     ]
 
 
@@ -646,6 +647,25 @@ def test_remove_season_detail_keyboard_uses_back_and_home(tmp_path) -> None:
         ["📋 Select Episodes"],
         ["◀️ Back", "🏠 Home"],
     ]
+
+
+def test_remove_season_actions_text_uses_show_and_season_in_header() -> None:
+    from patchy_bot.handlers.remove import remove_season_actions_text
+
+    text = remove_season_actions_text(
+        {
+            "name": "Season 2",
+            "remove_kind": "season",
+            "show_name": "Example Show",
+            "season_number": 2,
+            "path": "/tmp/example-show/Season 2",
+            "size_bytes": 0,
+            "root_label": "TV",
+            "is_dir": True,
+        }
+    )
+
+    assert "<b>📂 Example Show Season 2</b>" in text
 
 
 def test_remove_browse_movie_list_compacts_footer_without_changing_item_rows(tmp_path) -> None:
@@ -884,7 +904,12 @@ def test_remove_confirm_text_uses_explicit_tv_scope_labels() -> None:
 
 
 def test_remove_confirm_text_collapses_duplicate_show_folders_into_one_full_series_entry(tmp_path) -> None:
-    from patchy_bot.handlers.remove import remove_confirm_summary_items, remove_confirm_text
+    from patchy_bot.handlers.remove import (
+        remove_confirm_summary_items,
+        remove_confirm_text,
+        remove_selected_show_candidate,
+        remove_selection_count,
+    )
 
     first = tmp_path / "Daredevil Born Again"
     second = tmp_path / "www.UIndex.org - Daredevil Born Again"
@@ -937,6 +962,9 @@ def test_remove_confirm_text_collapses_duplicate_show_folders_into_one_full_seri
     assert summary[0]["size_bytes"] == 60
     assert "Selected <b>1</b> item(s)" in text
     assert text.count("Daredevil Born Again Full Series") == 2
+    assert remove_selection_count({"selected_items": candidates}) == 1
+    assert remove_selected_show_candidate({"selected": candidates[0]}) is not None
+    assert remove_selected_show_candidate({"selected": {"remove_kind": "movie"}}) is None
 
 
 def test_remove_virtual_season_toggle_selects_underlying_episode_files(tmp_path) -> None:
