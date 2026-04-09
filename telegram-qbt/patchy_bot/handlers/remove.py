@@ -23,6 +23,7 @@ from ..types import HandlerContext
 from ..ui.keyboards import compact_action_rows, nav_footer
 from ..utils import (
     _h,
+    extract_episode_codes,
     extract_season_number,
     format_remove_episode_label,
     format_remove_season_label,
@@ -170,6 +171,19 @@ def extract_show_name(folder_name: str) -> str:
     return name or folder_name
 
 
+def remove_parse_episode_season_number(name: str) -> int | None:
+    season_number = extract_season_number(name)
+    if season_number is not None:
+        return season_number
+    codes = sorted(extract_episode_codes(name))
+    if not codes:
+        return None
+    match = re.fullmatch(r"[sS](\d{1,2})[eE](\d{1,2})", codes[0])
+    if not match:
+        return None
+    return int(match.group(1))
+
+
 # ---------------------------------------------------------------------------
 # Library roots & candidate discovery (need ctx for cfg paths)
 # ---------------------------------------------------------------------------
@@ -230,7 +244,7 @@ def find_remove_candidates(ctx: HandlerContext, query: str, limit: int = 8) -> l
                     if is_dir:
                         show_name = extract_show_name(entry.name)
                     else:
-                        season_number = extract_season_number(entry.name)
+                        season_number = remove_parse_episode_season_number(entry.name)
                         item_name = format_remove_episode_label(entry.name, season_number)
                 candidates.append(
                     (
@@ -247,6 +261,7 @@ def find_remove_candidates(ctx: HandlerContext, query: str, limit: int = 8) -> l
                             "remove_kind": remove_kind,
                             "show_name": show_name,
                             "season_number": season_number,
+                            "_match_score": score,
                         },
                     )
                 )
@@ -261,9 +276,7 @@ def find_remove_candidates(ctx: HandlerContext, query: str, limit: int = 8) -> l
             continue
         seen_paths.add(candidate["path"])
         deduped.append(candidate)
-        if len(deduped) >= max(1, limit):
-            break
-    return deduped
+    return remove_group_search_candidates(deduped, limit=max(1, limit))
 
 
 # ---------------------------------------------------------------------------
@@ -334,7 +347,49 @@ def remove_selection_count(flow: dict[str, Any] | None) -> int:
     return len(remove_selection_items(flow))
 
 
+def remove_candidate_members(candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    if bool(candidate.get("is_virtual")):
+        members = [remove_enrich_candidate(dict(item)) for item in list(candidate.get("group_items") or [])]
+        return [item for item in members if remove_selected_path(item)]
+    return [remove_enrich_candidate(dict(candidate))]
+
+
+def remove_candidate_is_selected(candidate: dict[str, Any], selected_paths: set[str]) -> bool:
+    members = remove_candidate_members(candidate)
+    if not members:
+        return False
+    member_paths = {remove_selected_path(member) for member in members if remove_selected_path(member)}
+    if not member_paths:
+        return False
+    return member_paths <= selected_paths
+
+
+def remove_toggle_virtual_candidate(flow: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    members = remove_candidate_members(candidate)
+    if not members:
+        return False
+    member_paths = {remove_selected_path(member) for member in members if remove_selected_path(member)}
+    if not member_paths:
+        return False
+    all_selected = member_paths <= remove_selected_paths(flow)
+    selected = remove_selection_items(flow)
+    updated = [item for item in selected if remove_selected_path(item) not in member_paths]
+    if not all_selected:
+        updated.extend(members)
+    flow["selected_items"] = sorted(
+        updated,
+        key=lambda item: (
+            str(item.get("root_label") or ""),
+            str(item.get("name") or "").lower(),
+            str(item.get("path") or ""),
+        ),
+    )
+    return not all_selected
+
+
 def remove_toggle_candidate(flow: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    if bool(candidate.get("is_virtual")):
+        return remove_toggle_virtual_candidate(flow, candidate)
     candidate = remove_enrich_candidate(candidate)
     target_path = remove_selected_path(candidate)
     if not target_path:
@@ -402,7 +457,7 @@ def remove_effective_candidates(candidates: list[dict[str, Any]]) -> list[dict[s
 
 
 def remove_toggle_label(candidate: dict[str, Any], selected_paths: set[str]) -> str:
-    prefix = "\u2705 " if remove_selected_path(candidate) in selected_paths else ""
+    prefix = "\u2705 " if remove_candidate_is_selected(candidate, selected_paths) else ""
     name = remove_display_name(candidate)
     return f"{prefix}{name[:56]}"
 
@@ -466,7 +521,12 @@ def remove_candidates_text(query: str, candidates: list[dict[str, Any]], selecte
     chosen = set(selected_paths or set())
     lines = [f"<b>\U0001f5d1\ufe0f Remove: Search Results</b>\nQuery: <code>{_h(query)}</code>", ""]
     for idx, candidate in enumerate(candidates, start=1):
-        prefix = "\u2705 " if remove_selected_path(candidate) in chosen else ""
+        selected = (
+            remove_series_selected(candidate, chosen)
+            if str(candidate.get("remove_kind") or "") == "show"
+            else remove_selected_path(candidate) in chosen
+        )
+        prefix = "\u2705 " if selected else ""
         lines.append(f"{idx}. {prefix}{remove_candidate_text(candidate)}")
     lines.extend(
         [
@@ -642,7 +702,7 @@ def remove_season_detail_keyboard(
     del show_idx
     chosen = set(selected_paths or set())
     season_number = int(season_candidate.get("season_number") or 0)
-    selected = remove_selected_path(season_candidate) in chosen
+    selected = remove_candidate_is_selected(season_candidate, chosen)
     if selected and season_number > 0:
         delete_label = f"\u2705 Season {season_number} Selected"
     elif selected:
@@ -795,6 +855,78 @@ def remove_library_items(ctx: HandlerContext, root_key: str) -> list[dict[str, A
     return items
 
 
+def remove_virtual_season_candidate(
+    *,
+    show_candidate: dict[str, Any],
+    show_name: str,
+    season_number: int | None,
+    episode_items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    number = int(season_number or 0)
+    label = f"Season {number}" if number > 0 else "Unsorted Episodes"
+    return {
+        "name": label,
+        "source_name": label,
+        "path": "",
+        "root_key": str(show_candidate.get("root_key") or "tv"),
+        "root_label": str(show_candidate.get("root_label") or "TV"),
+        "root_path": os.path.realpath(str(show_candidate.get("root_path") or "")),
+        "is_dir": False,
+        "is_virtual": True,
+        "size_bytes": sum(int(item.get("size_bytes") or 0) for item in episode_items),
+        "remove_kind": "season",
+        "show_name": show_name,
+        "show_path": os.path.realpath(str(show_candidate.get("path") or "")),
+        "season_number": number if number > 0 else 9999,
+        "group_items": [remove_enrich_candidate(dict(item)) for item in episode_items],
+        "extra_episode_items": [],
+    }
+
+
+def remove_merge_show_children(children: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    real_seasons: dict[int, dict[str, Any]] = {}
+    virtual_buckets: dict[int, dict[str, Any]] = {}
+
+    for raw_child in children:
+        child = dict(raw_child)
+        if str(child.get("remove_kind") or "") == "season":
+            season_number = int(child.get("season_number") or 0)
+            if not bool(child.get("is_virtual")) and season_number > 0:
+                child.setdefault("extra_episode_items", [])
+                real_seasons[season_number] = child
+                merged.append(child)
+                continue
+            if bool(child.get("is_virtual")):
+                existing = virtual_buckets.get(season_number)
+                if existing is None:
+                    child["group_items"] = [remove_enrich_candidate(dict(item)) for item in child.get("group_items") or []]
+                    child["size_bytes"] = sum(int(item.get("size_bytes") or 0) for item in child["group_items"])
+                    virtual_buckets[season_number] = child
+                    continue
+                existing["group_items"] = [
+                    *existing.get("group_items", []),
+                    *[remove_enrich_candidate(dict(item)) for item in child.get("group_items") or []],
+                ]
+                existing["size_bytes"] = sum(int(item.get("size_bytes") or 0) for item in existing["group_items"])
+                continue
+        merged.append(child)
+
+    for season_number, bucket in virtual_buckets.items():
+        if season_number in real_seasons:
+            real_season = real_seasons[season_number]
+            extras = [remove_enrich_candidate(dict(item)) for item in bucket.get("group_items") or []]
+            real_season["extra_episode_items"] = [*real_season.get("extra_episode_items", []), *extras]
+            real_season["size_bytes"] = int(real_season.get("size_bytes") or 0) + sum(
+                int(item.get("size_bytes") or 0) for item in extras
+            )
+            continue
+        merged.append(bucket)
+
+    merged.sort(key=remove_tv_item_sort_key)
+    return merged
+
+
 def remove_show_children(show_candidate: dict[str, Any]) -> list[dict[str, Any]]:
     show_path = os.path.realpath(str(show_candidate.get("path") or ""))
     root_path = os.path.realpath(str(show_candidate.get("root_path") or ""))
@@ -804,6 +936,7 @@ def remove_show_children(show_candidate: dict[str, Any]) -> list[dict[str, Any]]
     if os.path.commonpath([show_path, root_path]) != root_path:
         return []
     items: list[dict[str, Any]] = []
+    loose_episode_buckets: dict[int | None, list[dict[str, Any]]] = {}
     try:
         entries = sorted(os.scandir(show_path), key=lambda entry: entry.name.lower())
     except OSError:
@@ -821,11 +954,29 @@ def remove_show_children(show_candidate: dict[str, Any]) -> list[dict[str, Any]]
                 if season_number is None:
                     continue
                 display_name = format_remove_season_label(entry.name)
+                extra_episode_items: list[dict[str, Any]] = []
             else:
                 if not is_remove_media_file(entry.name):
                     continue
-                season_number = None
-                display_name = format_remove_episode_label(entry.name)
+                season_number = remove_parse_episode_season_number(entry.name)
+                episode_item = remove_enrich_candidate(
+                    {
+                        "name": format_remove_episode_label(entry.name, season_number),
+                        "source_name": entry.name,
+                        "path": child_path,
+                        "root_key": str(show_candidate.get("root_key") or "tv"),
+                        "root_label": str(show_candidate.get("root_label") or "TV"),
+                        "root_path": root_path,
+                        "is_dir": False,
+                        "size_bytes": None,
+                        "remove_kind": "episode",
+                        "show_name": show_name,
+                        "show_path": show_path,
+                        "season_number": season_number,
+                    }
+                )
+                loose_episode_buckets.setdefault(season_number, []).append(episode_item)
+                continue
             items.append(
                 {
                     "name": display_name,
@@ -835,20 +986,34 @@ def remove_show_children(show_candidate: dict[str, Any]) -> list[dict[str, Any]]
                     "root_label": str(show_candidate.get("root_label") or "TV"),
                     "root_path": root_path,
                     "is_dir": is_dir,
+                    "is_virtual": False,
                     "size_bytes": None,
-                    "remove_kind": "season" if is_dir else "episode",
+                    "remove_kind": "season",
                     "show_name": show_name,
                     "show_path": show_path,
                     "season_number": season_number,
+                    "extra_episode_items": extra_episode_items,
                 }
             )
         except OSError:
             continue
-    items.sort(key=remove_tv_item_sort_key)
-    return items
+    for season_number, episode_items in loose_episode_buckets.items():
+        items.append(
+            remove_virtual_season_candidate(
+                show_candidate=show_candidate,
+                show_name=show_name,
+                season_number=season_number,
+                episode_items=episode_items,
+            )
+        )
+    return remove_merge_show_children(items)
 
 
 def remove_season_children(season_candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    if bool(season_candidate.get("is_virtual")):
+        items = [remove_enrich_candidate(dict(item)) for item in list(season_candidate.get("group_items") or [])]
+        items.sort(key=remove_tv_item_sort_key)
+        return items
     season_path = os.path.realpath(str(season_candidate.get("path") or ""))
     root_path = os.path.realpath(str(season_candidate.get("root_path") or ""))
     show_path = os.path.realpath(str(season_candidate.get("show_path") or ""))
@@ -891,6 +1056,14 @@ def remove_season_children(season_candidate: dict[str, Any]) -> list[dict[str, A
             )
         except OSError:
             continue
+    extra_items = [remove_enrich_candidate(dict(item)) for item in list(season_candidate.get("extra_episode_items") or [])]
+    if extra_items:
+        seen_paths = {remove_selected_path(item) for item in items}
+        for item in extra_items:
+            item_path = remove_selected_path(item)
+            if item_path and item_path not in seen_paths:
+                items.append(item)
+                seen_paths.add(item_path)
     items.sort(key=remove_tv_item_sort_key)
     return items
 
@@ -926,40 +1099,75 @@ def remove_group_tv_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
+def remove_group_search_candidates(candidates: list[dict[str, Any]], *, limit: int = 8) -> list[dict[str, Any]]:
+    """Collapse duplicate TV search hits into one show-level candidate."""
+    groupable_tv: list[dict[str, Any]] = []
+    passthrough: list[dict[str, Any]] = []
+    for candidate in candidates:
+        if str(candidate.get("root_key") or "") == "tv" and bool(candidate.get("is_dir")):
+            groupable_tv.append(candidate)
+        else:
+            passthrough.append(candidate)
+
+    grouped_tv = remove_group_tv_items(groupable_tv)
+    for grouped in grouped_tv:
+        group_items = list(grouped.get("group_items") or [])
+        if not group_items:
+            continue
+        grouped["size_bytes"] = sum(int(item.get("size_bytes") or 0) for item in group_items)
+        grouped["_match_score"] = max(int(item.get("_match_score") or 0) for item in group_items)
+
+    ordered = grouped_tv + passthrough
+    ordered.sort(
+        key=lambda item: (
+            int(item.get("_match_score") or 0),
+            int(item.get("size_bytes") or 0),
+            str(item.get("name") or "").lower(),
+        ),
+        reverse=True,
+    )
+    result = ordered[: max(1, limit)]
+    for item in result:
+        item.pop("_match_score", None)
+    return result
+
+
 def remove_show_group_children(group_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Aggregate all seasons / episode packs from every folder in a show group."""
     all_children: list[dict[str, Any]] = []
     for item in group_items:
         if not item.get("is_dir"):
+            show_name = str(item.get("show_name") or extract_show_name(str(item.get("name") or "")) or "Show")
             all_children.append(
-                {
-                    **item,
-                    "name": format_remove_episode_label(str(item.get("source_name") or item.get("name") or "")),
-                    "remove_kind": "episode",
-                }
+                remove_virtual_season_candidate(
+                    show_candidate={
+                        "path": str(item.get("path") or ""),
+                        "root_key": str(item.get("root_key") or "tv"),
+                        "root_label": str(item.get("root_label") or "TV"),
+                        "root_path": str(item.get("root_path") or ""),
+                    },
+                    show_name=show_name,
+                    season_number=remove_parse_episode_season_number(str(item.get("source_name") or item.get("name") or "")),
+                    episode_items=[
+                        {
+                            **item,
+                            "name": format_remove_episode_label(
+                                str(item.get("source_name") or item.get("name") or ""),
+                                int(item.get("season_number") or 0) or remove_parse_episode_season_number(
+                                    str(item.get("source_name") or item.get("name") or "")
+                                ),
+                            ),
+                            "remove_kind": "episode",
+                            "show_name": show_name,
+                            "show_path": str(item.get("path") or ""),
+                        }
+                    ],
+                )
             )
             continue
         sub = remove_show_children(item)
-        # If the folder directly contains season sub-dirs, expose those seasons
-        has_dir_children = any(c.get("is_dir") for c in sub)
-        if has_dir_children:
-            all_children.extend(sub)
-        elif sub:
-            # Download pack whose contents are plain episode files -> treat
-            # the pack folder itself as one deletable "season" unit
-            all_children.append(
-                {
-                    **item,
-                    "name": format_remove_season_label(str(item.get("name") or "Season")),
-                    "remove_kind": "season",
-                    "show_name": extract_show_name(str(item.get("name") or "")),
-                    "show_path": str(item.get("path") or ""),
-                    "season_number": extract_season_number(str(item.get("name") or "")),
-                }
-            )
-        # Empty directory -> skip
-    all_children.sort(key=remove_tv_item_sort_key)
-    return all_children
+        all_children.extend(sub)
+    return remove_merge_show_children(all_children)
 
 
 def remove_group_any_selected(flow: dict[str, Any], group_item: dict[str, Any]) -> bool:
@@ -1825,7 +2033,7 @@ async def on_cb_remove(bot_app: Any, *, data: str, q: Any, user_id: int) -> None
                 flow,
                 remove_season_actions_text(selected_child),
                 reply_markup=remove_season_action_keyboard(
-                    remove_selected_path(selected_child) in selected_paths,
+                    remove_candidate_is_selected(selected_child, selected_paths),
                     len(selected_paths),
                 ),
                 current_ui_message=q.message,
@@ -1901,7 +2109,7 @@ async def on_cb_remove(bot_app: Any, *, data: str, q: Any, user_id: int) -> None
                 flow,
                 remove_season_actions_text(selected_child),
                 reply_markup=remove_season_action_keyboard(
-                    remove_selected_path(selected_child) in selected_paths,
+                    remove_candidate_is_selected(selected_child, selected_paths),
                     len(selected_paths),
                 ),
                 current_ui_message=q.message,
@@ -1929,7 +2137,7 @@ async def on_cb_remove(bot_app: Any, *, data: str, q: Any, user_id: int) -> None
                 flow,
                 "No direct episode files were found inside that season folder.",
                 reply_markup=remove_season_action_keyboard(
-                    remove_selected_path(selected_child) in remove_selected_paths(flow),
+                    remove_candidate_is_selected(selected_child, remove_selected_paths(flow)),
                     remove_selection_count(flow),
                 ),
                 current_ui_message=q.message,
@@ -2144,7 +2352,7 @@ async def on_cb_remove(bot_app: Any, *, data: str, q: Any, user_id: int) -> None
                 flow,
                 remove_season_actions_text(selected_child),
                 reply_markup=remove_season_action_keyboard(
-                    remove_selected_path(selected_child) in selected_paths,
+                    remove_candidate_is_selected(selected_child, selected_paths),
                     len(selected_paths),
                 ),
                 current_ui_message=q.message,

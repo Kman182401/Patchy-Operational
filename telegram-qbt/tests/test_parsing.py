@@ -761,14 +761,138 @@ def test_remove_child_builders_use_clean_season_and_episode_names(tmp_path) -> N
     }
 
     season_items = BotApp._remove_show_children(DummyBot(), show_candidate)
-    assert [item["name"] for item in season_items] == ["Season 2", "S4 Episode 1"]
+    assert [item["name"] for item in season_items] == ["Season 2", "Season 4"]
     assert season_items[0]["season_number"] == 2
+    assert season_items[1]["is_virtual"] is True
     assert all(item["name"] != "Subs" for item in season_items)
 
     episode_items = BotApp._remove_season_children(DummyBot(), season_items[0])
     assert len(episode_items) == 1
     assert episode_items[0]["name"] == "S2 Episode 3"
+    assert BotApp._remove_season_children(DummyBot(), season_items[1])[0]["name"] == "S4 Episode 1"
     assert all("txt" not in item["name"].lower() for item in episode_items)
+
+
+def test_remove_show_children_groups_loose_episodes_into_season_buckets(tmp_path) -> None:
+    from patchy_bot.handlers.remove import remove_season_children, remove_show_children
+
+    show_dir = tmp_path / "Daredevil Born Again"
+    season_dir = show_dir / "Season 1"
+    season_dir.mkdir(parents=True)
+    (show_dir / "www.UIndex.org - Daredevil.Born.Again.S01E02.1080p.mkv").write_text("x")
+    (show_dir / "www.UIndex.org - Daredevil.Born.Again.S02E01.1080p.mkv").write_text("x")
+    (show_dir / "Daredevil.Born.Again.E05.1080p.mkv").write_text("x")
+
+    show_candidate = {
+        "name": "Daredevil Born Again",
+        "path": str(show_dir),
+        "root_key": "tv",
+        "root_label": "TV",
+        "root_path": str(tmp_path),
+    }
+
+    season_items = remove_show_children(show_candidate)
+
+    assert [item["name"] for item in season_items] == ["Season 1", "Season 2", "Unsorted Episodes"]
+    assert season_items[0]["is_virtual"] is False
+    assert [item["name"] for item in season_items[0]["extra_episode_items"]] == ["S1 Episode 2"]
+    assert season_items[1]["is_virtual"] is True
+    assert [item["name"] for item in remove_season_children(season_items[1])] == ["S2 Episode 1"]
+    assert [item["name"] for item in remove_season_children(season_items[2])] == ["Episode 5"]
+
+
+def test_remove_show_group_children_groups_loose_files_without_raw_names(tmp_path) -> None:
+    from patchy_bot.handlers.remove import remove_season_children, remove_show_group_children
+
+    episode_path = tmp_path / "www.UIndex.org - Daredevil.Born.Again.S02E01.1080p.mkv"
+    episode_path.write_text("x")
+    unsorted_path = tmp_path / "Daredevil.Born.Again.Special.1080p.mkv"
+    unsorted_path.write_text("x")
+
+    group_items = [
+        {
+            "name": "Daredevil Born Again",
+            "source_name": episode_path.name,
+            "path": str(episode_path),
+            "root_key": "tv",
+            "root_label": "TV",
+            "root_path": str(tmp_path),
+            "is_dir": False,
+            "size_bytes": None,
+            "remove_kind": "episode",
+            "show_name": "Daredevil Born Again",
+            "season_number": 2,
+        },
+        {
+            "name": "Daredevil Born Again",
+            "source_name": unsorted_path.name,
+            "path": str(unsorted_path),
+            "root_key": "tv",
+            "root_label": "TV",
+            "root_path": str(tmp_path),
+            "is_dir": False,
+            "size_bytes": None,
+            "remove_kind": "episode",
+            "show_name": "Daredevil Born Again",
+            "season_number": None,
+        },
+    ]
+
+    season_items = remove_show_group_children(group_items)
+
+    assert [item["name"] for item in season_items] == ["Season 2", "Unsorted Episodes"]
+    assert [item["name"] for item in remove_season_children(season_items[0])] == ["S2 Episode 1"]
+    assert "UIndex" not in remove_season_children(season_items[0])[0]["name"]
+
+
+def test_remove_virtual_season_toggle_selects_underlying_episode_files(tmp_path) -> None:
+    from patchy_bot.handlers.remove import remove_selection_items, remove_show_children, remove_toggle_candidate
+
+    show_dir = tmp_path / "Example Show"
+    show_dir.mkdir()
+    first = show_dir / "Example.Show.S02E01.1080p.mkv"
+    second = show_dir / "Example.Show.S02E02.1080p.mkv"
+    first.write_text("x")
+    second.write_text("x")
+
+    show_candidate = {
+        "name": "Example Show",
+        "path": str(show_dir),
+        "root_key": "tv",
+        "root_label": "TV",
+        "root_path": str(tmp_path),
+    }
+    virtual_season = remove_show_children(show_candidate)[0]
+    flow = {"selected_items": []}
+
+    assert remove_toggle_candidate(flow, virtual_season) is True
+    assert sorted(item["path"] for item in remove_selection_items(flow)) == sorted([str(first), str(second)])
+    assert remove_toggle_candidate(flow, virtual_season) is False
+    assert remove_selection_items(flow) == []
+
+
+def test_remove_season_detail_keyboard_marks_virtual_season_selected(tmp_path) -> None:
+    from patchy_bot.handlers.remove import remove_season_detail_keyboard, remove_show_children, remove_toggle_candidate
+
+    show_dir = tmp_path / "Example Show"
+    show_dir.mkdir()
+    episode_path = show_dir / "Example.Show.S02E03.1080p.mkv"
+    episode_path.write_text("x")
+
+    show_candidate = {
+        "name": "Example Show",
+        "path": str(show_dir),
+        "root_key": "tv",
+        "root_label": "TV",
+        "root_path": str(tmp_path),
+    }
+    virtual_season = remove_show_children(show_candidate)[0]
+    flow = {"selected_items": []}
+    remove_toggle_candidate(flow, virtual_season)
+
+    keyboard = remove_season_detail_keyboard(virtual_season, {str(episode_path)}, 0).inline_keyboard
+
+    assert keyboard[0][0].text == "✅ Season 2 Selected"
 
 
 def test_plex_refresh_for_path_uses_post_with_path_parameter(tmp_path) -> None:
@@ -1141,7 +1265,43 @@ def test_remove_library_and_search_candidates_skip_non_media_files(tmp_path) -> 
     assert [item["name"] for item in search_items] == ["S1 Episode 2"]
 
 
+def test_find_remove_candidates_groups_duplicate_tv_show_dirs(tmp_path) -> None:
+    tv_dir = tmp_path / "tv"
+    tv_dir.mkdir()
+    primary_show = tv_dir / "Daredevil Born Again"
+    pack_one = tv_dir / "Daredevil.Born.Again.S01.1080p"
+    pack_two = tv_dir / "Daredevil.Born.Again.S02.1080p"
+    (primary_show / "Season 1").mkdir(parents=True)
+    (primary_show / "Season 2").mkdir(parents=True)
+    pack_one.mkdir()
+    pack_two.mkdir()
+    (primary_show / "Season 1" / "ep1.mkv").write_text("a" * 10)
+    (primary_show / "Season 2" / "ep1.mkv").write_text("b" * 20)
+    (pack_one / "ep1.mkv").write_text("c" * 30)
+    (pack_two / "ep1.mkv").write_text("d" * 40)
+
+    cfg = SimpleNamespace(
+        movies_path="",
+        tv_path=str(tv_dir),
+        spam_path="",
+    )
+
+    class DummyBot:
+        _find_remove_candidates = BotApp._find_remove_candidates
+        _ctx = SimpleNamespace(cfg=cfg)
+
+    bot = DummyBot()
+    search_items = BotApp._find_remove_candidates(bot, "Daredevil Born Again")
+
+    assert len(search_items) == 1
+    assert search_items[0]["name"] == "Daredevil Born Again"
+    assert len(search_items[0]["group_items"]) == 3
+    assert search_items[0]["size_bytes"] == 100
+
+
 def test_remove_show_group_children_formats_direct_episode_files(tmp_path) -> None:
+    from patchy_bot.handlers.remove import remove_season_children
+
     show_file = tmp_path / "Show.Name.S01E02.1080p.mkv"
     show_file.write_text("x")
 
@@ -1163,7 +1323,8 @@ def test_remove_show_group_children_formats_direct_episode_files(tmp_path) -> No
         ],
     )
 
-    assert [item["name"] for item in grouped_children] == ["S1 Episode 2"]
+    assert [item["name"] for item in grouped_children] == ["Season 1"]
+    assert [item["name"] for item in remove_season_children(grouped_children[0])] == ["S1 Episode 2"]
 
 
 def test_extract_show_name_hides_release_group_noise_aggressively() -> None:
