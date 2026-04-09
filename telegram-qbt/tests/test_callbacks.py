@@ -219,7 +219,7 @@ async def test_cb_menu_tv_starts_flow(fake_app: FakeBotApp, query: MagicMock) ->
 async def test_cb_menu_schedule_no_tracks(
     fake_app: FakeBotApp, query: MagicMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """menu:schedule with no tracks starts the schedule flow."""
+    """menu:schedule with no tracks starts the schedule flow in schedule_ui."""
     monkeypatch.setattr("asyncio.to_thread", AsyncMock(return_value=[]))
 
     await on_cb_menu(fake_app, data="menu:schedule", q=query, user_id=USER_ID)
@@ -227,7 +227,7 @@ async def test_cb_menu_schedule_no_tracks(
     flow = fake_app.flow[USER_ID]
     assert flow["mode"] == "schedule"
     assert flow["stage"] == "await_show"
-    assert any(name == "nav_ui" for name, _, _ in fake_app.render_calls)
+    assert any(name == "schedule_ui" for name, _, _ in fake_app.render_calls)
 
 
 @pytest.mark.asyncio
@@ -251,6 +251,17 @@ async def test_cb_menu_schedule_with_tracks(
             text_arg = args[2] if len(args) > 2 else kwargs.get("text", "")
             if isinstance(text_arg, str):
                 assert "1" in text_arg  # 1 active track
+
+
+@pytest.mark.asyncio
+async def test_cb_schedule_addnew_uses_schedule_ui(fake_app: FakeBotApp, query: MagicMock) -> None:
+    """sch:addnew should remember the schedule flow message for later replacement."""
+    await on_cb_schedule(fake_app, data="sch:addnew", q=query, user_id=USER_ID)
+
+    flow = fake_app.flow[USER_ID]
+    assert flow["mode"] == "schedule"
+    assert flow["stage"] == "await_show"
+    assert any(name == "schedule_ui" for name, _, _ in fake_app.render_calls)
 
 
 @pytest.mark.asyncio

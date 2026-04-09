@@ -1005,6 +1005,7 @@ async def on_cb_menu(bot_app: Any, *, data: str, q: Any, user_id: int) -> None:
             await bot_app._render_nav_ui(user_id, q.message, text, reply_markup=kb, current_ui_message=q.message)
         else:
             bot_app._schedule_start_flow(user_id)
+            flow = bot_app._get_flow(user_id) or {"mode": "schedule", "stage": "await_show"}
             text = (
                 "<b>\u270f\ufe0f Type a show name to search</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -1012,7 +1013,7 @@ async def on_cb_menu(bot_app: Any, *, data: str, q: Any, user_id: int) -> None:
                 "<i>Example: Severance</i>"
             )
             kb = InlineKeyboardMarkup(bot_app._nav_footer(back_data="nav:home", include_home=False))
-            await bot_app._render_nav_ui(user_id, q.message, text, reply_markup=kb, current_ui_message=q.message)
+            await bot_app._render_schedule_ui(user_id, q.message, flow, text, reply_markup=kb, current_ui_message=q.message)
         return
 
     if data == "menu:remove":

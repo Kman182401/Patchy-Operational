@@ -2071,7 +2071,8 @@ async def on_cb_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> No
             "<i>Example: Severance</i>"
         )
         kb = InlineKeyboardMarkup(bot_app._nav_footer(back_data="menu:schedule", include_home=False))
-        await bot_app._render_nav_ui(user_id, q.message, text, reply_markup=kb, current_ui_message=q.message)
+        flow = bot_app._get_flow(user_id) or {"mode": "schedule", "stage": "await_show"}
+        await bot_app._render_schedule_ui(user_id, q.message, flow, text, reply_markup=kb, current_ui_message=q.message)
         return
 
     # ---- shared My Shows render helper ----------------------------------------
@@ -2129,9 +2130,7 @@ async def on_cb_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> No
             show = dict(t.get("show_json") or {})
             name = str(show.get("name") or t.get("show_name") or "Unknown")
             season = int(t.get("season") or 1)
-            if not t.get("enabled", 1):
-                return f"\u23f8 {name} S{season:02d}"
-            return f"\U0001f4fa {name} S{season:02d}"
+            return f"{name} S{season:02d}"
 
         def _cb(t: dict) -> str:
             return f"sch:sel:{t['track_id']}"
@@ -2392,9 +2391,7 @@ async def on_cb_movie_schedule(bot_app: Any, *, data: str, q: Any, user_id: int)
             title = str(t.get("title") or "Unknown")
             year = t.get("year")
             year_str = f" ({year})" if year else ""
-            if t.get("enabled", 1):
-                return f"\U0001f3ac {title}{year_str}"
-            return f"\u23f8 {title}{year_str}"
+            return f"{title}{year_str}"
 
         def _cb(t: dict) -> str:
             return f"msch:sel:{t['track_id']}"
