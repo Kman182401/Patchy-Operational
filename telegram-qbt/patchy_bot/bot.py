@@ -64,6 +64,15 @@ from .utils import (
 LOG = logging.getLogger("qbtg")
 
 
+async def _auto_delete_after(bot: Any, chat_id: int, message_id: int, delay: float = 10) -> None:
+    """Delete a message after *delay* seconds (best-effort)."""
+    await asyncio.sleep(delay)
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
+
+
 class BotApp:
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -728,12 +737,8 @@ class BotApp:
     ) -> list[list[InlineKeyboardButton]]:
         return kb_mod.compact_action_rows(rows, max_buttons=max_buttons, columns=columns)
 
-    def _active_download_tuples(self) -> list[tuple[str, str]]:
-        """Return ``(hash, clean_name)`` for each active download (up to 10)."""
-        try:
-            items = self.qbt.list_torrents(filter_name="all", limit=20)
-        except Exception:
-            return []
+    def _active_download_tuples_from(self, items: list) -> list[tuple[str, str]]:
+        """Return ``(hash, clean_name)`` for each active download (up to 10) from a pre-fetched list."""
         active = [t for t in items if str(t.get("state") or "") in _ACTIVE_DL_STATES]
         result: list[tuple[str, str]] = []
         for t in active[:10]:
@@ -744,6 +749,14 @@ class BotApp:
             if h:
                 result.append((h, clean_name))
         return result
+
+    def _active_download_tuples(self) -> list[tuple[str, str]]:
+        """Return ``(hash, clean_name)`` for each active download (up to 10)."""
+        try:
+            items = self.qbt.list_torrents(filter_name="all", limit=20)
+        except Exception:
+            return []
+        return self._active_download_tuples_from(items)
 
     def _command_center_keyboard(self) -> InlineKeyboardMarkup:
         return kb_mod.command_center_keyboard(active_downloads=self._active_download_tuples())
@@ -826,11 +839,8 @@ class BotApp:
             return show
         return self._extract_movie_name(name)
 
-    def _active_downloads_section(self) -> str:
-        try:
-            items = self.qbt.list_torrents(filter_name="all", limit=20)
-        except Exception:
-            return ""
+    def _active_downloads_section_from(self, items: list) -> str:
+        """Build the Active Downloads text block from a pre-fetched torrent list."""
         active = [t for t in items if str(t.get("state") or "") in _ACTIVE_DL_STATES]
         if not active:
             return ""
@@ -841,8 +851,15 @@ class BotApp:
             clean_name = self._clean_download_name(raw_name, category)
             pct = max(0.0, min(100.0, float(t.get("progress", 0.0) or 0.0) * 100.0))
             bar = self._progress_bar(pct, width=14)
-            lines.append(f"<code>[{bar}] {pct:.0f}%</code>  {_h(clean_name)}")
+            lines.append(f"<code>[{bar}] {pct:.1f}%</code>  {_h(clean_name)}")
         return "\n".join(lines) + "\n"
+
+    def _active_downloads_section(self) -> str:
+        try:
+            items = self.qbt.list_torrents(filter_name="all", limit=20)
+        except Exception:
+            return ""
+        return self._active_downloads_section_from(items)
 
     def _start_text(self, storage_ok: bool, storage_reason: str) -> str:
         vpn_ok, vpn_reason = self._vpn_ready_for_download()
@@ -927,9 +944,10 @@ class BotApp:
             last_text = ""
             last_dl_hashes: list[str] = []
             error_streak = 0
+            idle_count = 0
             MAX_CONSECUTIVE_ERRORS = 5
             while True:
-                await asyncio.sleep(5)
+                await asyncio.sleep(3)
                 remembered = self.user_nav_ui.get(user_id)
                 if not remembered:
                     break
@@ -938,13 +956,32 @@ class BotApp:
                 if flow:
                     break
                 ok, reason = await asyncio.to_thread(self._ensure_media_categories)
-                text = await asyncio.to_thread(self._start_text, ok, reason)
-                dl_tuples = await asyncio.to_thread(self._active_download_tuples)
+                # Single qBT API call — both text and keyboard use the same result
+                try:
+                    torrent_items = await asyncio.to_thread(self.qbt.list_torrents, filter_name="all", limit=20)
+                except Exception:
+                    torrent_items = []
+                dl_tuples = self._active_download_tuples_from(torrent_items)
                 dl_hashes = [h for h, _ in dl_tuples]
+                dl_section = self._active_downloads_section_from(torrent_items)
+                vpn_ok, vpn_reason = await asyncio.to_thread(self._vpn_ready_for_download)
+                storage_usage = await asyncio.to_thread(self._plex_storage_display)
+                text = text_mod.start_text(
+                    ok,
+                    reason,
+                    storage_usage=storage_usage,
+                    vpn_ok=vpn_ok,
+                    vpn_reason=vpn_reason,
+                    downloads=dl_section,
+                )
                 if text == last_text and dl_hashes == last_dl_hashes:
                     if not dl_hashes:
-                        break
+                        idle_count += 1
+                        if idle_count >= 4:
+                            break
+                        await asyncio.sleep(12)  # slow poll when idle, no active downloads
                     continue
+                idle_count = 0
                 last_text = text
                 last_dl_hashes = dl_hashes
                 kb = kb_mod.command_center_keyboard(active_downloads=dl_tuples)
@@ -1977,6 +2014,12 @@ class BotApp:
         try:
             notif_msg = await self.app.bot.send_message(chat_id=chat_id, text=text, parse_mode=_PM)
             self._track_ephemeral_message(user_id, notif_msg)
+            _del = asyncio.create_task(
+                _auto_delete_after(self.app.bot, chat_id, notif_msg.message_id),
+                name=f"auto-delete:{chat_id}:{notif_msg.message_id}",
+            )
+            self._ctx.background_tasks.add(_del)
+            _del.add_done_callback(self._ctx.background_tasks.discard)
             torrent_hash = result.get("hash")
             if torrent_hash:
                 tracker_msg = await self.app.bot.send_message(
@@ -2253,16 +2296,11 @@ class BotApp:
             dates = await asyncio.to_thread(self._ctx.tvmeta.get_movie_home_release, tmdb_id, self.cfg.tmdb_region)
         except Exception as e:
             LOG.warning("Movie release gate TMDB check failed for %s: %s", track_id, e)
-            # Update last check time so we don't hammer TMDB
+            # Short backoff (15 min) instead of full interval — don't write stale data
             await asyncio.to_thread(
-                self.store.update_movie_release_dates,
+                self.store.update_movie_track_next_check,
                 track_id,
-                track.get("theatrical_ts"),
-                track.get("digital_ts"),
-                track.get("physical_ts"),
-                track.get("home_release_ts"),
-                bool(track.get("digital_estimated")),
-                release_status,
+                now_ts() + 900,  # 15-minute retry
             )
             return release_status not in (
                 MovieReleaseStatus.PRE_THEATRICAL,
@@ -2499,10 +2537,43 @@ class BotApp:
                     break
         except Exception as e:
             LOG.warning("Movie Plex check failed for %s: %s", track_id, e)
+            failures = await asyncio.to_thread(self.store.increment_movie_plex_failures, track_id)
+            if failures >= 50:
+                LOG.warning("Movie track %s: too many Plex check failures (%d), removing", track_id, failures)
+                user_id = int(track.get("user_id") or 0)
+                if self.app and user_id:
+                    try:
+                        await self.app.bot.send_message(
+                            chat_id=user_id,
+                            text=(
+                                f"⚠️ <b>{_h(title)}</b>"
+                                f"{f' ({year})' if year else ''}"
+                                f" — gave up checking Plex after {failures} failures. "
+                                f"Please check manually."
+                            ),
+                            parse_mode=_PM,
+                        )
+                    except Exception:
+                        pass
+                await asyncio.to_thread(self.store.delete_movie_track, track_id)
             return
+
+        # Plex check succeeded — reset transient failure counter
+        if track.get("plex_check_failures", 0) > 0:
+            await asyncio.to_thread(self.store.reset_movie_plex_failures, track_id)
 
         if in_plex:
             LOG.info("Movie track complete, in Plex: %s (%s)", title, year)
+            user_id = int(track.get("user_id") or 0)
+            if self.app and user_id:
+                try:
+                    await self.app.bot.send_message(
+                        chat_id=user_id,
+                        text=(f"🎬 <b>{_h(title)}</b>{f' ({year})' if year else ''} is now available in Plex!"),
+                        parse_mode=_PM,
+                    )
+                except Exception:
+                    LOG.warning("Failed to send movie completion notification", exc_info=True)
             await asyncio.to_thread(self.store.delete_movie_track, track_id)
 
     # ------------------------------------------------------------------
@@ -2647,11 +2718,16 @@ class BotApp:
             sent = await self.app.bot.send_message(
                 chat_id=chat_id,
                 text=text,
-                reply_markup=self._schedule_missing_keyboard(str(track.get("track_id") or "")),
                 parse_mode=_PM,
             )
             user_id = int(track.get("user_id") or chat_id)
             self._track_ephemeral_message(user_id, sent)
+            _del = asyncio.create_task(
+                _auto_delete_after(self.app.bot, chat_id, sent.message_id),
+                name=f"auto-delete:{chat_id}:{sent.message_id}",
+            )
+            self._ctx.background_tasks.add(_del)
+            _del.add_done_callback(self._ctx.background_tasks.discard)
         except TelegramError as e:
             LOG.warning("Schedule notify_missing failed for track %s: %s", track.get("track_id"), e)
         # Always update signature so we don't re-send the same notification

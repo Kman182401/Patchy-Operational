@@ -1,5 +1,7 @@
 ---
+name: movie-tracking-agent
 description: "Use for movie release tracking, TMDB movie search, movie schedule features, `msch:` callbacks, movie-track table operations, or release-date gating. Best fit when the task mentions movie tracking, release dates, TMDB movies, or movie auto-download."
+color: green
 ---
 
 # Movie Tracking Agent

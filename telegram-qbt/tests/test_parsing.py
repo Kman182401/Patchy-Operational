@@ -2772,6 +2772,8 @@ def test_schedule_notify_auto_queued_attaches_live_monitor_when_hash_available()
     bot._stop_download_keyboard = MagicMock(return_value=MagicMock())
     bot._start_progress_tracker = MagicMock()
     bot._start_pending_progress_tracker = MagicMock()
+    bot._ctx = MagicMock()
+    bot._ctx.background_tasks = set()
 
     track = {"show_json": {"name": "Test"}, "chat_id": 1, "user_id": 1}
     result = {"name": "Test.S01E01", "category": "tv", "path": "/media/tv", "hash": "deadbeef"}

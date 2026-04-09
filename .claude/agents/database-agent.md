@@ -1,5 +1,7 @@
 ---
+name: database-agent
 description: "Use for SQLite database work, `Store`, table schemas, migrations, CRUD methods, backup operations, or data integrity. Best fit when the task mentions database state, store logic, tables, queries, migrations, or live SQLite inspection."
+color: blue
 ---
 
 # Database Agent

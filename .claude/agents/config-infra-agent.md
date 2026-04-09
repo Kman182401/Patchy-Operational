@@ -1,5 +1,7 @@
 ---
+name: config-infra-agent
 description: "Use for configuration, environment variables, startup flow, systemd service management, logging, `.env.example`, VPN settings, dependency management, or deployment configuration. Best fit when the task mentions config, env vars, startup, service, systemd, logs, or deployment."
+color: blue
 ---
 
 # Config & Infrastructure Agent

@@ -1,6 +1,8 @@
 ---
+name: taskmaster-sync-agent
 description: "Use when the user wants Task Master updated to reflect completed work, status corrections, or task accuracy. Best fit when the user says 'update tasks', 'sync taskmaster', 'mark done', or asks for Task Master reconciliation."
 tools: Read, Bash, Grep, Glob
+color: cyan
 ---
 
 # Taskmaster Sync Agent

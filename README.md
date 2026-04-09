@@ -38,4 +38,4 @@ Claude Code should treat the project-local skill set as the primary guidance for
 - Conditional Patchy skills: `telegram-ux-architect`, `telegram-chat-polisher`, `env-check`, `test-bot`, `restart`, `check-logs`, `db-inspect`, `debug-schedule`, `sync-parity`
 - Manual only: `gh-issues-auto-fixer`
 
-Do not preload or “always use” the giant `skills/global/` library. Use it only as backup reference when the project-local skills do not cover the task.
+Do not preload or “always use” any mirrored global skill library in this repo. Use the curated project-local skills for this project.

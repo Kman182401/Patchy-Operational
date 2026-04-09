@@ -1,7 +1,4 @@
 {
-  "env": {
-    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
-  },
   "permissions": {
     "defaultMode": "bypassPermissions",
     "allow": [
@@ -25,21 +22,39 @@
     ]
   },
   "respectGitignore": true,
-  "alwaysThinkingEnabled": true,
+  "alwaysThinkingEnabled": false,
+  "model": "sonnet",
+  "enabledPlugins": {
+    "pyright-lsp@claude-plugins-official": true,
+    "semgrep@claude-plugins-official": true,
+    "context7@claude-plugins-official": true,
+    "playwright@claude-plugins-official": false,
+    "chrome-devtools-mcp@claude-plugins-official": false
+  },
   "hooks": {
-    "SubagentStop": [
+    "PreToolUse": [
       {
+        "matcher": "Bash",
         "hooks": [
           {
             "type": "command",
-            "command": "if find /home/karson/Patchy_Bot/telegram-qbt/patchy_bot /home/karson/Patchy_Bot/telegram-qbt/tests -name '*.py' -mmin -2 2>/dev/null | grep -q .; then cd /home/karson/Patchy_Bot/telegram-qbt && .venv/bin/python -m pytest tests/ -q --tb=short 2>&1 | tail -20; fi"
+            "command": "bash /home/karson/Patchy_Bot/.claude/hooks/pre-bash-guard.sh"
           }
         ]
       }
     ],
     "PostToolUse": [
       {
-        "matcher": "",
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/karson/Patchy_Bot/.claude/hooks/post-edit-format.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|Bash",
         "hooks": [
           {
             "type": "command",
@@ -55,6 +70,17 @@
           {
             "type": "command",
             "command": "bash /home/karson/Patchy_Bot/.claude/hooks/session-finalizer.sh"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/karson/Patchy_Bot/.claude/hooks/auto-approve.sh",
+            "statusMessage": "Auto-approving..."
           }
         ]
       }

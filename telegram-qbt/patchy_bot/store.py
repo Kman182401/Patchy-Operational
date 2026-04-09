@@ -288,6 +288,19 @@ class Store:
             conn.execute("ALTER TABLE movie_tracks ADD COLUMN last_release_check_ts INTEGER")
         if "enabled" not in mt_cols:
             conn.execute("ALTER TABLE movie_tracks ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1")
+        if "plex_check_failures" not in mt_cols:
+            try:
+                conn.execute("ALTER TABLE movie_tracks ADD COLUMN plex_check_failures INTEGER NOT NULL DEFAULT 0")
+            except Exception:
+                pass
+
+        # ---- unique constraint: one track per (user_id, tmdb_id) ----
+        # Deduplicate first so the index creation succeeds on existing installs
+        conn.execute(
+            "DELETE FROM movie_tracks WHERE rowid NOT IN "
+            "(SELECT MIN(rowid) FROM movie_tracks GROUP BY user_id, tmdb_id)"
+        )
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_movie_tracks_user_tmdb ON movie_tracks(user_id, tmdb_id)")
 
         conn.execute("PRAGMA optimize;")
         conn.commit()
@@ -1340,7 +1353,8 @@ class Store:
             conn = self._conn
             rows = conn.execute(
                 "SELECT * FROM movie_tracks WHERE status = 'pending' AND enabled = 1 AND release_date_ts <= ? "
-                "AND (next_check_ts IS NULL OR next_check_ts <= ?)",
+                "AND (next_check_ts IS NULL OR next_check_ts <= ?) "
+                "ORDER BY next_check_ts ASC NULLS FIRST LIMIT 3",
                 (now_value, now_value),
             ).fetchall()
             return [dict(row) for row in rows]
@@ -1395,6 +1409,35 @@ class Store:
             conn.execute(f"UPDATE movie_tracks SET {', '.join(parts)} WHERE track_id = ?", values)
             conn.commit()
 
+    def increment_movie_plex_failures(self, track_id: str) -> int:
+        """Increment plex_check_failures counter, return new value."""
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
+            conn.execute(
+                "UPDATE movie_tracks SET plex_check_failures = plex_check_failures + 1 WHERE track_id = ?",
+                (track_id,),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT plex_check_failures FROM movie_tracks WHERE track_id = ?",
+                (track_id,),
+            ).fetchone()
+            return int(row[0]) if row else 0
+
+    def reset_movie_plex_failures(self, track_id: str) -> None:
+        """Reset plex_check_failures counter to 0 after a successful check."""
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
+            conn.execute(
+                "UPDATE movie_tracks SET plex_check_failures = 0 WHERE track_id = ? AND plex_check_failures > 0",
+                (track_id,),
+            )
+            conn.commit()
+
     def delete_movie_track(self, track_id: str) -> None:
         with self._lock:
             if self._closed:
@@ -1445,6 +1488,18 @@ class Store:
                     now_ts(),
                     track_id,
                 ),
+            )
+            conn.commit()
+
+    def update_movie_track_next_check(self, track_id: str, next_check_ts: int) -> None:
+        """Update only next_check_ts for a movie track (used for short backoffs)."""
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
+            conn.execute(
+                "UPDATE movie_tracks SET next_check_ts = ? WHERE track_id = ?",
+                (next_check_ts, track_id),
             )
             conn.commit()
 

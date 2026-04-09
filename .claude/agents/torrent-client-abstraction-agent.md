@@ -1,5 +1,7 @@
 ---
+name: torrent-client-abstraction-agent
 description: "Use for torrent client abstraction, Transmission/rTorrent support planning, torrent client interface design, or multi-client architecture. Best fit when the task mentions torrent client abstraction, alternative torrent clients, or client interface design."
+color: green
 ---
 
 # Torrent Client Abstraction Agent

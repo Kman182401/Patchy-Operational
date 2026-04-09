@@ -1,5 +1,7 @@
 ---
+name: plex-agent
 description: "Use for Plex integration, `PlexInventoryClient`, media organization, library scans, trash cleanup, post-download Plex refresh, schedule inventory probes, or Plex cleanup after deletion. Best fit when the task mentions Plex, media library state, scans, organizing files for Plex, XML API behavior, or Plex metadata/path matching."
+color: green
 ---
 
 # Plex Agent

@@ -46,6 +46,15 @@ class No1080pError(Exception):
 LOG = logging.getLogger("qbtg")
 
 
+async def _auto_delete_after(bot: Any, chat_id: int, message_id: int, delay: float = 10) -> None:
+    """Delete a message after *delay* seconds (best-effort)."""
+    await asyncio.sleep(delay)
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Runner interval constants
 # ---------------------------------------------------------------------------
@@ -1464,11 +1473,16 @@ async def schedule_notify_missing(
         sent = await ctx.app.bot.send_message(
             chat_id=chat_id,
             text=text,
-            reply_markup=schedule_missing_keyboard(str(track.get("track_id") or ""), nav_footer_fn),
             parse_mode=_PM,
         )
         user_id = int(track.get("user_id") or chat_id)
         track_ephemeral_message_fn(user_id, sent)
+        _del = asyncio.create_task(
+            _auto_delete_after(ctx.app.bot, chat_id, sent.message_id),
+            name=f"auto-delete:{chat_id}:{sent.message_id}",
+        )
+        ctx.background_tasks.add(_del)
+        _del.add_done_callback(ctx.background_tasks.discard)
     except TelegramError as e:
         LOG.warning("Schedule notify_missing failed for track %s: %s", track.get("track_id"), e)
     store_probe = dict(probe)
@@ -1524,6 +1538,12 @@ async def schedule_notify_auto_queued(
     try:
         notif_msg = await ctx.app.bot.send_message(chat_id=chat_id, text=text, parse_mode=_PM)
         track_ephemeral_message_fn(user_id, notif_msg)
+        _del = asyncio.create_task(
+            _auto_delete_after(ctx.app.bot, chat_id, notif_msg.message_id),
+            name=f"auto-delete:{chat_id}:{notif_msg.message_id}",
+        )
+        ctx.background_tasks.add(_del)
+        _del.add_done_callback(ctx.background_tasks.discard)
         torrent_hash = result.get("hash")
         if torrent_hash:
             tracker_msg = await ctx.app.bot.send_message(
@@ -1576,6 +1596,12 @@ async def schedule_notify_no_1080p(
     try:
         sent = await ctx.app.bot.send_message(chat_id=chat_id, text=text, parse_mode=_PM)
         track_ephemeral_message_fn(user_id, sent)
+        _del = asyncio.create_task(
+            _auto_delete_after(ctx.app.bot, chat_id, sent.message_id),
+            name=f"auto-delete:{chat_id}:{sent.message_id}",
+        )
+        ctx.background_tasks.add(_del)
+        _del.add_done_callback(ctx.background_tasks.discard)
     except Exception:
         LOG.warning("schedule_notify_no_1080p failed for track %s", track.get("track_id"), exc_info=True)
 

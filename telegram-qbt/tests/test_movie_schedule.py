@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from datetime import UTC
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from patchy_bot.clients.tv_metadata import MovieReleaseStatus, TVMetadataClient
+from patchy_bot.handlers.schedule import on_cb_movie_schedule
 from patchy_bot.store import Store
+from patchy_bot.types import HandlerContext
 from patchy_bot.utils import now_ts
 
 # ---------------------------------------------------------------------------
@@ -500,3 +502,328 @@ class TestReleaseGateStore:
         due = store.get_movies_due_release_check(now_ts() + 7200, 0)
         tids = [t["track_id"] for t in due]
         assert tid not in tids
+
+
+# ---------------------------------------------------------------------------
+# Callback flow tests — TestMovieScheduleCallbacks
+# ---------------------------------------------------------------------------
+
+# Reuse FakeBotApp pattern from test_callbacks.py — minimal stand-in that
+# records render calls and exposes the flow dict.
+
+
+class FakeBotApp:
+    """Minimal BotApp stand-in for testing msch:* callback handlers."""
+
+    def __init__(self, ctx: HandlerContext) -> None:
+        self._ctx = ctx
+        self.store = ctx.store
+        self.cfg = ctx.cfg
+        self.qbt = ctx.qbt
+        self.plex = ctx.plex
+        self.flow: dict[int, dict[str, Any]] = {}
+        self.render_calls: list[tuple[str, tuple, dict]] = []
+        # Wire render/navigate helpers onto ctx so handlers can call them.
+        ctx.render_command_center = self._render_command_center
+        ctx.navigate_to_command_center = self._navigate_to_command_center
+
+    # -- Flow management --
+
+    def _set_flow(self, user_id: int, flow: dict[str, Any]) -> None:
+        self.flow[user_id] = flow
+
+    def _get_flow(self, user_id: int) -> dict[str, Any] | None:
+        return self.flow.get(user_id)
+
+    def _clear_flow(self, user_id: int) -> None:
+        self.flow.pop(user_id, None)
+
+    def _cancel_pending_trackers_for_user(self, user_id: int) -> None:
+        pass
+
+    # -- Render stubs (record every call) --
+
+    async def _render_schedule_ui(self, *args: Any, **kwargs: Any) -> MagicMock:
+        self.render_calls.append(("schedule_ui", args, kwargs))
+        m = MagicMock()
+        m.chat_id = 12345
+        m.message_id = 1
+        return m
+
+    async def _render_nav_ui(self, *args: Any, **kwargs: Any) -> MagicMock:
+        self.render_calls.append(("nav_ui", args, kwargs))
+        m = MagicMock()
+        m.chat_id = 12345
+        m.message_id = 1
+        return m
+
+    async def _render_command_center(self, *args: Any, **kwargs: Any) -> None:
+        self.render_calls.append(("command_center", args, kwargs))
+
+    async def _navigate_to_command_center(self, msg: Any, user_id: int, **kwargs: Any) -> None:
+        self.render_calls.append(("command_center", (msg,), {"user_id": user_id, **kwargs}))
+
+    async def _cleanup_private_user_message(self, msg: Any) -> None:
+        pass
+
+    # -- Keyboard/footer helpers --
+
+    def _nav_footer(self, **kwargs: Any) -> list[list[Any]]:
+        return [[]]
+
+    def _home_only_keyboard(self) -> MagicMock:
+        return MagicMock()
+
+
+@pytest.fixture
+def fake_app(mock_ctx: HandlerContext) -> FakeBotApp:
+    return FakeBotApp(mock_ctx)
+
+
+@pytest.fixture
+def query() -> MagicMock:
+    """Mock Telegram CallbackQuery."""
+    q = MagicMock()
+    q.data = "msch:add"
+    q.answer = AsyncMock()
+    reply_msg = MagicMock()
+    reply_msg.chat_id = 12345
+    reply_msg.message_id = 999
+    q.message = MagicMock()
+    q.message.edit_text = AsyncMock()
+    q.message.reply_text = AsyncMock(return_value=reply_msg)
+    q.message.delete = AsyncMock()
+    q.message.chat_id = 12345
+    q.message.message_id = 100
+    q.message.get_bot = MagicMock(return_value=MagicMock())
+    return q
+
+
+@pytest.fixture
+def msg() -> MagicMock:
+    """Mock Telegram Message for on_text_movie_schedule."""
+    m = MagicMock()
+    m.from_user = MagicMock()
+    m.from_user.id = 12345
+    reply_msg = MagicMock()
+    reply_msg.chat_id = 12345
+    reply_msg.message_id = 999
+    m.reply_text = AsyncMock(return_value=reply_msg)
+    m.edit_text = AsyncMock()
+    m.delete = AsyncMock()
+    m.chat_id = 12345
+    m.message_id = 100
+    return m
+
+
+USER_ID = 12345
+
+
+class TestMovieScheduleCallbacks:
+    @pytest.mark.asyncio
+    async def test_msch_add_prompts_for_title(self, fake_app: FakeBotApp, query: MagicMock) -> None:
+        """msch:add sets flow to msch_add/title and renders schedule UI."""
+        await on_cb_movie_schedule(fake_app, data="msch:add", q=query, user_id=USER_ID)
+
+        flow = fake_app._get_flow(USER_ID)
+        assert flow is not None
+        assert flow["mode"] == "msch_add"
+        assert flow["stage"] == "title"
+        assert any(name == "schedule_ui" for name, _, _ in fake_app.render_calls)
+        # The rendered text should ask the user to enter a movie name
+        rendered_texts = [
+            args[3] for name, args, kwargs in fake_app.render_calls if name == "schedule_ui" and len(args) > 3
+        ]
+        assert any("Enter the name of the movie" in t for t in rendered_texts)
+
+    @pytest.mark.asyncio
+    async def test_msch_pick_stores_selection(
+        self,
+        fake_app: FakeBotApp,
+        query: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """msch:pick:<tmdb_id> stores tmdb_id and title in flow and advances stage."""
+        # Seed flow with candidates
+        fake_app._set_flow(
+            USER_ID,
+            {
+                "mode": "msch_add",
+                "stage": "title",
+                "candidates": [
+                    {"tmdb_id": 42, "title": "Inception", "year": 2010},
+                ],
+            },
+        )
+        # get_movie_release_dates returns digital date
+        release_dates = {"digital": 1_700_000_000}
+        monkeypatch.setattr(
+            "patchy_bot.handlers.schedule.asyncio.to_thread",
+            AsyncMock(return_value=release_dates),
+        )
+
+        await on_cb_movie_schedule(fake_app, data="msch:pick:42", q=query, user_id=USER_ID)
+
+        flow = fake_app._get_flow(USER_ID)
+        assert flow is not None
+        assert flow["tmdb_id"] == 42
+        assert flow["title"] == "Inception"
+        assert flow["year"] == 2010
+        assert flow["stage"] == "pick_date"
+        assert any(name == "schedule_ui" for name, _, _ in fake_app.render_calls)
+
+    @pytest.mark.asyncio
+    async def test_msch_date_stores_release_type(
+        self,
+        fake_app: FakeBotApp,
+        query: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """msch:date:<tmdb_id>:<type> stores date_type and advances to confirm_date."""
+        fake_app._set_flow(
+            USER_ID,
+            {
+                "mode": "msch_add",
+                "stage": "pick_date",
+                "tmdb_id": 42,
+                "title": "Inception",
+                "year": 2010,
+                "release_dates": {"digital": 1_700_000_000},
+            },
+        )
+        # to_thread: first call = movie_track_exists_for_tmdb (False), second = plex._sections
+        call_count = 0
+
+        async def fake_to_thread(fn, *args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return False  # movie_track_exists_for_tmdb
+            return []  # plex._sections fallback
+
+        monkeypatch.setattr("patchy_bot.handlers.schedule.asyncio.to_thread", fake_to_thread)
+        # Plex not ready so sections won't be called
+        fake_app.plex.ready.return_value = False
+
+        await on_cb_movie_schedule(fake_app, data="msch:date:42:digital", q=query, user_id=USER_ID)
+
+        flow = fake_app._get_flow(USER_ID)
+        assert flow is not None
+        assert flow["date_type"] == "digital"
+        assert flow["release_date_ts"] == 1_700_000_000
+        assert flow["stage"] == "confirm_date"
+        assert any(name == "schedule_ui" for name, _, _ in fake_app.render_calls)
+
+    @pytest.mark.asyncio
+    async def test_msch_confirm_creates_track(
+        self,
+        fake_app: FakeBotApp,
+        query: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """msch:confirm creates a movie_track row in the store and clears flow."""
+        fake_app._set_flow(
+            USER_ID,
+            {
+                "mode": "msch_add",
+                "stage": "confirm_date",
+                "tmdb_id": 99,
+                "title": "Dune Part Two",
+                "year": 2024,
+                "date_type": "digital",
+                "release_date_ts": 1_710_000_000,
+            },
+        )
+
+        # Let to_thread run the real store calls
+        async def passthrough(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        monkeypatch.setattr("patchy_bot.handlers.schedule.asyncio.to_thread", passthrough)
+
+        await on_cb_movie_schedule(fake_app, data="msch:confirm:99:digital", q=query, user_id=USER_ID)
+
+        # Flow should be cleared after confirm
+        assert fake_app._get_flow(USER_ID) is None
+        # Store should now have the track
+        tracks = fake_app.store.get_movie_tracks_for_user(USER_ID)
+        assert len(tracks) == 1
+        assert tracks[0]["tmdb_id"] == 99
+        assert tracks[0]["title"] == "Dune Part Two"
+        assert tracks[0]["release_date_type"] == "digital"
+        # nav_ui rendered with confirmation message
+        assert any(name == "nav_ui" for name, _, _ in fake_app.render_calls)
+
+    @pytest.mark.asyncio
+    async def test_msch_confirm_duplicate_rejected(
+        self,
+        fake_app: FakeBotApp,
+        query: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """msch:date shows 'already tracked' and clears flow when the movie is a duplicate."""
+        # Pre-create the track so it already exists
+        fake_app.store.create_movie_track(
+            USER_ID, 77, "Already Tracked", 2023, "theatrical", 1_700_000_000, "Already Tracked 2023"
+        )
+        fake_app._set_flow(
+            USER_ID,
+            {
+                "mode": "msch_add",
+                "stage": "pick_date",
+                "tmdb_id": 77,
+                "title": "Already Tracked",
+                "year": 2023,
+                "release_dates": {"theatrical": 1_700_000_000},
+            },
+        )
+
+        async def passthrough(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        monkeypatch.setattr("patchy_bot.handlers.schedule.asyncio.to_thread", passthrough)
+        fake_app.plex.ready.return_value = False
+
+        await on_cb_movie_schedule(fake_app, data="msch:date:77:theatrical", q=query, user_id=USER_ID)
+
+        # Flow should be cleared
+        assert fake_app._get_flow(USER_ID) is None
+        # nav_ui rendered with "already being tracked" message
+        assert any(name == "nav_ui" for name, _, _ in fake_app.render_calls)
+        nav_texts = [args[2] for name, args, kwargs in fake_app.render_calls if name == "nav_ui" and len(args) > 2]
+        assert any("already being tracked" in t for t in nav_texts)
+
+    @pytest.mark.asyncio
+    async def test_html_escape_in_movie_title(
+        self,
+        fake_app: FakeBotApp,
+        query: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Titles containing < and > must be HTML-escaped in rendered messages."""
+        fake_app._set_flow(
+            USER_ID,
+            {
+                "mode": "msch_add",
+                "stage": "confirm_date",
+                "tmdb_id": 55,
+                "title": "Movie <Special> & Co",
+                "year": 2025,
+                "date_type": "digital",
+                "release_date_ts": 1_800_000_000,
+            },
+        )
+
+        async def passthrough(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        monkeypatch.setattr("patchy_bot.handlers.schedule.asyncio.to_thread", passthrough)
+
+        await on_cb_movie_schedule(fake_app, data="msch:confirm:55:digital", q=query, user_id=USER_ID)
+
+        # Collect all text args sent to nav_ui
+        nav_texts = [args[2] for name, args, kwargs in fake_app.render_calls if name == "nav_ui" and len(args) > 2]
+        combined = " ".join(nav_texts)
+        # Raw < and > must NOT appear; escaped forms must be present
+        assert "<Special>" not in combined
+        assert "&lt;Special&gt;" in combined

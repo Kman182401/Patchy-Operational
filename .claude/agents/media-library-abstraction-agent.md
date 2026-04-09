@@ -1,5 +1,7 @@
 ---
+name: media-library-abstraction-agent
 description: "Use for media library abstraction, Jellyfin/Emby support planning, media library interface design, or multi-library architecture. Best fit when the task mentions Jellyfin, Emby, media library abstraction, or library interface design."
+color: green
 ---
 
 # Media Library Abstraction Agent
