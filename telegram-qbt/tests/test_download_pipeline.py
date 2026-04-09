@@ -226,6 +226,61 @@ class TestDoAddTimeouts:
         assert result["hash"] == torrent_hash
 
     @pytest.mark.asyncio
+    async def test_do_add_direct_torrent_blocks_suspicious_file_list(self, mock_ctx, monkeypatch):
+        rows = [
+            {
+                "name": "Bad.Movie.2024.1080p",
+                "size": 2_000_000_000,
+                "seeds": 50,
+                "url": "https://tracker.invalid/download/bad.torrent",
+            }
+        ]
+        search_id = mock_ctx.store.save_search(12345, "Bad Movie 2024", {"sort": "quality"}, rows)
+
+        monkeypatch.setattr("patchy_bot.handlers.download.ensure_media_categories", lambda ctx: (True, "ready"))
+        monkeypatch.setattr("patchy_bot.handlers.download.qbt_transport_status", lambda ctx: (True, "ok"))
+        monkeypatch.setattr("patchy_bot.handlers.download.vpn_ready_for_download", lambda ctx: (True, "ok"))
+        mock_ctx.qbt.get_torrent_files = MagicMock(return_value=[{"name": "Bad.Movie.mkv"}, {"name": "setup.exe"}])
+
+        async def _fake_resolve(ctx, title, category, wait_s=20):
+            return "a" * 40
+
+        monkeypatch.setattr("patchy_bot.handlers.download.resolve_hash_by_name", _fake_resolve)
+
+        with pytest.raises(RuntimeError, match="suspicious content detected"):
+            await do_add(mock_ctx, 12345, search_id, 1, "movies")
+
+        mock_ctx.qbt.delete_torrent.assert_called_once_with("a" * 40, delete_files=True)
+
+    @pytest.mark.asyncio
+    async def test_do_add_direct_torrent_resumes_after_clean_file_inspection(self, mock_ctx, monkeypatch):
+        rows = [
+            {
+                "name": "Clean.Movie.2024.1080p",
+                "size": 2_000_000_000,
+                "seeds": 50,
+                "url": "https://tracker.invalid/download/clean.torrent",
+                "uploader": "TrustedUploader",
+            }
+        ]
+        search_id = mock_ctx.store.save_search(12345, "Clean Movie 2024", {"sort": "quality"}, rows)
+
+        monkeypatch.setattr("patchy_bot.handlers.download.ensure_media_categories", lambda ctx: (True, "ready"))
+        monkeypatch.setattr("patchy_bot.handlers.download.qbt_transport_status", lambda ctx: (True, "ok"))
+        monkeypatch.setattr("patchy_bot.handlers.download.vpn_ready_for_download", lambda ctx: (True, "ok"))
+        mock_ctx.qbt.get_torrent_files = MagicMock(return_value=[{"name": "Clean.Movie.2024.1080p.mkv"}])
+
+        async def _fake_resolve(ctx, title, category, wait_s=20):
+            return "b" * 40
+
+        monkeypatch.setattr("patchy_bot.handlers.download.resolve_hash_by_name", _fake_resolve)
+
+        result = await do_add(mock_ctx, 12345, search_id, 1, "movies")
+
+        assert result["hash"] == "b" * 40
+        mock_ctx.qbt.resume_torrents.assert_called_once_with("b" * 40)
+
+    @pytest.mark.asyncio
     async def test_do_add_invalid_media_choice(self, mock_ctx):
         """do_add raises RuntimeError for unrecognized media type strings."""
         search_id = _save_search_with_hash(mock_ctx.store, 12345, "a" * 40)
@@ -717,6 +772,10 @@ class TestCompletionPollerJob:
         yield
         dl._poller_seen_hashes.clear()
 
+    @pytest.fixture(autouse=True)
+    def _default_clean_scan(self, monkeypatch):
+        monkeypatch.setattr("patchy_bot.handlers.download._run_clamav_scan", lambda path, timeout_s: ("clean", []))
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -937,6 +996,44 @@ class TestCompletionPollerJob:
         await completion_poller_job(mock_ctx, MagicMock())
 
         mock_ctx.store.cleanup_old_completion_records.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("patchy_bot.handlers.download._organize_download")
+    async def test_infected_payload_quarantined_and_not_organized(self, mock_org, mock_ctx, monkeypatch, tmp_path):
+        sample_dir = tmp_path / "infected-release"
+        sample_dir.mkdir()
+        (sample_dir / "movie.exe").write_bytes(b"bad")
+
+        monkeypatch.setattr(
+            "patchy_bot.handlers.download._run_clamav_scan",
+            lambda path, timeout_s: ("infected", ["movie.exe: Win.Test FOUND"]),
+        )
+
+        infected = dict(_COMPLETE_TORRENT, content_path=str(sample_dir))
+        mock_ctx.app = self._make_app()
+        mock_ctx.cfg.allowed_user_ids = {12345}
+        mock_ctx.qbt.list_torrents = MagicMock(return_value=[infected])
+        mock_ctx.qbt.delete_torrent = MagicMock()
+        mock_ctx.store.is_completion_notified = MagicMock(return_value=False)
+        mock_ctx.store.mark_completion_notified = MagicMock()
+        mock_ctx.store.cleanup_old_completion_records = MagicMock()
+
+        sent_text: list[str] = []
+
+        async def _capture_send(**kwargs):
+            sent_text.append(kwargs["text"])
+            return MagicMock(chat_id=kwargs["chat_id"], message_id=1)
+
+        mock_ctx.app.bot.send_message = _capture_send
+
+        await completion_poller_job(mock_ctx, MagicMock())
+
+        mock_org.assert_not_called()
+        mock_ctx.qbt.delete_torrent.assert_called_once_with("a" * 40, delete_files=False)
+        assert any("Malware Detected" in text for text in sent_text)
+        quarantine_root = tmp_path / "Spam" / "quarantine"
+        assert quarantine_root.exists()
+        assert any(quarantine_root.iterdir())
 
 
 # ---------------------------------------------------------------------------

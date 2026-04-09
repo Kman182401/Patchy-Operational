@@ -114,7 +114,7 @@ def extract_movie_name(folder_name: str) -> str:
     name = folder_name
     name = re.sub(r"^www\.\S+\s*[-\u2013]\s*", "", name)
     name = name.replace("_", " ")
-    if "." in name and " " not in name:
+    if "." in name:
         name = name.replace(".", " ")
     # Extract year -- prefer (YYYY) in parens, fall back to bare YYYY
     year: str | None = None
@@ -151,8 +151,7 @@ def extract_show_name(folder_name: str) -> str:
     name = re.sub(r"^www\.\S+\s*[-\u2013]\s*", "", name)
     # Common separator cleanup before further parsing.
     name = name.replace("_", " ")
-    # Dot-separated names -> spaces (only if the name has no spaces)
-    if "." in name and " " not in name:
+    if "." in name:
         name = name.replace(".", " ")
     # Drop trailing bracketed tag blocks often used for source/release noise.
     name = re.sub(r"\s*[\[{(][^\])}]*[\])}]\s*$", "", name)
@@ -224,11 +223,21 @@ def find_remove_candidates(ctx: HandlerContext, query: str, limit: int = 8) -> l
                     remove_kind = "movie"
                 else:
                     remove_kind = "item"
+                item_name = entry.name
+                show_name: str | None = None
+                season_number: int | None = None
+                if root["key"] == "tv":
+                    if is_dir:
+                        show_name = extract_show_name(entry.name)
+                    else:
+                        season_number = extract_season_number(entry.name)
+                        item_name = format_remove_episode_label(entry.name, season_number)
                 candidates.append(
                     (
                         score,
                         {
-                            "name": entry.name,
+                            "name": item_name,
+                            "source_name": entry.name,
                             "path": entry_path,
                             "root_key": root["key"],
                             "root_label": root["label"],
@@ -236,6 +245,8 @@ def find_remove_candidates(ctx: HandlerContext, query: str, limit: int = 8) -> l
                             "is_dir": is_dir,
                             "size_bytes": size_bytes,
                             "remove_kind": remove_kind,
+                            "show_name": show_name,
+                            "season_number": season_number,
                         },
                     )
                 )
@@ -392,9 +403,7 @@ def remove_effective_candidates(candidates: list[dict[str, Any]]) -> list[dict[s
 
 def remove_toggle_label(candidate: dict[str, Any], selected_paths: set[str]) -> str:
     prefix = "\u2705 " if remove_selected_path(candidate) in selected_paths else ""
-    name = str(candidate.get("name") or "Item")
-    if str(candidate.get("remove_kind") or "") == "movie":
-        name = extract_movie_name(name)
+    name = remove_display_name(candidate)
     return f"{prefix}{name[:56]}"
 
 
@@ -409,6 +418,37 @@ def remove_kind_label(kind: str, is_dir: bool) -> str:
     return mapping.get(str(kind or "").strip(), "folder" if is_dir else "file")
 
 
+def remove_display_name(candidate: dict[str, Any], *, single_season_show: bool = False) -> str:
+    kind = str(candidate.get("remove_kind") or "").strip()
+    name = str(candidate.get("name") or "Item")
+    if kind == "movie":
+        return extract_movie_name(name)
+    if kind == "show":
+        return str(candidate.get("show_name") or extract_show_name(name) or name)
+    if kind == "season":
+        show_name = str(candidate.get("show_name") or "").strip()
+        season_number = int(candidate.get("season_number") or 0)
+        if show_name and season_number > 0:
+            if single_season_show:
+                return show_name
+            return f"{show_name} Season {season_number}"
+        return format_remove_season_label(name)
+    if kind == "episode":
+        source_name = str(candidate.get("source_name") or "").strip()
+        if source_name:
+            season_number = int(candidate.get("season_number") or 0) or None
+            return format_remove_episode_label(source_name, season_number)
+        return name
+    return name
+
+
+def remove_series_selected(candidate: dict[str, Any], selected_paths: set[str]) -> bool:
+    group_items = list(candidate.get("group_items") or [])
+    if group_items:
+        return any(remove_selected_path(item) in selected_paths for item in group_items)
+    return remove_selected_path(candidate) in selected_paths
+
+
 # ---------------------------------------------------------------------------
 # Text builders
 # ---------------------------------------------------------------------------
@@ -418,9 +458,7 @@ def remove_candidate_text(candidate: dict[str, Any]) -> str:
     candidate = remove_enrich_candidate(candidate)
     kind = remove_kind_label(str(candidate.get("remove_kind") or ""), bool(candidate.get("is_dir")))
     size_txt = human_size(int(candidate.get("size_bytes") or 0))
-    name = str(candidate.get("name") or "")
-    if str(candidate.get("remove_kind") or "") == "movie":
-        name = extract_movie_name(name) if name else name
+    name = remove_display_name(candidate)
     return f"{_h(name)} ({_h(candidate.get('root_label') or '')} <i>{_h(kind)}</i>, <code>{_h(size_txt)}</code>)"
 
 
@@ -450,7 +488,7 @@ def remove_confirm_text(candidates: list[dict[str, Any]]) -> str:
         candidate = remove_enrich_candidate(candidate)
         kind = remove_kind_label(str(candidate.get("remove_kind") or ""), bool(candidate.get("is_dir")))
         size_txt = human_size(int(candidate.get("size_bytes") or 0))
-        name = _h(candidate.get("name") or "")
+        name = _h(remove_display_name(candidate))
         root_label = _h(candidate.get("root_label") or "")
         numbered_items.append(f"{idx}. <b>{name}</b> ({root_label} {_h(kind)}, <code>{_h(size_txt)}</code>)")
         path_lines.append(_h(str(candidate.get("path") or "")))
@@ -519,6 +557,30 @@ def remove_candidate_keyboard(
     chosen = set(selected_paths or set())
     rows: list[list[InlineKeyboardButton]] = []
     for idx, candidate in enumerate(candidates[:8]):
+        if str(candidate.get("remove_kind") or "") == "show":
+            show_name = remove_display_name(candidate)
+            series_selected = remove_series_selected(candidate, chosen)
+            series_label = f"Delete Series: {show_name}"
+            if series_selected:
+                series_label = f"\u2705 {series_label}"
+            rows.append([InlineKeyboardButton(f"\U0001f5d1 {series_label}"[:64], callback_data=f"rm:delseries:{idx}")])
+
+            season_items = [
+                item
+                for item in remove_show_children(candidate)
+                if str(item.get("remove_kind") or "") == "season" and int(item.get("season_number") or 0) > 0
+            ]
+            season_items.sort(key=remove_tv_item_sort_key)
+            single_season_show = len(season_items) == 1
+            for season_item in season_items[:8]:
+                season_number = int(season_item.get("season_number") or 0)
+                if season_number <= 0:
+                    continue
+                label = remove_display_name(season_item, single_season_show=single_season_show)
+                rows.append(
+                    [InlineKeyboardButton(label[:56], callback_data=f"rm:showseason:{idx}:{season_number}")]
+                )
+            continue
         rows.append([InlineKeyboardButton(remove_toggle_label(candidate, chosen), callback_data=f"rm:pick:{idx}")])
     rows.append([InlineKeyboardButton(f"\U0001f9fe Review Selection ({len(chosen)})", callback_data="rm:review")])
     if chosen:
@@ -574,6 +636,32 @@ def remove_season_action_keyboard(selected: bool, selected_count: int) -> Inline
     return InlineKeyboardMarkup(compact_action_rows(rows))
 
 
+def remove_season_detail_keyboard(
+    season_candidate: dict[str, Any], selected_paths: set[str] | None, show_idx: int
+) -> InlineKeyboardMarkup:
+    del show_idx
+    chosen = set(selected_paths or set())
+    season_number = int(season_candidate.get("season_number") or 0)
+    selected = remove_selected_path(season_candidate) in chosen
+    if selected and season_number > 0:
+        delete_label = f"\u2705 Season {season_number} Selected"
+    elif selected:
+        delete_label = "\u2705 Season Selected"
+    elif season_number > 0:
+        delete_label = f"\U0001f5d1 Delete Season {season_number}"
+    else:
+        delete_label = "\U0001f5d1 Delete Season"
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(delete_label, callback_data="rm:seasondel")],
+        [InlineKeyboardButton("\U0001f4cb Select Episodes", callback_data="rm:episodes")],
+        [
+            InlineKeyboardButton("\u25c0\ufe0f Back", callback_data="rm:backtoshow"),
+            InlineKeyboardButton("\U0001f3e0 Home", callback_data="nav:home"),
+        ],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
 def remove_page_bounds(items: list[dict[str, Any]], page: int, per_page: int = 8) -> tuple[int, int, int, int]:
     total_pages = max(1, math.ceil(max(1, len(items)) / per_page))
     page = max(0, min(int(page), total_pages - 1))
@@ -590,6 +678,7 @@ def remove_paginated_keyboard(
     nav_prefix: str,
     back_callback: str | None = None,
     selected_paths: set[str] | None = None,
+    compact_browse_footer: bool = False,
 ) -> InlineKeyboardMarkup:
     page, total_pages, start, end = remove_page_bounds(items, page)
     chosen = set(selected_paths or set())
@@ -606,12 +695,28 @@ def remove_paginated_keyboard(
         nav_row.append(InlineKeyboardButton("Next \u27a1\ufe0f", callback_data=f"{nav_prefix}:{page + 1}"))
     if nav_row:
         rows.append(nav_row)
-    rows.append([InlineKeyboardButton(f"\U0001f9fe Review Selection ({len(chosen)})", callback_data="rm:review")])
-    if chosen:
-        rows.append([InlineKeyboardButton("\U0001f9f9 Clear Selection", callback_data="rm:clear")])
-    if back_callback:
-        rows.append([InlineKeyboardButton("\u2b05\ufe0f Back", callback_data=back_callback)])
-    rows.append([InlineKeyboardButton("\U0001f3e0 Home", callback_data="nav:home")])
+    review_button = InlineKeyboardButton(f"\U0001f9fe Review Selection ({len(chosen)})", callback_data="rm:review")
+    clear_button = InlineKeyboardButton("\U0001f9f9 Clear Selection", callback_data="rm:clear")
+    back_button = InlineKeyboardButton("\u2b05\ufe0f Back", callback_data=back_callback) if back_callback else None
+    home_button = InlineKeyboardButton("\U0001f3e0 Home", callback_data="nav:home")
+
+    if compact_browse_footer and not chosen:
+        if len(nav_row) == 1 and back_button is not None:
+            rows[-1] = [nav_row[0], back_button]
+            rows.append([review_button, home_button])
+        else:
+            rows.append([review_button])
+            if back_button is not None:
+                rows.append([back_button, home_button])
+            else:
+                rows.append([home_button])
+    else:
+        rows.append([review_button])
+        if chosen:
+            rows.append([clear_button])
+        if back_button is not None:
+            rows.append([back_button])
+        rows.append([home_button])
     rows.extend(nav_footer(include_home=False))
     return InlineKeyboardMarkup(rows)
 
@@ -660,9 +765,19 @@ def remove_library_items(ctx: HandlerContext, root_key: str) -> list[dict[str, A
                 rkind = "movie"
             else:
                 rkind = "item"
+            item_name = entry.name
+            show_name: str | None = None
+            season_number: int | None = None
+            if root["key"] == "tv":
+                if is_dir:
+                    show_name = extract_show_name(entry.name)
+                else:
+                    season_number = extract_season_number(entry.name)
+                    item_name = format_remove_episode_label(entry.name, season_number)
             items.append(
                 {
-                    "name": entry.name,
+                    "name": item_name,
+                    "source_name": entry.name,
                     "path": entry_path,
                     "root_key": root["key"],
                     "root_label": root["label"],
@@ -670,6 +785,8 @@ def remove_library_items(ctx: HandlerContext, root_key: str) -> list[dict[str, A
                     "is_dir": is_dir,
                     "size_bytes": None,
                     "remove_kind": rkind,
+                    "show_name": show_name,
+                    "season_number": season_number,
                 }
             )
         except OSError:
@@ -1046,6 +1163,7 @@ def delete_remove_candidate(
 
     identity: dict[str, Any] | None = None
     deleted_size = path_size_bytes(target_path)
+    display_name = remove_display_name(candidate)
     if ctx.plex.ready() and root_key in {"movies", "tv"}:
         try:
             identity = ctx.plex.resolve_remove_identity(target_path, remove_kind)
@@ -1069,7 +1187,7 @@ def delete_remove_candidate(
         remove_job = ctx.store.create_remove_job(
             user_id=int(user_id or 0),
             chat_id=int(chat_id or 0),
-            item_name=str(candidate.get("name") or os.path.basename(target_path)),
+            item_name=display_name or str(candidate.get("name") or os.path.basename(target_path)),
             root_key=root_key,
             root_label=str(candidate.get("root_label") or ""),
             remove_kind=remove_kind,
@@ -1091,7 +1209,7 @@ def delete_remove_candidate(
 
     size_txt = human_size(int(deleted_size or 0))
     return {
-        "name": str(candidate.get("name") or ""),
+        "name": display_name,
         "root_label": str(candidate.get("root_label") or ""),
         "size_bytes": int(deleted_size or 0),
         "path": target_path,
@@ -1102,7 +1220,7 @@ def delete_remove_candidate(
         "remove_kind": remove_kind,
         "display_text": (
             "\u2705 Delete complete\n"
-            f"Removed: {candidate.get('name')}\n"
+            f"Removed: {display_name}\n"
             f"Library: {candidate.get('root_label')}\n"
             f"Freed: {size_txt}\n"
             f"Disk path: {target_path}\n"
@@ -1220,6 +1338,50 @@ async def open_remove_browse_root(
     )
 
 
+async def render_remove_search_results(
+    bot_app: Any,
+    user_id: int,
+    msg: Any,
+    flow: dict[str, Any],
+    *,
+    current_ui_message: Any | None = None,
+) -> None:
+    candidates = list(flow.get("candidates") or [])
+    selected_paths = remove_selected_paths(flow)
+    await bot_app._render_remove_ui(
+        user_id,
+        msg,
+        flow,
+        remove_candidates_text(str(flow.get("query") or "Search"), candidates, selected_paths),
+        reply_markup=remove_candidate_keyboard(candidates, selected_paths),
+        current_ui_message=current_ui_message,
+    )
+
+
+async def render_remove_season_detail(
+    bot_app: Any,
+    user_id: int,
+    msg: Any,
+    flow: dict[str, Any],
+    season_candidate: dict[str, Any],
+    *,
+    current_ui_message: Any | None = None,
+) -> None:
+    selected_paths = remove_selected_paths(flow)
+    await bot_app._render_remove_ui(
+        user_id,
+        msg,
+        flow,
+        remove_season_actions_text(season_candidate),
+        reply_markup=remove_season_detail_keyboard(
+            season_candidate,
+            selected_paths,
+            int(flow.get("show_idx") or 0),
+        ),
+        current_ui_message=current_ui_message,
+    )
+
+
 async def on_cb_remove(bot_app: Any, *, data: str, q: Any, user_id: int) -> None:
     """Handle all ``rm:*`` callback queries.
 
@@ -1285,6 +1447,7 @@ async def on_cb_remove(bot_app: Any, *, data: str, q: Any, user_id: int) -> None
                 nav_prefix="rm:bpage",
                 back_callback="rm:browse",
                 selected_paths=selected_paths,
+                compact_browse_footer=True,
             ),
             current_ui_message=q.message,
         )
@@ -1334,6 +1497,7 @@ async def on_cb_remove(bot_app: Any, *, data: str, q: Any, user_id: int) -> None
                 nav_prefix="rm:bpage",
                 back_callback="rm:browse",
                 selected_paths=selected_paths,
+                compact_browse_footer=True,
             ),
             current_ui_message=q.message,
         )
@@ -1408,18 +1572,78 @@ async def on_cb_remove(bot_app: Any, *, data: str, q: Any, user_id: int) -> None
                     nav_prefix="rm:bpage",
                     back_callback="rm:browse",
                     selected_paths=selected_paths,
+                    compact_browse_footer=True,
                 ),
                 current_ui_message=q.message,
             )
         else:
+            await render_remove_search_results(bot_app, user_id, q.message, flow, current_ui_message=q.message)
+        return
+
+    if data.startswith("rm:delseries:"):
+        flow = bot_app._get_flow(user_id)
+        if not flow or flow.get("mode") != "remove":
             await bot_app._render_remove_ui(
                 user_id,
                 q.message,
-                flow,
-                remove_candidates_text(str(flow.get("query") or "Search"), candidates, selected_paths),
-                reply_markup=remove_candidate_keyboard(candidates, selected_paths),
+                {"mode": "remove", "selected_items": []},
+                "That remove flow has expired. Start /remove again.",
+                reply_markup=None,
                 current_ui_message=q.message,
             )
+            return
+        candidates = list(flow.get("candidates") or [])
+        idx = int(data.split(":", 2)[2])
+        if idx < 0 or idx >= len(candidates):
+            return
+        selected = remove_enrich_candidate(dict(candidates[idx]))
+        remove_toggle_group(flow, selected)
+        flow["stage"] = "choose_item"
+        flow["selected"] = selected
+        bot_app._set_flow(user_id, flow)
+        await render_remove_search_results(bot_app, user_id, q.message, flow, current_ui_message=q.message)
+        return
+
+    if data.startswith("rm:showseason:"):
+        flow = bot_app._get_flow(user_id)
+        if not flow or flow.get("mode") != "remove":
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                {"mode": "remove", "selected_items": []},
+                "That remove flow has expired. Start /remove again.",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
+        parts = data.split(":")
+        if len(parts) != 4:
+            return
+        candidates = list(flow.get("candidates") or [])
+        idx = int(parts[2])
+        season_number = int(parts[3])
+        if idx < 0 or idx >= len(candidates):
+            return
+        selected = remove_enrich_candidate(dict(candidates[idx]))
+        season_items = await asyncio.to_thread(remove_show_children, selected)
+        season_candidate = next(
+            (
+                remove_enrich_candidate(dict(item))
+                for item in season_items
+                if str(item.get("remove_kind") or "") == "season" and int(item.get("season_number") or 0) == season_number
+            ),
+            None,
+        )
+        if season_candidate is None:
+            return
+        flow["stage"] = "season_detail"
+        flow["selected"] = selected
+        flow["selected_child"] = season_candidate
+        flow["season_candidate"] = season_candidate
+        flow["show_idx"] = idx
+        flow["season_parent_stage"] = "season_detail"
+        bot_app._set_flow(user_id, flow)
+        await render_remove_season_detail(bot_app, user_id, q.message, flow, season_candidate, current_ui_message=q.message)
         return
 
     if data == "rm:series":
@@ -1592,6 +1816,7 @@ async def on_cb_remove(bot_app: Any, *, data: str, q: Any, user_id: int) -> None
         flow["selected_child"] = selected_child
         if str(selected_child.get("remove_kind") or "") == "season" and bool(selected_child.get("is_dir")):
             flow["stage"] = "season_actions"
+            flow["season_parent_stage"] = "season_actions"
             bot_app._set_flow(user_id, flow)
             selected_paths = remove_selected_paths(flow)
             await bot_app._render_remove_ui(
@@ -1636,7 +1861,7 @@ async def on_cb_remove(bot_app: Any, *, data: str, q: Any, user_id: int) -> None
 
     if data == "rm:seasondel":
         flow = bot_app._get_flow(user_id)
-        if not flow or flow.get("mode") != "remove" or flow.get("stage") != "season_actions":
+        if not flow or flow.get("mode") != "remove" or flow.get("stage") not in {"season_actions", "season_detail"}:
             await bot_app._render_remove_ui(
                 user_id,
                 q.message,
@@ -1660,22 +1885,32 @@ async def on_cb_remove(bot_app: Any, *, data: str, q: Any, user_id: int) -> None
         remove_toggle_candidate(flow, selected_child)
         bot_app._set_flow(user_id, flow)
         selected_paths = remove_selected_paths(flow)
-        await bot_app._render_remove_ui(
-            user_id,
-            q.message,
-            flow,
-            remove_season_actions_text(selected_child),
-            reply_markup=remove_season_action_keyboard(
-                remove_selected_path(selected_child) in selected_paths,
-                len(selected_paths),
-            ),
-            current_ui_message=q.message,
-        )
+        if flow.get("stage") == "season_detail":
+            await render_remove_season_detail(
+                bot_app,
+                user_id,
+                q.message,
+                flow,
+                selected_child,
+                current_ui_message=q.message,
+            )
+        else:
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                remove_season_actions_text(selected_child),
+                reply_markup=remove_season_action_keyboard(
+                    remove_selected_path(selected_child) in selected_paths,
+                    len(selected_paths),
+                ),
+                current_ui_message=q.message,
+            )
         return
 
     if data == "rm:episodes":
         flow = bot_app._get_flow(user_id)
-        if not flow or flow.get("mode") != "remove" or flow.get("stage") != "season_actions":
+        if not flow or flow.get("mode") != "remove" or flow.get("stage") not in {"season_actions", "season_detail"}:
             await bot_app._render_remove_ui(
                 user_id,
                 q.message,
@@ -1889,20 +2124,59 @@ async def on_cb_remove(bot_app: Any, *, data: str, q: Any, user_id: int) -> None
                 current_ui_message=q.message,
             )
             return
-        flow["stage"] = "season_actions"
+        parent_stage = str(flow.get("season_parent_stage") or "season_actions")
+        flow["stage"] = "season_detail" if parent_stage == "season_detail" else "season_actions"
         bot_app._set_flow(user_id, flow)
         selected_paths = remove_selected_paths(flow)
-        await bot_app._render_remove_ui(
-            user_id,
-            q.message,
-            flow,
-            remove_season_actions_text(selected_child),
-            reply_markup=remove_season_action_keyboard(
-                remove_selected_path(selected_child) in selected_paths,
-                len(selected_paths),
-            ),
-            current_ui_message=q.message,
-        )
+        if flow.get("stage") == "season_detail":
+            await render_remove_season_detail(
+                bot_app,
+                user_id,
+                q.message,
+                flow,
+                selected_child,
+                current_ui_message=q.message,
+            )
+        else:
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                remove_season_actions_text(selected_child),
+                reply_markup=remove_season_action_keyboard(
+                    remove_selected_path(selected_child) in selected_paths,
+                    len(selected_paths),
+                ),
+                current_ui_message=q.message,
+            )
+        return
+
+    if data == "rm:backtoshow":
+        flow = bot_app._get_flow(user_id)
+        if not flow or flow.get("mode") != "remove":
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                {"mode": "remove", "selected_items": []},
+                "That remove flow has expired. Start /remove again.",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
+        candidates = list(flow.get("candidates") or [])
+        if not candidates:
+            await bot_app._render_remove_ui(
+                user_id,
+                q.message,
+                flow,
+                "That remove flow has expired. Start /remove again.",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            return
+        flow["stage"] = "choose_item"
+        bot_app._set_flow(user_id, flow)
+        await render_remove_search_results(bot_app, user_id, q.message, flow, current_ui_message=q.message)
         return
 
     if data == "rm:review":

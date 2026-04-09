@@ -35,22 +35,22 @@ def _gb(n: float) -> int:
 # ===================================================================
 
 
-def test_cam_penalised() -> None:
+def test_cam_rejected() -> None:
     ts = score_torrent("Movie.2024.HDCAM.x264-NoGroup", 1_200_000_000, 500)
-    assert not ts.is_rejected
-    assert ts.format_score < 0, "CAM should have a heavily negative score"
+    assert ts.is_rejected
+    assert "cam" in (ts.reject_reason or "").lower() or "theatrical" in (ts.reject_reason or "").lower()
 
 
-def test_telesync_penalised() -> None:
+def test_telesync_rejected() -> None:
     ts = score_torrent("Movie.2024.TS.x264-GROUP", 2_000_000_000, 100)
-    assert not ts.is_rejected
-    assert ts.format_score < 0, "TS should have a heavily negative score"
+    assert ts.is_rejected
+    assert "theatrical" in (ts.reject_reason or "").lower()
 
 
-def test_telecine_penalised() -> None:
+def test_telecine_rejected() -> None:
     ts = score_torrent("Movie.2024.TC.x264-GROUP", 2_000_000_000, 100)
-    assert not ts.is_rejected
-    assert ts.format_score < 0, "TC should have a heavily negative score"
+    assert ts.is_rejected
+    assert "theatrical" in (ts.reject_reason or "").lower()
 
 
 def test_av1_rejected() -> None:
@@ -289,11 +289,11 @@ def test_benchmark_movie_ranking() -> None:
     assert ranked[-1] == 3, f"expected 720p last, got index {ranked[-1]}"
 
 
-def test_benchmark_cam_penalised() -> None:
-    """CAM releases should be penalised regardless of seed count."""
+def test_benchmark_cam_rejected() -> None:
+    """CAM releases should be rejected regardless of seed count."""
     ts = score_torrent("Movie.2024.HDCAM.x264-NoGroup", _gb(1.2), 5000)
-    assert not ts.is_rejected
-    assert ts.format_score < 0, "CAM should have negative score even with high seeds"
+    assert ts.is_rejected
+    assert ts.format_score == -9999
 
 
 # ===================================================================

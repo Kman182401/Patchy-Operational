@@ -11,9 +11,13 @@ import asyncio
 import errno as _errno
 import json
 import logging
+import os
 import re
+import shutil
+import subprocess
 import time
 import urllib.parse
+from dataclasses import dataclass
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -39,6 +43,187 @@ LOG = logging.getLogger("qbtg")
 # In-memory dedup for completion poller — resets on service restart.
 # The persistent DB layer (is_completion_notified) is the safety net.
 _poller_seen_hashes: set[str] = set()
+
+
+@dataclass(frozen=True, slots=True)
+class CompletionSecurityResult:
+    allowed: bool
+    media_path: str
+    notice_text: str | None = None
+
+
+def _torrent_file_names(files: list[dict[str, Any]]) -> list[str]:
+    out: list[str] = []
+    for row in files:
+        name = str(row.get("name") or row.get("path") or "").strip()
+        if name:
+            out.append(name)
+    return out
+
+
+async def _wait_for_file_inspection(
+    ctx: HandlerContext,
+    torrent_hash: str,
+    *,
+    timeout_s: int,
+) -> list[str]:
+    deadline = time.time() + timeout_s
+    last_error: Exception | None = None
+    while time.time() < deadline:
+        try:
+            files = await asyncio.to_thread(ctx.qbt.get_torrent_files, torrent_hash)
+            names = _torrent_file_names(files)
+            if names:
+                return names
+        except Exception as exc:
+            last_error = exc
+        await asyncio.sleep(0.8)
+    if last_error is not None:
+        raise RuntimeError(f"file inspection did not complete: {last_error}")
+    raise RuntimeError("file inspection did not complete before timeout")
+
+
+def _sanitize_quarantine_name(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._ -]+", "_", value).strip(" ._")
+    return cleaned or "quarantine-item"
+
+
+def _quarantine_payload(path: str, quarantine_root: str, torrent_hash: str) -> str:
+    os.makedirs(quarantine_root, exist_ok=True)
+    src = str(path or "").strip()
+    if not src or not os.path.exists(src):
+        raise RuntimeError(f"download path missing: {src or 'unknown'}")
+    base_name = _sanitize_quarantine_name(os.path.basename(src.rstrip("/")) or torrent_hash[:12])
+    dest = os.path.join(quarantine_root, base_name)
+    counter = 2
+    while os.path.exists(dest):
+        dest = os.path.join(quarantine_root, f"{base_name}-{counter}")
+        counter += 1
+    shutil.move(src, dest)
+    return dest
+
+
+def _clamd_available() -> bool:
+    if not shutil.which("clamdscan"):
+        return False
+    try:
+        result = subprocess.run(
+            ["clamdscan", "--ping"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except Exception:
+        return False
+    return result.returncode == 0
+
+
+def _run_clamav_scan(path: str, timeout_s: int) -> tuple[str, list[str]]:
+    if not path:
+        return ("error", ["download path missing"])
+
+    if _clamd_available():
+        cmd = ["clamdscan", "--multiscan", "--fdpass", "--infected", "--no-summary", path]
+    else:
+        cmd = ["clamscan", "--recursive", "--infected", "--no-summary", path]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return ("error", [f"ClamAV scan timed out after {timeout_s}s"])
+    except Exception as exc:
+        return ("error", [f"ClamAV scan failed: {exc}"])
+
+    stdout_lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+    stderr_lines = [line.strip() for line in (result.stderr or "").splitlines() if line.strip()]
+
+    if result.returncode == 0:
+        return ("clean", [])
+    if result.returncode == 1:
+        hits = [line for line in stdout_lines if "FOUND" in line]
+        return ("infected", hits or ["ClamAV reported infected content"])
+    reasons = stderr_lines or stdout_lines or [f"ClamAV exited with code {result.returncode}"]
+    return ("error", reasons)
+
+
+async def _apply_completion_security_gate(
+    ctx: HandlerContext,
+    *,
+    user_id: int,
+    torrent_hash: str,
+    name: str,
+    media_path: str,
+) -> CompletionSecurityResult:
+    if not media_path:
+        return CompletionSecurityResult(False, media_path, "Security hold: download path unavailable for scanning.")
+
+    status, reasons = await asyncio.to_thread(_run_clamav_scan, media_path, ctx.cfg.malware_scan_timeout_s)
+    if status == "clean":
+        return CompletionSecurityResult(True, media_path)
+
+    try:
+        await asyncio.to_thread(ctx.qbt.delete_torrent, torrent_hash, delete_files=False)
+    except Exception:
+        LOG.warning("Failed to remove torrent after malware hold: %s", torrent_hash, exc_info=True)
+
+    quarantine_root = os.path.join(ctx.cfg.spam_path, "quarantine")
+    quarantine_path = media_path
+    quarantine_error: str | None = None
+    try:
+        quarantine_path = await asyncio.to_thread(_quarantine_payload, media_path, quarantine_root, torrent_hash)
+    except Exception as exc:
+        quarantine_error = str(exc)
+        LOG.warning("Failed to quarantine payload for %s", torrent_hash, exc_info=True)
+
+    if quarantine_error:
+        reasons = [*reasons, f"quarantine failed: {quarantine_error}"]
+
+    try:
+        await asyncio.to_thread(ctx.store.log_malware_block, torrent_hash, name, "download", reasons)
+    except Exception:
+        LOG.debug("Failed to log malware block", exc_info=True)
+
+    severity = "critical" if status == "infected" else "warn"
+    event_type = "malware_quarantine" if status == "infected" else "malware_scan_error"
+    try:
+        await asyncio.to_thread(
+            ctx.store.log_health_event,
+            user_id,
+            torrent_hash,
+            event_type,
+            severity,
+            json.dumps({"reasons": reasons, "quarantine_path": quarantine_path}),
+            name,
+        )
+    except Exception:
+        LOG.debug("Failed to log malware health event", exc_info=True)
+
+    title = "Malware Detected" if status == "infected" else "Security Hold"
+    intro = (
+        "ClamAV detected malicious content."
+        if status == "infected"
+        else "ClamAV could not produce a safe verdict."
+    )
+    where = (
+        f"\nQuarantined to: <code>{_h(quarantine_path)}</code>"
+        if quarantine_path and quarantine_path != media_path
+        else "\nPayload remains in place pending manual review."
+    )
+    reason_lines = "\n".join(f"• {_h(reason)}" for reason in reasons[:8])
+    notice = (
+        f"⚠️ <b>{title}</b>\n"
+        f"<code>{_h(name)}</code>\n\n"
+        f"{_h(intro)}{where}\n\n"
+        f"{reason_lines}"
+    )
+    return CompletionSecurityResult(False, quarantine_path, notice)
 
 
 # ---------------------------------------------------------------------------
@@ -645,11 +830,26 @@ async def track_download_progress(
                     + "\n<b>\u2705 Download Complete</b>"
                 )
                 await safe_tracker_edit(tracker_msg, done_text, reply_markup=None)
-                # Mark as notified so the background poller won't double-notify.
-                await asyncio.to_thread(ctx.store.mark_completion_notified, torrent_hash, title, user_id)
-                # Organize download into Plex-standard structure.
                 media_path = str(info.get("content_path") or info.get("save_path") or "").strip()
                 category = str(info.get("category") or "")
+                security = await _apply_completion_security_gate(
+                    ctx,
+                    user_id=user_id,
+                    torrent_hash=torrent_hash,
+                    name=title,
+                    media_path=media_path,
+                )
+                await asyncio.to_thread(ctx.store.mark_completion_notified, torrent_hash, title, user_id)
+                if not security.allowed:
+                    if security.notice_text:
+                        await tracker_send_fallback(ctx, tracker_msg, security.notice_text)
+                    try:
+                        await tracker_msg.delete()
+                    except Exception:
+                        pass
+                    break
+                media_path = security.media_path
+                # Organize download into Plex-standard structure.
                 try:
                     org_result = await asyncio.to_thread(
                         _organize_download,
@@ -786,11 +986,27 @@ async def completion_poller_job(ctx: HandlerContext, context: ContextTypes.DEFAU
         size = int(info.get("size", 0) or info.get("total_size", 0) or 0)
         category = str(info.get("category") or "")
 
-        # Mark notified FIRST to prevent duplicates if sending fails partway.
-        await asyncio.to_thread(ctx.store.mark_completion_notified, torrent_hash, name)
-
-        # Organize download into Plex-standard structure.
         media_path = str(info.get("content_path") or info.get("save_path") or "").strip()
+        security = await _apply_completion_security_gate(
+            ctx,
+            user_id=0,
+            torrent_hash=torrent_hash,
+            name=name,
+            media_path=media_path,
+        )
+        await asyncio.to_thread(ctx.store.mark_completion_notified, torrent_hash, name)
+        if not security.allowed:
+            if security.notice_text:
+                for uid in ctx.cfg.allowed_user_ids:
+                    try:
+                        sent = await ctx.app.bot.send_message(chat_id=uid, text=security.notice_text, parse_mode=_PM)
+                        track_ephemeral_message(ctx, uid, sent)
+                    except Exception:
+                        LOG.warning("Completion poller: failed to send malware alert to user %s", uid, exc_info=True)
+            _poller_seen_hashes.add(torrent_hash)
+            continue
+        media_path = security.media_path
+        # Organize download into Plex-standard structure.
         try:
             org_result = await asyncio.to_thread(
                 _organize_download,
@@ -952,6 +1168,34 @@ def extract_hash(row: dict[str, Any], url: str) -> str | None:
     return None
 
 
+def scan_download_candidate(
+    result_row: dict[str, Any],
+    *,
+    media_type: str,
+    files: list[str] | None = None,
+) -> tuple[str, str | None, Any]:
+    """Apply the shared download-time malware gate and return URL/hash metadata.
+
+    This helper is side-effect free so background runners can reuse the same
+    candidate validation path as manual downloads without sending Telegram
+    messages or touching qBittorrent.
+    """
+    torrent_name = str(result_row.get("name") or "")
+    torrent_size = int(result_row.get("size") or result_row.get("fileSize") or 0)
+    uploader = str(result_row.get("uploader") or "").strip() or None
+    malware_scan = scan_download(
+        name=torrent_name,
+        size_bytes=torrent_size,
+        quality_tier=quality_tier(torrent_name),
+        media_type=media_type,
+        files=files or [],
+        uploader=uploader,
+    )
+    url = result_to_url(result_row)
+    torrent_hash = extract_hash(result_row, url)
+    return url, torrent_hash, malware_scan
+
+
 async def resolve_hash_by_name(ctx: HandlerContext, title: str, category: str, wait_s: int = 20) -> str | None:
     """Poll qBT until a torrent matching *title* appears, returning its hash."""
     deadline = time.time() + wait_s
@@ -1098,12 +1342,11 @@ async def do_add(
     _torrent_size = int(row.get("size") or 0)
     _torrent_hash_key = str(row.get("hash") or row.get("fileHash") or _torrent_name)
     _media_type = "episode" if choice == "tv" else "movie"
-    malware_scan = scan_download(
-        name=_torrent_name,
-        size_bytes=_torrent_size,
-        quality_tier=quality_tier(_torrent_name),
+    _uploader = str(row.get("uploader") or "").strip() or None
+    url, torrent_hash, malware_scan = scan_download_candidate(
+        row,
         media_type=_media_type,
-        files=[],  # file list not available at this stage
+        files=[],
     )
     if malware_scan.is_blocked:
         try:
@@ -1118,8 +1361,7 @@ async def do_add(
         reasons_text = "\n".join(f"• {r}" for r in malware_scan.reasons)
         raise RuntimeError(f"Download blocked — suspicious content detected:\n{reasons_text}")
     # --- end malware gate ---
-    url = result_to_url(row)
-    torrent_hash = extract_hash(row, url)
+    is_magnet = url.lower().startswith("magnet:?")
     try:
         resp = await asyncio.wait_for(
             asyncio.to_thread(
@@ -1127,15 +1369,66 @@ async def do_add(
                 url,
                 category=target["category"],
                 savepath=target["path"],
+                paused=True,
             ),
             timeout=15.0,
         )
     except TimeoutError:
         raise RuntimeError("qBittorrent add_url timed out (15s). The torrent may still be added \u2014 check /active.")
 
-    hash_note = ""
     if not torrent_hash:
-        hash_note = "\n\u23f3 Hash is still being assigned by qBittorrent \u2014 live monitor will auto-attach shortly."
+        torrent_hash = await resolve_hash_by_name(ctx, _torrent_name, target["category"], wait_s=20)
+
+    inspection_note = ""
+    if not torrent_hash:
+        raise RuntimeError("Download blocked — qBittorrent did not assign a torrent hash for inspection.")
+
+    try:
+        files = await _wait_for_file_inspection(
+            ctx,
+            torrent_hash,
+            timeout_s=ctx.cfg.file_inspection_timeout_s,
+        )
+    except Exception as exc:
+        if is_magnet:
+            inspection_note = (
+                "\n\u26a0\ufe0f File inspection did not complete in time. "
+                "Continuing with completion-time ClamAV scanning only."
+            )
+            LOG.warning("Continuing after magnet inspection failure for %s: %s", torrent_hash, exc)
+        else:
+            try:
+                await asyncio.to_thread(ctx.qbt.delete_torrent, torrent_hash, delete_files=True)
+            except Exception:
+                LOG.warning("Failed to delete torrent after inspection failure %s", torrent_hash, exc_info=True)
+            raise RuntimeError(f"Download blocked — file inspection failed: {exc}") from exc
+    else:
+        malware_scan = scan_download(
+            name=_torrent_name,
+            size_bytes=_torrent_size,
+            quality_tier=quality_tier(_torrent_name),
+            media_type=_media_type,
+            files=files,
+            uploader=_uploader,
+        )
+        if malware_scan.is_blocked:
+            try:
+                await asyncio.to_thread(ctx.qbt.delete_torrent, torrent_hash, delete_files=True)
+            except Exception:
+                LOG.warning("Failed to delete blocked torrent %s", torrent_hash, exc_info=True)
+            try:
+                ctx.store.log_malware_block(
+                    torrent_hash=torrent_hash,
+                    torrent_name=_torrent_name,
+                    stage="download",
+                    reasons=malware_scan.reasons,
+                )
+            except Exception:
+                pass
+            reasons_text = "\n".join(f"• {r}" for r in malware_scan.reasons)
+            raise RuntimeError(f"Download blocked — suspicious content detected:\n{reasons_text}")
+
+    await asyncio.to_thread(ctx.qbt.resume_torrents, torrent_hash)
 
     summary = (
         f"\u2705 Added #{idx}: {_h(str(row['name']))}\n"
@@ -1143,7 +1436,7 @@ async def do_add(
         f"Category: {_h(str(target['category']))}\n"
         f"Path: {_h(str(target['path']))}\n"
         f"qBittorrent: {_h(str(resp))}"
-        f"{hash_note}"
+        f"{inspection_note}"
     )
 
     return {

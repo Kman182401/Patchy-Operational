@@ -60,6 +60,15 @@ def build_search_parser() -> argparse.ArgumentParser:
 # ---------------------------------------------------------------------------
 
 
+def extract_uploader(row: dict[str, Any]) -> str | None:
+    """Extract uploader/author metadata from a qBT search row if present."""
+    for key in ("uploader", "author", "poster", "username"):
+        value = str(row.get(key) or "").strip()
+        if value:
+            return value
+    return None
+
+
 def apply_filters(
     rows: list[dict[str, Any]],
     *,
@@ -97,6 +106,8 @@ def apply_filters(
             if not any(is_direct_torrent_link(c) for c in candidates if c):
                 continue
 
+        uploader = extract_uploader(r)
+
         # Score the result — reject garbage (CAM, TS, AV1, upscaled, zero-seed, LQ groups)
         ts = score_torrent(name, size, seeds, media_type=media_type)
         if ts.is_rejected:
@@ -108,9 +119,13 @@ def apply_filters(
             size_bytes=size,
             quality_tier=quality_tier(name),
             media_type=media_type,
+            uploader=uploader,
         )
         if malware_scan.is_blocked:
             continue
+
+        if uploader:
+            r["uploader"] = uploader
 
         # Reject non-English results (empty = assumed English, or must contain 'en')
         if ts.parsed.languages and "en" not in ts.parsed.languages:

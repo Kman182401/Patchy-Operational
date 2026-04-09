@@ -134,12 +134,11 @@ def test_apply_filters_magnet_link_accepted() -> None:
     assert len(out) == 1
 
 
-def test_apply_filters_quality_scoring_keeps_cam_penalised() -> None:
-    """CAM releases pass through apply_filters but with a negative quality score."""
+def test_apply_filters_quality_scoring_blocks_cam() -> None:
+    """CAM releases are rejected outright by apply_filters."""
     rows = [_good_row(name="Movie.2024.HDCAM.x264-GROUP", seeds=500)]
     out = apply_filters(rows, min_seeds=1, min_size=None, max_size=None, min_quality=0)
-    assert len(out) == 1
-    assert out[0]["_quality_score"].format_score < 0
+    assert out == []
 
 
 # ===================================================================
@@ -663,6 +662,17 @@ def test_extract_movie_name_preserves_multi_word() -> None:
     """'The.Dark.Knight.2008.1080p' becomes 'The Dark Knight (2008)'."""
     result = extract_movie_name("The.Dark.Knight.2008.1080p.BluRay.x264")
     assert result == "The Dark Knight (2008)"
+
+
+def test_extract_movie_name_strips_dot_noise_even_with_site_prefix() -> None:
+    result = extract_movie_name("www.UIndex.org - Dune.Part.Two.2024.mkv")
+    assert result == "Dune Part Two (2024)"
+
+
+def test_extract_movie_name_without_year_never_keeps_dots() -> None:
+    result = extract_movie_name("Some.Movie.Without.Year.1080p")
+    assert result == "Some Movie Without Year"
+    assert "." not in result
 
 
 def test_extract_show_name_strips_season_info() -> None:

@@ -154,6 +154,27 @@ class PlexInventoryClient:
             )
         return sections
 
+    def movie_exists(self, title: str, year: int | None = None) -> bool:
+        """Return True if Plex already has a matching movie entry."""
+        want = normalize_title(title)
+        for section in self._sections():
+            if str(section.get("type") or "").strip().lower() != "movie":
+                continue
+            key = str(section.get("key") or "").strip()
+            if not key:
+                continue
+            root = self._get_xml(f"/library/sections/{key}/all", params={"type": 1, "title": title})
+            for meta in root.findall(".//*[@ratingKey]"):
+                meta_title = normalize_title(str(meta.attrib.get("title") or ""))
+                if meta_title != want:
+                    continue
+                meta_year = str(meta.attrib.get("year") or "").strip()
+                if year is None:
+                    return True
+                if meta_year.isdigit() and int(meta_year) == year:
+                    return True
+        return False
+
     @staticmethod
     def _parts_for_meta(meta: ET.Element) -> list[str]:
         files: list[str] = []
@@ -386,4 +407,3 @@ class PlexInventoryClient:
                         return False, f"Plex still has media parts for {title}"
             return True, f"Plex media parts removed for {title}"
         return False, f"Unsupported Plex section type for {title}"
-

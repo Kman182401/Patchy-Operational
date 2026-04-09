@@ -111,6 +111,11 @@ def mock_qbt() -> MagicMock:
     qbt.list_active.return_value = []
     qbt.list_search_plugins.return_value = []
     qbt.ensure_category.return_value = None
+    qbt.add_url.return_value = "Ok."
+    qbt.get_torrent_files.return_value = [{"name": "Test.Movie.2024.1080p.mkv"}]
+    qbt.resume_torrents.return_value = None
+    qbt.pause_torrents.return_value = None
+    qbt.delete_torrent.return_value = None
     return qbt
 
 

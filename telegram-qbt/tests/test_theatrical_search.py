@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from patchy_bot.clients.tv_metadata import MovieReleaseDates, MovieReleaseStatus
+from patchy_bot.handlers.schedule import on_cb_movie_schedule
 from patchy_bot.utils import now_ts
 
 # ---------------------------------------------------------------------------
@@ -52,6 +53,40 @@ def _make_update(user_id: int = 12345):
     update.effective_message.chat_id = user_id
     update.effective_message.message_id = 100
     return update
+
+
+class _FakeScheduleApp:
+    def __init__(self, mock_ctx) -> None:
+        self._ctx = mock_ctx
+        self.store = mock_ctx.store
+        self.cfg = mock_ctx.cfg
+        self.plex = mock_ctx.plex
+        self.qbt = mock_ctx.qbt
+        self.flow: dict[int, dict] = {}
+        self.render_calls: list[tuple[str, tuple, dict]] = []
+
+    def _set_flow(self, user_id: int, flow: dict) -> None:
+        self.flow[user_id] = flow
+
+    def _get_flow(self, user_id: int) -> dict | None:
+        return self.flow.get(user_id)
+
+    def _clear_flow(self, user_id: int) -> None:
+        self.flow.pop(user_id, None)
+
+    async def _render_schedule_ui(self, *args, **kwargs):
+        self.render_calls.append(("schedule_ui", args, kwargs))
+        return MagicMock(chat_id=12345, message_id=1)
+
+    async def _render_nav_ui(self, *args, **kwargs):
+        self.render_calls.append(("nav_ui", args, kwargs))
+        return MagicMock(chat_id=12345, message_id=1)
+
+    def _nav_footer(self, **kwargs):
+        return [[]]
+
+    def _home_only_keyboard(self):
+        return MagicMock()
 
 
 # ---------------------------------------------------------------------------
@@ -247,3 +282,67 @@ async def test_run_search_tv_skips_theatrical_check(
     await bot._run_search(update=mock_update, query="Breaking Bad S01E01", media_hint="tv")
 
     bot._detect_movie_release_status.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_schedule_ui_no_date_type_selection(mock_ctx, mock_callback_query, monkeypatch):
+    app = _FakeScheduleApp(mock_ctx)
+    app._set_flow(
+        12345,
+        {"mode": "msch_add", "stage": "title", "candidates": [{"tmdb_id": 42, "title": "Future Film", "year": 2026}]},
+    )
+
+    async def passthrough(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    monkeypatch.setattr("patchy_bot.handlers.schedule.asyncio.to_thread", passthrough)
+    mock_ctx.tvmeta.get_movie_release_status.return_value = MovieReleaseDates(
+        tmdb_id=42,
+        theatrical_ts=now_ts() + 86400 * 30,
+        digital_ts=now_ts() + 86400 * 75,
+        home_release_ts=now_ts() + 86400 * 75,
+        home_date_is_inferred=True,
+        status=MovieReleaseStatus.PRE_THEATRICAL,
+    )
+
+    await on_cb_movie_schedule(app, data="msch:pick:42", q=mock_callback_query, user_id=12345)
+
+    flow = app._get_flow(12345)
+    assert flow is not None
+    assert flow["stage"] == "confirm_date"
+    assert "release_dates" not in flow
+    rendered_texts = [args[3] for name, args, kwargs in app.render_calls if name == "schedule_ui" and len(args) > 3]
+    assert rendered_texts
+    assert all("Choose which release date to track" not in text for text in rendered_texts)
+
+
+@pytest.mark.asyncio
+async def test_schedule_ui_home_available_still_schedules(mock_ctx, mock_callback_query, monkeypatch):
+    app = _FakeScheduleApp(mock_ctx)
+    app._set_flow(
+        12345,
+        {
+            "mode": "msch_add",
+            "stage": "confirm_date",
+            "tmdb_id": 77,
+            "title": "Available Film",
+            "year": 2024,
+            "release_status": "home_available",
+            "release_date_type": "home_release",
+            "release_date_ts": now_ts() - 60,
+            "home_release_ts": now_ts() - 60,
+            "home_date_is_inferred": False,
+        },
+    )
+
+    async def passthrough(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    monkeypatch.setattr("patchy_bot.handlers.schedule.asyncio.to_thread", passthrough)
+
+    await on_cb_movie_schedule(app, data="msch:confirm:77", q=mock_callback_query, user_id=12345)
+
+    tracks = mock_ctx.store.get_movie_tracks_for_user(12345)
+    assert len(tracks) == 1
+    assert tracks[0]["tmdb_id"] == 77
+    assert tracks[0]["release_status"] == "home_available"

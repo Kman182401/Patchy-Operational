@@ -237,6 +237,20 @@ class QBClient:
             "POST", "/api/v2/torrents/delete", data={"hashes": torrent_hash, "deleteFiles": str(delete_files).lower()}
         )
 
+    def pause_torrents(self, torrent_hashes: str | list[str]) -> None:
+        hashes = "|".join(torrent_hashes) if isinstance(torrent_hashes, list) else torrent_hashes
+        self._request("POST", "/api/v2/torrents/pause", data={"hashes": hashes})
+
+    def resume_torrents(self, torrent_hashes: str | list[str]) -> None:
+        hashes = "|".join(torrent_hashes) if isinstance(torrent_hashes, list) else torrent_hashes
+        self._request("POST", "/api/v2/torrents/resume", data={"hashes": hashes})
+
+    def get_torrent_files(self, torrent_hash: str) -> list[dict[str, Any]]:
+        if not torrent_hash:
+            return []
+        r = self._request("GET", "/api/v2/torrents/files", params={"hash": torrent_hash})
+        return r.json() if r.text.strip() else []
+
     def list_torrents(
         self,
         *,

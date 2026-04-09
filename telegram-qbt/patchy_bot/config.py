@@ -68,6 +68,8 @@ class Config:
     preflight_check_enabled: bool = True
     preflight_min_disk_gb: float = 5.0
     health_event_retention_days: int = 30
+    file_inspection_timeout_s: int = 20
+    malware_scan_timeout_s: int = 300
 
     _DANGEROUS_ROOTS: frozenset[str] = frozenset(
         {
@@ -192,5 +194,7 @@ class Config:
             preflight_check_enabled=parse_bool(os.getenv("PREFLIGHT_CHECK_ENABLED", "true"), default=True),
             preflight_min_disk_gb=max(0.0, float(os.getenv("PREFLIGHT_MIN_DISK_GB", "5.0"))),
             health_event_retention_days=max(1, int(os.getenv("HEALTH_EVENT_RETENTION_DAYS", "30"))),
+            file_inspection_timeout_s=max(5, int(os.getenv("FILE_INSPECTION_TIMEOUT_SECONDS", "20"))),
+            malware_scan_timeout_s=max(30, int(os.getenv("MALWARE_SCAN_TIMEOUT_SECONDS", "300"))),
             backup_dir=parse_env_optional(os.getenv("BACKUP_DIR")),
         )

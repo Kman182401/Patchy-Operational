@@ -10,6 +10,8 @@ import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from patchy_bot.handlers.download import (
     completion_poller_job,
     extract_hash,
@@ -27,6 +29,11 @@ from patchy_bot.handlers.remove import (
 # Helpers
 # ---------------------------------------------------------------------------
 from tests.helpers import FakeOrganizeResult, make_torrent_info
+
+
+@pytest.fixture(autouse=True)
+def _default_clean_scan(monkeypatch: Any) -> None:
+    monkeypatch.setattr("patchy_bot.handlers.download._run_clamav_scan", lambda path, timeout_s: ("clean", []))
 
 
 def _completed_torrent(**overrides: Any) -> dict[str, Any]:

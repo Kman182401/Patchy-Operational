@@ -204,9 +204,9 @@ def score_torrent(
 
     score = 0
 
-    # Trash sources (TS/CAM/SCR) — not rejected but heavily penalised
+    # Trash sources (TS/CAM/SCR) are hard-blocked.
     if parsed.trash:
-        score -= 200
+        return TorrentScore(tier, -9999, True, "theatrical source (CAM/TS/SCR)", parsed)
 
     # ------------------------------------------------------------------
     # Source / release type points

@@ -75,24 +75,26 @@ def movie_track_line(track: dict) -> str:
         rel_status = str(track.get("release_status") or "unknown")
         home_ts = track.get("home_release_ts")
         release_ts = int(track.get("release_date_ts") or 0)
-        date_type = str(track.get("release_date_type") or "")
+        home_is_inferred = bool(track.get("home_date_is_inferred", 1))
         cur = now_ts()
         if rel_status == "pre_theatrical":
             status_line = "\U0001f3ac Not yet released"
         elif rel_status == "in_theaters":
             if home_ts:
-                status_line = f"\U0001f3ac In theaters \u00b7 Home est. {_relative_time(int(home_ts))}"
+                label = "Est. home release" if home_is_inferred else "Home release"
+                status_line = f"\U0001f3ac In theaters \u00b7 {label} {_relative_time(int(home_ts))}"
             else:
                 status_line = "\U0001f3ac In theaters"
         elif rel_status == "waiting_home":
             if home_ts:
-                status_line = f"\u23f3 Waiting \u00b7 Home release {_relative_time(int(home_ts))}"
+                label = "Est. home release" if home_is_inferred else "Home release"
+                status_line = f"\u23f3 Waiting \u00b7 {label} {_relative_time(int(home_ts))}"
             else:
                 status_line = "\u23f3 Waiting for home release"
         elif rel_status == "home_available":
             status_line = "\U0001f50d Searching for torrent\u2026"
         elif rel_status == "unknown" and release_ts > cur:
-            label = date_type.capitalize() if date_type else "Release"
+            label = "Est. home release" if home_is_inferred else "Home release"
             status_line = f"\u23f3 Waiting \u2014 {label} {_relative_time(release_ts)}"
         else:
             status_line = "\U0001f50d Searching for torrent\u2026"

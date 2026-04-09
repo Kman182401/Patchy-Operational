@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from patchy_bot.clients.tv_metadata import MovieReleaseStatus, TVMetadataClient
+from patchy_bot.clients.tv_metadata import MovieReleaseDates, MovieReleaseStatus, TVMetadataClient
 from patchy_bot.handlers.schedule import on_cb_movie_schedule
 from patchy_bot.store import Store
 from patchy_bot.types import HandlerContext
@@ -160,6 +160,31 @@ class TestMovieTrackCRUD:
 
 
 class TestTMDBMovieMethods:
+    def test_search_returns_upcoming_movie(self, tvmeta: TVMetadataClient) -> None:
+        seen_params: list[dict[str, Any]] = []
+        calls = 0
+
+        def fake_get_json(url: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
+            nonlocal calls
+            calls += 1
+            seen_params.append(dict(params or {}))
+            if calls == 1:
+                return {"results": []}
+            return {
+                "results": [
+                    {"id": 123, "title": "Scary Movie 6", "release_date": "", "overview": "", "popularity": 1.0}
+                ]
+            }
+
+        with patch.object(tvmeta, "_get_json", side_effect=fake_get_json):
+            results = tvmeta.search_movies("Scary Movie 6")
+
+        assert results
+        assert results[0]["title"] == "Scary Movie 6"
+        assert calls == 2
+        assert all("primary_release_year" not in p for p in seen_params)
+        assert all("region" not in p for p in seen_params)
+
     def test_search_movies_returns_top5(self, tvmeta: TVMetadataClient) -> None:
         fake_results = [
             {
@@ -474,9 +499,16 @@ class TestReleaseGateStore:
 
     def test_update_estimated_flag(self, store: Store) -> None:
         tid = store.create_movie_track(100, 457, "Est Movie", 2024, "theatrical", 1700000000, "Est 2024")
-        store.update_movie_release_dates(tid, 1700000000, 1703888000, None, 1703888000, True, "waiting_home")
+        store.update_movie_release_dates(tid, 1700000000, 1703888000, None, 1703888000, True, "waiting_home", True)
         track = store.get_movie_track(tid)
         assert track["digital_estimated"] == 1
+        assert track["home_date_is_inferred"] == 1
+
+    def test_home_date_is_inferred_column_exists(self, store: Store) -> None:
+        cols = {
+            row[1] for row in store._conn.execute("PRAGMA table_info(movie_tracks)").fetchall()  # type: ignore[attr-defined]
+        }
+        assert "home_date_is_inferred" in cols
 
     def test_get_movies_due_release_check_returns_unchecked(self, store: Store) -> None:
         """Tracks with no last_release_check_ts should be returned."""
@@ -643,7 +675,7 @@ class TestMovieScheduleCallbacks:
         query: MagicMock,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """msch:pick:<tmdb_id> stores tmdb_id and title in flow and advances stage."""
+        """msch:pick:<tmdb_id> stores release state and advances straight to confirm_date."""
         # Seed flow with candidates
         fake_app._set_flow(
             USER_ID,
@@ -655,11 +687,18 @@ class TestMovieScheduleCallbacks:
                 ],
             },
         )
-        # get_movie_release_dates returns digital date
-        release_dates = {"digital": 1_700_000_000}
-        monkeypatch.setattr(
-            "patchy_bot.handlers.schedule.asyncio.to_thread",
-            AsyncMock(return_value=release_dates),
+
+        async def passthrough(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        monkeypatch.setattr("patchy_bot.handlers.schedule.asyncio.to_thread", passthrough)
+        fake_app._ctx.tvmeta.get_movie_release_status.return_value = MovieReleaseDates(
+            tmdb_id=42,
+            theatrical_ts=1_690_000_000,
+            digital_ts=1_700_000_000,
+            home_release_ts=1_700_000_000,
+            home_date_is_inferred=False,
+            status=MovieReleaseStatus.WAITING_HOME,
         )
 
         await on_cb_movie_schedule(fake_app, data="msch:pick:42", q=query, user_id=USER_ID)
@@ -669,49 +708,9 @@ class TestMovieScheduleCallbacks:
         assert flow["tmdb_id"] == 42
         assert flow["title"] == "Inception"
         assert flow["year"] == 2010
-        assert flow["stage"] == "pick_date"
-        assert any(name == "schedule_ui" for name, _, _ in fake_app.render_calls)
-
-    @pytest.mark.asyncio
-    async def test_msch_date_stores_release_type(
-        self,
-        fake_app: FakeBotApp,
-        query: MagicMock,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """msch:date:<tmdb_id>:<type> stores date_type and advances to confirm_date."""
-        fake_app._set_flow(
-            USER_ID,
-            {
-                "mode": "msch_add",
-                "stage": "pick_date",
-                "tmdb_id": 42,
-                "title": "Inception",
-                "year": 2010,
-                "release_dates": {"digital": 1_700_000_000},
-            },
-        )
-        # to_thread: first call = movie_track_exists_for_tmdb (False), second = plex._sections
-        call_count = 0
-
-        async def fake_to_thread(fn, *args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return False  # movie_track_exists_for_tmdb
-            return []  # plex._sections fallback
-
-        monkeypatch.setattr("patchy_bot.handlers.schedule.asyncio.to_thread", fake_to_thread)
-        # Plex not ready so sections won't be called
-        fake_app.plex.ready.return_value = False
-
-        await on_cb_movie_schedule(fake_app, data="msch:date:42:digital", q=query, user_id=USER_ID)
-
-        flow = fake_app._get_flow(USER_ID)
-        assert flow is not None
-        assert flow["date_type"] == "digital"
-        assert flow["release_date_ts"] == 1_700_000_000
         assert flow["stage"] == "confirm_date"
+        assert flow["release_date_type"] == "home_release"
+        assert flow["home_date_is_inferred"] is False
         assert any(name == "schedule_ui" for name, _, _ in fake_app.render_calls)
 
     @pytest.mark.asyncio
@@ -730,18 +729,23 @@ class TestMovieScheduleCallbacks:
                 "tmdb_id": 99,
                 "title": "Dune Part Two",
                 "year": 2024,
-                "date_type": "digital",
+                "release_status": "waiting_home",
+                "release_date_type": "home_release",
                 "release_date_ts": 1_710_000_000,
+                "home_release_ts": 1_710_000_000,
+                "home_date_is_inferred": True,
+                "theatrical_ts": 1_700_000_000,
+                "digital_ts": None,
+                "physical_ts": None,
             },
         )
 
-        # Let to_thread run the real store calls
         async def passthrough(fn, *args, **kwargs):
             return fn(*args, **kwargs)
 
         monkeypatch.setattr("patchy_bot.handlers.schedule.asyncio.to_thread", passthrough)
 
-        await on_cb_movie_schedule(fake_app, data="msch:confirm:99:digital", q=query, user_id=USER_ID)
+        await on_cb_movie_schedule(fake_app, data="msch:confirm:99", q=query, user_id=USER_ID)
 
         # Flow should be cleared after confirm
         assert fake_app._get_flow(USER_ID) is None
@@ -750,7 +754,8 @@ class TestMovieScheduleCallbacks:
         assert len(tracks) == 1
         assert tracks[0]["tmdb_id"] == 99
         assert tracks[0]["title"] == "Dune Part Two"
-        assert tracks[0]["release_date_type"] == "digital"
+        assert tracks[0]["release_date_type"] == "home_release"
+        assert tracks[0]["home_date_is_inferred"] == 1
         # nav_ui rendered with confirmation message
         assert any(name == "nav_ui" for name, _, _ in fake_app.render_calls)
 
@@ -761,7 +766,7 @@ class TestMovieScheduleCallbacks:
         query: MagicMock,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """msch:date shows 'already tracked' and clears flow when the movie is a duplicate."""
+        """msch:confirm shows 'already tracked' and clears flow when the movie is a duplicate."""
         # Pre-create the track so it already exists
         fake_app.store.create_movie_track(
             USER_ID, 77, "Already Tracked", 2023, "theatrical", 1_700_000_000, "Already Tracked 2023"
@@ -770,11 +775,15 @@ class TestMovieScheduleCallbacks:
             USER_ID,
             {
                 "mode": "msch_add",
-                "stage": "pick_date",
+                "stage": "confirm_date",
                 "tmdb_id": 77,
                 "title": "Already Tracked",
                 "year": 2023,
-                "release_dates": {"theatrical": 1_700_000_000},
+                "release_status": "waiting_home",
+                "release_date_type": "home_release",
+                "release_date_ts": 1_700_000_000,
+                "home_release_ts": 1_700_000_000,
+                "home_date_is_inferred": True,
             },
         )
 
@@ -782,9 +791,7 @@ class TestMovieScheduleCallbacks:
             return fn(*args, **kwargs)
 
         monkeypatch.setattr("patchy_bot.handlers.schedule.asyncio.to_thread", passthrough)
-        fake_app.plex.ready.return_value = False
-
-        await on_cb_movie_schedule(fake_app, data="msch:date:77:theatrical", q=query, user_id=USER_ID)
+        await on_cb_movie_schedule(fake_app, data="msch:confirm:77", q=query, user_id=USER_ID)
 
         # Flow should be cleared
         assert fake_app._get_flow(USER_ID) is None
@@ -809,8 +816,11 @@ class TestMovieScheduleCallbacks:
                 "tmdb_id": 55,
                 "title": "Movie <Special> & Co",
                 "year": 2025,
-                "date_type": "digital",
+                "release_status": "waiting_home",
+                "release_date_type": "home_release",
                 "release_date_ts": 1_800_000_000,
+                "home_release_ts": 1_800_000_000,
+                "home_date_is_inferred": False,
             },
         )
 
@@ -819,7 +829,7 @@ class TestMovieScheduleCallbacks:
 
         monkeypatch.setattr("patchy_bot.handlers.schedule.asyncio.to_thread", passthrough)
 
-        await on_cb_movie_schedule(fake_app, data="msch:confirm:55:digital", q=query, user_id=USER_ID)
+        await on_cb_movie_schedule(fake_app, data="msch:confirm:55", q=query, user_id=USER_ID)
 
         # Collect all text args sent to nav_ui
         nav_texts = [args[2] for name, args, kwargs in fake_app.render_calls if name == "nav_ui" and len(args) > 2]
@@ -827,3 +837,93 @@ class TestMovieScheduleCallbacks:
         # Raw < and > must NOT appear; escaped forms must be present
         assert "<Special>" not in combined
         assert "&lt;Special&gt;" in combined
+
+
+def _make_bot(mock_config, mock_store, mock_qbt, mock_tvmeta, mock_plex):
+    mock_config.tmdb_api_key = "test-tmdb-key"
+    mock_config.tmdb_region = "US"
+    with (
+        patch("patchy_bot.bot.QBClient", return_value=mock_qbt),
+        patch("patchy_bot.bot.Store", return_value=mock_store),
+        patch("patchy_bot.bot.PlexInventoryClient", return_value=mock_plex),
+        patch("patchy_bot.bot.PatchyLLMClient", return_value=MagicMock()),
+        patch("patchy_bot.bot.TVMetadataClient", return_value=mock_tvmeta),
+    ):
+        from patchy_bot.bot import BotApp
+
+        app = BotApp(mock_config)
+    app.store = mock_store
+    app.qbt = mock_qbt
+    app.tvmeta = mock_tvmeta
+    app.plex = mock_plex
+    return app
+
+
+@pytest.mark.asyncio
+async def test_inferred_date_replaced_by_confirmed(mock_config, mock_store, mock_qbt, mock_tvmeta, mock_plex):
+    bot = _make_bot(mock_config, mock_store, mock_qbt, mock_tvmeta, mock_plex)
+    tid = mock_store.create_movie_track(12345, 321, "Future Film", 2026, "home_release", now_ts(), "Future Film 2026")
+    mock_store.update_movie_release_dates(tid, 1_700_000_000, 1_704_000_000, None, 1_704_000_000, True, "waiting_home", True)
+    mock_store._conn.execute("UPDATE movie_tracks SET last_release_check_ts = 0 WHERE track_id = ?", (tid,))  # type: ignore[attr-defined]
+    mock_store._conn.commit()  # type: ignore[attr-defined]
+    track = mock_store.get_movie_track(tid)
+    assert track is not None
+    mock_tvmeta.get_movie_home_release.return_value = MovieReleaseDates(
+        tmdb_id=321,
+        theatrical_ts=1_700_000_000,
+        digital_ts=now_ts() - 60,
+        home_release_ts=now_ts() - 60,
+        home_date_is_inferred=False,
+        status=MovieReleaseStatus.HOME_AVAILABLE,
+    )
+
+    should_search = await bot._check_movie_release_gate(track)
+
+    assert should_search is True
+    refreshed = mock_store.get_movie_track(tid)
+    assert refreshed is not None
+    assert refreshed["home_date_is_inferred"] == 0
+    assert refreshed["release_status"] == "home_available"
+
+
+@pytest.mark.asyncio
+async def test_inferred_date_unchanged_when_none_available(mock_config, mock_store, mock_qbt, mock_tvmeta, mock_plex):
+    bot = _make_bot(mock_config, mock_store, mock_qbt, mock_tvmeta, mock_plex)
+    tid = mock_store.create_movie_track(12345, 654, "Waiting Film", 2026, "home_release", now_ts(), "Waiting Film 2026")
+    mock_store.update_movie_release_dates(tid, 1_700_000_000, 1_704_000_000, None, 1_704_000_000, True, "waiting_home", True)
+    mock_store._conn.execute("UPDATE movie_tracks SET last_release_check_ts = 0 WHERE track_id = ?", (tid,))  # type: ignore[attr-defined]
+    mock_store._conn.commit()  # type: ignore[attr-defined]
+    track = mock_store.get_movie_track(tid)
+    assert track is not None
+    mock_tvmeta.get_movie_home_release.return_value = MovieReleaseDates(
+        tmdb_id=654,
+        theatrical_ts=1_700_000_000,
+        digital_ts=1_704_000_000,
+        home_release_ts=1_704_000_000,
+        home_date_is_inferred=True,
+        status=MovieReleaseStatus.WAITING_HOME,
+    )
+
+    should_search = await bot._check_movie_release_gate(track)
+
+    assert should_search is False
+    refreshed = mock_store.get_movie_track(tid)
+    assert refreshed is not None
+    assert refreshed["home_date_is_inferred"] == 1
+    assert refreshed["home_release_ts"] == 1_704_000_000
+
+
+@pytest.mark.asyncio
+async def test_auto_remove_when_in_plex(mock_config, mock_store, mock_qbt, mock_tvmeta, mock_plex):
+    bot = _make_bot(mock_config, mock_store, mock_qbt, mock_tvmeta, mock_plex)
+    tid = mock_store.create_movie_track(12345, 777, "Already In Plex", 2024, "home_release", now_ts(), "Already In Plex 2024")
+    mock_store.update_movie_release_dates(tid, 1_700_000_000, None, None, 1_704_000_000, True, "waiting_home", True)
+    track = mock_store.get_movie_track(tid)
+    assert track is not None
+    mock_plex.ready.return_value = True
+    mock_plex.movie_exists.return_value = True
+
+    removed = await bot._remove_movie_track_if_in_plex(track)
+
+    assert removed is True
+    assert mock_store.get_movie_track(tid) is None

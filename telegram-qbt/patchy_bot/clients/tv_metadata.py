@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 from enum import Enum
+import re
 from typing import Any
 
 import requests
@@ -38,6 +39,7 @@ class MovieReleaseDates:
     tv_ts: int | None = None
     digital_estimated: bool = False
     home_release_ts: int | None = None
+    home_date_is_inferred: bool = False
     status: MovieReleaseStatus = MovieReleaseStatus.UNKNOWN
 
 
@@ -182,10 +184,16 @@ class TVMetadataClient:
     def search_movies(self, query: str, page: int = 1) -> list[dict[str, Any]]:
         if not self.tmdb_api_key:
             return []
-        try:
+
+        def _run_search(raw_query: str) -> list[dict[str, Any]]:
             data = self._get_json(
                 "https://api.themoviedb.org/3/search/movie",
-                params={"api_key": self.tmdb_api_key, "query": query, "language": "en-US", "page": page},
+                params={
+                    "api_key": self.tmdb_api_key,
+                    "query": raw_query,
+                    "include_adult": "false",
+                    "page": page,
+                },
             )
             out: list[dict[str, Any]] = []
             for r in list(data.get("results") or [])[:5]:
@@ -201,9 +209,25 @@ class TVMetadataClient:
                     }
                 )
             return out
+
+        try:
+            first_pass = _run_search(query)
+            if first_pass:
+                return first_pass
+
+            normalized = self._normalize_movie_query(query)
+            if normalized and normalized != query.strip():
+                return _run_search(normalized)
+            return []
         except Exception as exc:
             LOG.warning("search_movies(%r) failed: %s", query, exc)
             return []
+
+    @staticmethod
+    def _normalize_movie_query(query: str) -> str:
+        cleaned = re.sub(r"[^\w\s]", " ", str(query or ""))
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned.lower()
 
     def get_movie_release_dates(self, tmdb_id: int, region: str) -> dict[str, int]:
         if not self.tmdb_api_key:
@@ -303,5 +327,10 @@ class TVMetadataClient:
             tv_ts=tv_ts,
             digital_estimated=digital_estimated,
             home_release_ts=home_release_ts,
+            home_date_is_inferred=digital_estimated,
             status=status,
         )
+
+    def get_movie_release_status(self, tmdb_id: int, region: str) -> MovieReleaseDates:
+        """Return the movie's current release-state snapshot for scheduling logic."""
+        return self.get_movie_home_release(tmdb_id, region)

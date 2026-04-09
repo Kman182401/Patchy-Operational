@@ -29,7 +29,7 @@ from telegram.ext import (
 from .clients.llm import PatchyLLMClient
 from .clients.plex import PlexInventoryClient
 from .clients.qbittorrent import QBClient
-from .clients.tv_metadata import TVMetadataClient
+from .clients.tv_metadata import MovieReleaseStatus, TVMetadataClient
 from .config import Config
 from .dispatch import CallbackDispatcher
 from .handlers import _shared
@@ -2245,6 +2245,8 @@ class BotApp:
         pending = await asyncio.to_thread(self.store.get_pending_movie_tracks)
         for track in pending:
             try:
+                if await self._remove_movie_track_if_in_plex(track):
+                    continue
                 await self._check_pending_movie_track(track)
             except Exception:
                 LOG.warning("Movie track check failed for %s", track.get("track_id"), exc_info=True)
@@ -2256,6 +2258,29 @@ class BotApp:
             except Exception:
                 LOG.warning("Movie Plex check failed for %s", track.get("track_id"), exc_info=True)
 
+    async def _remove_movie_track_if_in_plex(self, track: dict[str, Any]) -> bool:
+        """Delete a movie track when the movie is already present in Plex."""
+        release_status = str(track.get("release_status") or "unknown")
+        if release_status == MovieReleaseStatus.PRE_THEATRICAL.value:
+            return False
+        if not self.plex.ready():
+            return False
+
+        track_id = str(track.get("track_id") or "")
+        title = str(track.get("title") or "")
+        year = track.get("year")
+        try:
+            in_plex = await asyncio.to_thread(self.plex.movie_exists, title, year)
+        except Exception as exc:
+            LOG.warning("Movie Plex existence check failed for %s: %s", track_id, exc)
+            return False
+        if not in_plex:
+            return False
+
+        await asyncio.to_thread(self.store.delete_movie_track, track_id)
+        LOG.info("[MovieTrack] %s: found in Plex, track removed", title)
+        return True
+
     async def _check_movie_release_gate(self, track: dict[str, Any]) -> bool:
         """Check if a movie's home release date has passed. Returns True if search should proceed."""
         track_id = str(track.get("track_id") or "")
@@ -2264,16 +2289,16 @@ class BotApp:
         release_status = str(track.get("release_status") or "unknown")
 
         # Already confirmed home available — proceed immediately
-        if release_status == MovieReleaseStatus.HOME_AVAILABLE:
+        if release_status == MovieReleaseStatus.HOME_AVAILABLE.value:
             return True
 
-        # No TMDB ID — can't check, mark unknown and allow search (fall through to quality gate)
+        # No TMDB ID — fail closed. Movie auto-download requires a known TMDB release state.
         if not tmdb_id:
-            LOG.warning("Movie track %s (%s): no tmdb_id, skipping release gate", track_id, title)
-            return True
+            LOG.warning("Movie track %s (%s): no tmdb_id, release gate blocking search", track_id, title)
+            return False
 
         # Determine re-check interval based on current status
-        if release_status == MovieReleaseStatus.PRE_THEATRICAL:
+        if release_status == MovieReleaseStatus.PRE_THEATRICAL.value:
             recheck_interval = 24 * 3600  # 24 hours
         else:
             recheck_interval = 6 * 3600  # 6 hours for in_theaters, waiting_home, unknown
@@ -2283,13 +2308,12 @@ class BotApp:
         if last_check > 0 and (now_ts() - last_check) < recheck_interval:
             # Not time to re-check yet. Use cached status to decide.
             if release_status in (
-                MovieReleaseStatus.PRE_THEATRICAL,
-                MovieReleaseStatus.IN_THEATERS,
-                MovieReleaseStatus.WAITING_HOME,
+                MovieReleaseStatus.PRE_THEATRICAL.value,
+                MovieReleaseStatus.IN_THEATERS.value,
+                MovieReleaseStatus.WAITING_HOME.value,
             ):
                 return False
-            # UNKNOWN — let it through to search (quality.py will filter CAM/TS)
-            return True
+            return release_status == MovieReleaseStatus.HOME_AVAILABLE.value
 
         # Fetch fresh release dates from TMDB
         try:
@@ -2302,12 +2326,10 @@ class BotApp:
                 track_id,
                 now_ts() + 900,  # 15-minute retry
             )
-            return release_status not in (
-                MovieReleaseStatus.PRE_THEATRICAL,
-                MovieReleaseStatus.IN_THEATERS,
-                MovieReleaseStatus.WAITING_HOME,
-            )
+            return release_status == MovieReleaseStatus.HOME_AVAILABLE.value
 
+        prior_inferred = bool(track.get("home_date_is_inferred", 1))
+        prior_home_ts = track.get("home_release_ts")
         # Update DB with fresh dates
         await asyncio.to_thread(
             self.store.update_movie_release_dates,
@@ -2318,7 +2340,27 @@ class BotApp:
             dates.home_release_ts,
             dates.digital_estimated,
             dates.status.value,
+            dates.home_date_is_inferred,
         )
+
+        if prior_inferred and not dates.home_date_is_inferred and dates.home_release_ts:
+            LOG.info(
+                "[MovieTrack] %s: inferred home date replaced with confirmed TMDb date %s",
+                title,
+                format_local_ts(int(dates.home_release_ts)),
+            )
+        elif (
+            prior_inferred
+            and prior_home_ts
+            and dates.home_release_ts
+            and int(prior_home_ts) != int(dates.home_release_ts)
+            and not dates.home_date_is_inferred
+        ):
+            LOG.info(
+                "[MovieTrack] %s: inferred home date replaced with confirmed TMDb date %s",
+                title,
+                format_local_ts(int(dates.home_release_ts)),
+            )
 
         new_status = dates.status
         LOG.info(
@@ -2348,22 +2390,30 @@ class BotApp:
         )
         return False
 
+    @staticmethod
+    def _movie_result_is_theatrical_source(row: dict[str, Any]) -> bool:
+        """Return True for theater-sourced movie results (CAM/TS/TC)."""
+        qs = row.get("_quality_score")
+        parsed = getattr(qs, "parsed", None)
+        if parsed is not None and getattr(parsed, "trash", False):
+            return True
+        name = str(row.get("fileName") or row.get("name") or "").lower()
+        quality_str = str(getattr(parsed, "quality", "") or "").lower() if parsed is not None else ""
+        theatrical_re = re.compile(r"\b(cam|hdcam|ts|hdts|telesync|tc|telecine)\b", re.IGNORECASE)
+        return bool(theatrical_re.search(quality_str) or theatrical_re.search(name))
+
     async def _check_pending_movie_track(self, track: dict[str, Any]) -> None:
         """Search for a torrent for a pending movie track."""
         track_id = str(track.get("track_id") or "")
-        search_query = str(track.get("search_query") or "")
         user_id = int(track.get("user_id") or 0)
         title = str(track.get("title") or "")
         year = track.get("year")
+        search_query = f"{title} {year}" if year else title
 
         # Release gate: skip torrent search if movie isn't on home video yet
         should_search = await self._check_movie_release_gate(track)
         if not should_search:
-            LOG.info(
-                "Movie track %s: skipping search (release gate: %s)",
-                track_id,
-                track.get("release_status", "unknown"),
-            )
+            LOG.debug("Movie track %s: skipping search (release gate: %s)", track_id, track.get("release_status", "unknown"))
             return
 
         LOG.info("Movie track check: searching for '%s'", search_query)
@@ -2398,7 +2448,7 @@ class BotApp:
             min_seeds=int(defaults.get("default_min_seeds") or 0),
             min_size=None,
             max_size=None,
-            min_quality=self.cfg.default_min_quality,
+            min_quality=1080,
         )
         filtered = search_handler.deduplicate_results(filtered)
 
@@ -2407,14 +2457,45 @@ class BotApp:
         best_score = (-1, -99999)
         for row in filtered:
             qs = row.get("_quality_score")
-            if qs and not qs.is_rejected:
-                score_key = (qs.resolution_tier, qs.format_score)
-                if score_key > best_score:
-                    best_score = score_key
-                    best = row
+            if not qs or qs.is_rejected:
+                continue
+            if qs.resolution_tier < 3:
+                continue
+            if self._movie_result_is_theatrical_source(row):
+                continue
+            try:
+                url, torrent_hash, malware_scan = download_handler.scan_download_candidate(
+                    row,
+                    media_type="movie",
+                    files=[],
+                )
+            except Exception as exc:
+                LOG.warning("Movie track %s: candidate inspection failed for %s: %s", track_id, row.get("name"), exc)
+                continue
+            if malware_scan.is_blocked:
+                try:
+                    await asyncio.to_thread(
+                        self.store.log_malware_block,
+                        torrent_hash or str(row.get("hash") or row.get("fileHash") or row.get("name") or ""),
+                        str(row.get("name") or ""),
+                        "download",
+                        malware_scan.reasons,
+                    )
+                except Exception:
+                    pass
+                continue
+            if not torrent_hash:
+                LOG.debug("Movie track %s: skipping candidate without usable hash: %s", track_id, row.get("name"))
+                continue
+            row["_scan_url"] = url
+            row["_scan_hash"] = torrent_hash
+            score_key = (qs.resolution_tier, qs.format_score)
+            if score_key > best_score:
+                best_score = score_key
+                best = row
 
         if best is None:
-            LOG.info("Movie track %s: no acceptable torrent found, retrying in 1h", track_id)
+            LOG.debug("Movie track %s: no acceptable torrent found, retrying in 1h", track_id)
             await asyncio.to_thread(
                 self.store.update_movie_track_status,
                 track_id,
@@ -2425,7 +2506,9 @@ class BotApp:
 
         # Build URL and add torrent
         try:
-            url = download_handler.result_to_url(best)
+            url = str(best.get("_scan_url") or "")
+            if not url:
+                raise RuntimeError("No validated download URL found")
         except RuntimeError as e:
             LOG.warning("Movie track %s: no usable URL: %s", track_id, e)
             await asyncio.to_thread(
@@ -2456,48 +2539,14 @@ class BotApp:
             )
             return
 
-        torrent_hash = download_handler.extract_hash(best, url) or ""
-        LOG.info("Movie track %s: downloading '%s' (hash=%s)", track_id, torrent_name, torrent_hash)
+        torrent_hash = str(best.get("_scan_hash") or "")
+        LOG.info("[MovieAutoDownload] %s (%s): queued %s", title, year, torrent_name)
         await asyncio.to_thread(
             self.store.update_movie_track_status,
             track_id,
             status="downloading",
             torrent_hash=torrent_hash,
         )
-
-        # Send notification
-        if self.app and user_id:
-            qs = best.get("_quality_score")
-            qlabel = quality_label(qs.parsed) if qs else ""
-            try:
-                notif_msg = await self.app.bot.send_message(
-                    chat_id=user_id,
-                    text=(
-                        f"⬇️ Found <b>{_h(title)}</b>"
-                        f"{f' ({year})' if year else ''}"
-                        f" — downloading now!\n\n"
-                        f"<code>{_h(torrent_name)}</code>\n"
-                        f"Quality: {_h(qlabel)}"
-                    ),
-                    parse_mode=_PM,
-                )
-                await asyncio.to_thread(
-                    self.store.update_movie_track_status,
-                    track_id,
-                    notified=True,
-                )
-                if torrent_hash:
-                    tracker_msg = await self.app.bot.send_message(
-                        chat_id=user_id,
-                        text=f"<b>📡 Live Monitor Attached</b>\n<i>Tracking {_h(torrent_name)} download progress…</i>",
-                        reply_markup=self._stop_download_keyboard(torrent_hash),
-                        parse_mode=_PM,
-                    )
-                    self._start_progress_tracker(user_id, torrent_hash, tracker_msg, torrent_name)
-                else:
-                    self._start_pending_progress_tracker(user_id, torrent_name, self.cfg.movies_category, notif_msg)
-            except Exception:
-                LOG.warning("Failed to send movie download notification", exc_info=True)
 
     async def _check_downloading_movie_track(self, track: dict[str, Any]) -> None:
         """Check if a downloading movie has appeared in Plex."""
@@ -2563,17 +2612,7 @@ class BotApp:
             await asyncio.to_thread(self.store.reset_movie_plex_failures, track_id)
 
         if in_plex:
-            LOG.info("Movie track complete, in Plex: %s (%s)", title, year)
-            user_id = int(track.get("user_id") or 0)
-            if self.app and user_id:
-                try:
-                    await self.app.bot.send_message(
-                        chat_id=user_id,
-                        text=(f"🎬 <b>{_h(title)}</b>{f' ({year})' if year else ''} is now available in Plex!"),
-                        parse_mode=_PM,
-                    )
-                except Exception:
-                    LOG.warning("Failed to send movie completion notification", exc_info=True)
+            LOG.info("[MovieTrack] %s: found in Plex, track removed", title)
             await asyncio.to_thread(self.store.delete_movie_track, track_id)
 
     # ------------------------------------------------------------------
@@ -3483,6 +3522,11 @@ class BotApp:
     def _remove_season_action_keyboard(self, selected: bool, selected_count: int) -> InlineKeyboardMarkup:
         return remove_handler.remove_season_action_keyboard(selected, selected_count)
 
+    def _remove_season_detail_keyboard(
+        self, season_candidate: dict[str, Any], selected_paths: set[str] | None, show_idx: int
+    ) -> InlineKeyboardMarkup:
+        return remove_handler.remove_season_detail_keyboard(season_candidate, selected_paths, show_idx)
+
     @staticmethod
     def _remove_page_bounds(items: list[dict[str, Any]], page: int, per_page: int = 8) -> tuple[int, int, int, int]:
         return remove_handler.remove_page_bounds(items, page, per_page)
@@ -3496,6 +3540,7 @@ class BotApp:
         nav_prefix: str,
         back_callback: str | None = None,
         selected_paths: set[str] | None = None,
+        compact_browse_footer: bool = False,
     ) -> InlineKeyboardMarkup:
         return remove_handler.remove_paginated_keyboard(
             items,
@@ -3504,6 +3549,7 @@ class BotApp:
             nav_prefix=nav_prefix,
             back_callback=back_callback,
             selected_paths=selected_paths,
+            compact_browse_footer=compact_browse_footer,
         )
 
     def _remove_list_text(
@@ -4157,6 +4203,7 @@ class BotApp:
                 "show_actions",
                 "browse_children",
                 "season_actions",
+                "season_detail",
                 "browse_episodes",
             }:
                 await self._cleanup_private_user_message(msg)

@@ -2519,6 +2519,8 @@ async def on_cb_movie_schedule(bot_app: Any, *, data: str, q: Any, user_id: int)
     # msch:pick:{tmdb_id} — user selected a movie from search results
     # ------------------------------------------------------------------
     if data.startswith("msch:pick:"):
+        from ..clients.tv_metadata import MovieReleaseStatus
+
         tmdb_id_str = data.split(":", 2)[2]
         flow = bot_app._get_flow(user_id)
         candidates: list[dict[str, Any]] = list(flow.get("candidates") or []) if flow else []
@@ -2540,68 +2542,120 @@ async def on_cb_movie_schedule(bot_app: Any, *, data: str, q: Any, user_id: int)
         title = str(candidate.get("title") or "")
         year: int | None = candidate.get("year")
         tmdb_id = int(tmdb_id_str)
-        # Fetch release dates
         region = str(getattr(ctx.cfg, "tmdb_region", None) or "US")
-        release_dates: dict[str, int] = await asyncio.to_thread(ctx.tvmeta.get_movie_release_dates, tmdb_id, region)
-        if not release_dates:
+        try:
+            release_info = await asyncio.to_thread(ctx.tvmeta.get_movie_release_status, tmdb_id, region)
+        except Exception:
+            await bot_app._render_schedule_ui(
+                user_id,
+                q.message,
+                flow,
+                f"Could not determine the release state for <b>{_h(title)}{_h(f' ({year})' if year else '')}</b>.\n\n"
+                f"Try again later.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back", callback_data="msch:cancel")]]),
+                current_ui_message=q.message,
+            )
+            return
+        if release_info.status.value == "unknown":
             year_str = f" ({year})" if year else ""
             await bot_app._render_schedule_ui(
                 user_id,
                 q.message,
                 flow,
-                f"No release dates found for <b>{_h(title)}{_h(year_str)}</b> in your region ({_h(region)}).\n\n"
-                f"Try a different title or check back later.",
+                f"Could not determine the release state for <b>{_h(title)}{_h(year_str)}</b>.\n\n"
+                f"Try again later.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back", callback_data="msch:cancel")]]),
                 current_ui_message=q.message,
             )
             return
-        # Update flow with selected movie info
+
+        home_release_ts = int(release_info.home_release_ts or 0)
+        home_is_inferred = bool(release_info.home_date_is_inferred)
+        release_label = "🔄 Est. home release" if home_is_inferred else "📅 Home release"
+        release_line = (
+            f"{release_label}: <b>{format_local_ts(home_release_ts)}</b>"
+            if home_release_ts
+            else f"{release_label}: <b>To be announced</b>"
+        )
+
+        if release_info.status == MovieReleaseStatus.PRE_THEATRICAL:
+            summary = (
+                f"⏳ <b>{_h(title)}{_h(f' ({year})' if year else '')}</b> is currently not yet released. "
+                f"It will be automatically downloaded when available for home viewing."
+            )
+        elif release_info.status == MovieReleaseStatus.IN_THEATERS:
+            summary = (
+                f"⏳ <b>{_h(title)}{_h(f' ({year})' if year else '')}</b> is currently in theaters. "
+                f"It will be automatically downloaded when available for home viewing."
+            )
+        elif release_info.status == MovieReleaseStatus.WAITING_HOME:
+            when = format_local_ts(home_release_ts) if home_release_ts else "TBA"
+            summary = (
+                f"⏳ <b>{_h(title)}{_h(f' ({year})' if year else '')}</b> has left theaters. "
+                f"Waiting for home release on {when}."
+            )
+        else:
+            summary = (
+                f"✅ <b>{_h(title)}{_h(f' ({year})' if year else '')}</b> appears to already be available for home "
+                f"viewing. Scheduling anyway — auto-download will fire on next runner tick."
+            )
+
         flow = flow or {"mode": "msch_add", "stage": "title"}
         flow["tmdb_id"] = tmdb_id
         flow["title"] = title
         flow["year"] = year
-        flow["release_dates"] = release_dates
-        flow["stage"] = "pick_date"
+        flow["release_status"] = release_info.status.value
+        flow["release_date_type"] = "home_release"
+        flow["release_date_ts"] = home_release_ts or now_ts()
+        flow["home_date_is_inferred"] = home_is_inferred
+        flow["theatrical_ts"] = release_info.theatrical_ts
+        flow["digital_ts"] = release_info.digital_ts
+        flow["physical_ts"] = release_info.physical_ts
+        flow["home_release_ts"] = home_release_ts or None
+        flow["stage"] = "confirm_date"
         bot_app._set_flow(user_id, flow)
-        year_str = f" ({year})" if year else ""
-        date_type_labels = {
-            "theatrical": "\U0001f3ac Theatrical",
-            "digital": "\U0001f4bf Digital",
-            "physical": "\U0001f4e6 Physical",
-        }
-        date_rows: list[list[InlineKeyboardButton]] = []
-        for dt, ts in release_dates.items():
-            label = date_type_labels.get(dt, dt.capitalize())
-            date_rows.append(
-                [
-                    InlineKeyboardButton(
-                        f"{label} \u2014 {_relative_time(ts)}", callback_data=f"msch:date:{tmdb_id}:{dt}"
-                    )
-                ]
-            )
-        date_rows.append([InlineKeyboardButton("↩️ Back", callback_data="msch:cancel")])
         await bot_app._render_schedule_ui(
             user_id,
             q.message,
             flow,
-            f"<b>{_h(title)}{_h(year_str)}</b>\n\nChoose which release date to track:",
-            reply_markup=InlineKeyboardMarkup(date_rows),
+            "\n\n".join([summary, release_line]),
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("✅ Track it", callback_data=f"msch:confirm:{tmdb_id}")],
+                    [InlineKeyboardButton("↩️ Back", callback_data="msch:cancel")],
+                ]
+            ),
             current_ui_message=q.message,
         )
         return
 
     # ------------------------------------------------------------------
-    # msch:date:{tmdb_id}:{date_type} — user chose a release date type
+    # msch:date:* — legacy callback no longer used
     # ------------------------------------------------------------------
     if data.startswith("msch:date:"):
-        _, _, tmdb_id_str, date_type = data.split(":", 3)
+        await bot_app._render_schedule_ui(
+            user_id,
+            q.message,
+            bot_app._get_flow(user_id),
+            "Movie release-type selection has been removed. Please select the movie again.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back", callback_data="msch:cancel")]]),
+            current_ui_message=q.message,
+        )
+        return
+
+    # ------------------------------------------------------------------
+    # msch:confirm:{tmdb_id} — create the track record
+    # ------------------------------------------------------------------
+    if data.startswith("msch:confirm:"):
+        parts = data.split(":")
+        tmdb_id_str = parts[2]
         tmdb_id = int(tmdb_id_str)
         flow = bot_app._get_flow(user_id)
         title = str((flow or {}).get("title") or "")
         year = (flow or {}).get("year")
-        release_dates = dict((flow or {}).get("release_dates") or {})
-        release_ts = int(release_dates.get(date_type) or 0)
-        # Check for duplicate
+        release_ts = int((flow or {}).get("release_date_ts") or 0)
+        release_status = str((flow or {}).get("release_status") or "unknown")
+        home_date_is_inferred = bool((flow or {}).get("home_date_is_inferred", True))
         already = await asyncio.to_thread(ctx.store.movie_track_exists_for_tmdb, user_id, tmdb_id)
         if already:
             bot_app._clear_flow(user_id)
@@ -2616,95 +2670,36 @@ async def on_cb_movie_schedule(bot_app: Any, *, data: str, q: Any, user_id: int)
                 current_ui_message=q.message,
             )
             return
-        # Check Plex
-        in_plex = False
-        try:
-            plex_client = getattr(ctx, "plex", None)
-            if plex_client is not None and plex_client.ready():
-                sections = await asyncio.to_thread(plex_client._sections)
-                for section in sections:
-                    if str(section.get("type") or "") == "movie":
-                        root = await asyncio.to_thread(
-                            plex_client._get_xml,
-                            f"/library/sections/{section['key']}/all",
-                            params={"type": 1, "title": title},
-                        )
-                        if root.findall(".//*[@ratingKey]"):
-                            in_plex = True
-                            break
-        except Exception:
-            pass  # Plex unreachable, skip silently
-        # Update flow with chosen date
-        flow = flow or {"mode": "msch_add"}
-        flow["date_type"] = date_type
-        flow["release_date_ts"] = release_ts
-        flow["stage"] = "confirm_date"
-        bot_app._set_flow(user_id, flow)
-        year_str = f" ({year})" if year else ""
-        date_type_labels = {
-            "theatrical": "\U0001f3ac Theatrical",
-            "digital": "\U0001f4bf Digital",
-            "physical": "\U0001f4e6 Physical",
-        }
-        dt_label = date_type_labels.get(date_type, date_type.capitalize())
-        release_line = (
-            f"{dt_label} release: <b>{format_local_ts(release_ts)}</b>"
-            if release_ts
-            else f"{dt_label} release date unknown"
-        )
-        confirm_text = (
-            f"<b>\U0001f3ac Track Movie</b>\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\n"
-            f"<b>{_h(title)}{_h(year_str)}</b>\n{release_line}\n\n"
-            f"I'll start searching for a torrent after the release date."
-        )
-        confirm_rows: list[list[InlineKeyboardButton]] = []
-        if in_plex:
-            confirm_text += "\n\n\u26a0\ufe0f <i>This movie already appears to be in your Plex library.</i>"
-            confirm_rows.append(
-                [InlineKeyboardButton("\u2705 Track anyway", callback_data=f"msch:confirm:{tmdb_id}:{date_type}")]
-            )
-        else:
-            confirm_rows.append(
-                [InlineKeyboardButton("\u2705 Track it", callback_data=f"msch:confirm:{tmdb_id}:{date_type}")]
-            )
-        confirm_rows.append([InlineKeyboardButton("↩️ Back", callback_data="msch:cancel")])
-        await bot_app._render_schedule_ui(
-            user_id,
-            q.message,
-            flow,
-            confirm_text,
-            reply_markup=InlineKeyboardMarkup(confirm_rows),
-            current_ui_message=q.message,
-        )
-        return
-
-    # ------------------------------------------------------------------
-    # msch:confirm:{tmdb_id}:{date_type} — create the track record
-    # ------------------------------------------------------------------
-    if data.startswith("msch:confirm:"):
-        _, _, tmdb_id_str, date_type = data.split(":", 3)
-        tmdb_id = int(tmdb_id_str)
-        flow = bot_app._get_flow(user_id)
-        title = str((flow or {}).get("title") or "")
-        year = (flow or {}).get("year")
-        release_ts = int((flow or {}).get("release_date_ts") or 0)
         search_query = f"{title} {year}" if year else title
-        await asyncio.to_thread(
+        track_id = await asyncio.to_thread(
             ctx.store.create_movie_track,
             user_id,
             tmdb_id,
             title,
             year,
-            date_type,
-            release_ts,
+            "home_release",
+            now_ts(),
             search_query,
+            home_date_is_inferred,
+        )
+        await asyncio.to_thread(
+            ctx.store.update_movie_release_dates,
+            track_id,
+            (flow or {}).get("theatrical_ts"),
+            (flow or {}).get("digital_ts"),
+            (flow or {}).get("physical_ts"),
+            (flow or {}).get("home_release_ts"),
+            home_date_is_inferred,
+            release_status,
+            home_date_is_inferred,
         )
         bot_app._clear_flow(user_id)
-        release_note = f" after {format_local_ts(release_ts)}" if release_ts else ""
+        date_label = "Est. home release" if home_date_is_inferred else "Home release"
+        release_note = f"\n{date_label}: <b>{format_local_ts(release_ts)}</b>" if release_ts else ""
         await bot_app._render_nav_ui(
             user_id,
             q.message,
-            f"\u2705 Now tracking <b>{_h(title)}</b>. I'll search for it{release_note}.",
+            f"\u2705 Now tracking <b>{_h(title)}</b>.{release_note}",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\U0001f3e0 Home", callback_data="nav:home")]]),
             current_ui_message=q.message,
         )

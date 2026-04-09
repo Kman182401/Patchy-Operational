@@ -414,6 +414,117 @@ def test_remove_toggle_label_omits_empty_checkbox_prefix() -> None:
     assert selected == "✅ Season 1"
 
 
+def test_remove_toggle_label_tv_show_uses_show_name() -> None:
+    from patchy_bot.handlers.remove import remove_toggle_label
+
+    candidate = {
+        "name": "Daredevil.Born.Again.S02E01.1080p.WEB.h264-ETHEL",
+        "remove_kind": "show",
+        "show_name": "Daredevil Born Again",
+        "path": "/srv/tv/Daredevil Born Again",
+    }
+
+    assert remove_toggle_label(candidate, set()) == "Daredevil Born Again"
+
+
+def test_remove_toggle_label_tv_show_no_raw_release_name() -> None:
+    from patchy_bot.handlers.remove import remove_toggle_label
+
+    candidate = {
+        "name": "Better.Call.Saul.S06E01.1080p.WEB-DL",
+        "remove_kind": "show",
+        "show_name": None,
+        "path": "/srv/tv/Better.Call.Saul.S06E01.1080p.WEB-DL",
+    }
+
+    result = remove_toggle_label(candidate, set())
+
+    assert "." not in result
+    assert "1080p" not in result
+    assert "WEB" not in result
+
+
+def test_remove_toggle_label_season_multiseason() -> None:
+    from patchy_bot.handlers.remove import remove_toggle_label
+
+    candidate = {
+        "name": "Season 2",
+        "remove_kind": "season",
+        "show_name": "Daredevil Born Again",
+        "season_number": 2,
+        "path": "/srv/tv/Daredevil Born Again/Season 2",
+    }
+
+    assert remove_toggle_label(candidate, set()) == "Daredevil Born Again Season 2"
+
+
+def test_remove_toggle_label_season_selected_prefix() -> None:
+    from patchy_bot.handlers.remove import remove_toggle_label
+
+    path = "/srv/tv/Daredevil Born Again/Season 2"
+    candidate = {
+        "name": "Season 2",
+        "remove_kind": "season",
+        "show_name": "Daredevil Born Again",
+        "season_number": 2,
+        "path": path,
+    }
+
+    assert remove_toggle_label(candidate, {path}).startswith("✅")
+
+
+def test_remove_candidate_text_tv_show_no_raw_release_name() -> None:
+    from patchy_bot.handlers.remove import remove_candidate_text
+
+    candidate = {
+        "name": "Daredevil.Born.Again.S02.1080p",
+        "remove_kind": "show",
+        "show_name": "Daredevil Born Again",
+        "is_dir": True,
+        "root_label": "TV",
+        "path": "/srv/tv/Daredevil Born Again",
+        "size_bytes": 8_000_000_000,
+    }
+
+    text = remove_candidate_text(candidate)
+
+    assert "Daredevil Born Again" in text
+    assert "Daredevil.Born" not in text
+    assert "1080p" not in text
+
+
+def test_remove_candidate_text_movie_format() -> None:
+    from patchy_bot.handlers.remove import remove_candidate_text
+
+    candidate = {
+        "name": "The.Dark.Knight.2008.1080p.BluRay",
+        "remove_kind": "movie",
+        "is_dir": True,
+        "root_label": "Movies",
+        "path": "/srv/movies/TDK",
+        "size_bytes": 10_000_000_000,
+    }
+
+    text = remove_candidate_text(candidate)
+
+    assert "The Dark Knight (2008)" in text
+
+
+def test_extract_movie_name_no_trailing_dots() -> None:
+    from patchy_bot.handlers.remove import extract_movie_name
+
+    inputs = [
+        "The.Dark.Knight.2008.1080p",
+        "Dune.Part.Two.2024.2160p.IMAX",
+        "Some.Movie.Without.Year.1080p",
+        "www.UIndex.org - Dune.Part.Two.2024.mkv",
+    ]
+
+    for value in inputs:
+        result = extract_movie_name(value)
+        assert "." not in result, f"Dots found in: {result!r} (input: {value!r})"
+
+
 def test_remove_confirm_keyboard_compacts_small_action_sets_into_two_columns() -> None:
     class DummyBot:
         _nav_footer = BotApp._nav_footer
@@ -513,6 +624,91 @@ def test_remove_show_action_screen_displays_series_selected_in_text_not_button(t
         ["🧾 Review Selection (1)", "🧹 Clear Selection"],
         ["🏠 Home"],
     ]
+
+
+def test_remove_season_detail_keyboard_uses_back_and_home(tmp_path) -> None:
+    from patchy_bot.handlers.remove import remove_season_detail_keyboard
+
+    season_dir = tmp_path / "Example Show" / "Season 2"
+    season_dir.mkdir(parents=True)
+    candidate = {
+        "name": "Season 2",
+        "remove_kind": "season",
+        "show_name": "Example Show",
+        "season_number": 2,
+        "path": str(season_dir),
+    }
+
+    keyboard = remove_season_detail_keyboard(candidate, set(), 0).inline_keyboard
+
+    assert [[button.text for button in row] for row in keyboard] == [
+        ["🗑 Delete Season 2"],
+        ["📋 Select Episodes"],
+        ["◀️ Back", "🏠 Home"],
+    ]
+
+
+def test_remove_browse_movie_list_compacts_footer_without_changing_item_rows(tmp_path) -> None:
+    from patchy_bot.handlers.remove import remove_paginated_keyboard
+
+    items = [
+        {
+            "name": f"Movie {idx}",
+            "path": str(tmp_path / f"movie-{idx}.mkv"),
+            "remove_kind": "movie",
+        }
+        for idx in range(9)
+    ]
+
+    keyboard = remove_paginated_keyboard(
+        items,
+        0,
+        item_prefix="rm:pick",
+        nav_prefix="rm:bpage",
+        back_callback="rm:browse",
+        selected_paths=set(),
+        compact_browse_footer=True,
+    ).inline_keyboard
+
+    assert [[button.text for button in row] for row in keyboard[-2:]] == [
+        ["Next ➡️", "⬅️ Back"],
+        ["🧾 Review Selection (0)", "🏠 Home"],
+    ]
+
+
+def test_remove_browse_movie_list_keeps_selected_footer_actions_available(tmp_path) -> None:
+    from patchy_bot.handlers.remove import remove_paginated_keyboard
+
+    selected_path = str(tmp_path / "movie-0.mkv")
+    items = [
+        {
+            "name": f"Movie {idx}",
+            "path": str(tmp_path / f"movie-{idx}.mkv"),
+            "remove_kind": "movie",
+        }
+        for idx in range(9)
+    ]
+
+    keyboard = remove_paginated_keyboard(
+        items,
+        0,
+        item_prefix="rm:pick",
+        nav_prefix="rm:bpage",
+        back_callback="rm:browse",
+        selected_paths={selected_path},
+        compact_browse_footer=True,
+    ).inline_keyboard
+
+    assert [[button.text for button in row] for row in keyboard[-5:]] == [
+        ["Next ➡️"],
+        ["🧾 Review Selection (1)"],
+        ["🧹 Clear Selection"],
+        ["⬅️ Back"],
+        ["🏠 Home"],
+    ]
+    assert keyboard[-2][0].text == "⬅️ Back"
+    assert keyboard[-2][0].callback_data == "rm:browse"
+    assert keyboard[-1][0].text == "🏠 Home"
 
 
 def test_remove_show_action_screen_defaults_to_unselected_series_state(tmp_path) -> None:
@@ -762,6 +958,62 @@ def test_remove_show_children_sorts_seasons_by_parsed_number(tmp_path) -> None:
     assert [item["name"] for item in season_items] == ["Season 1", "Season 2", "Season 3", "Season 4"]
 
 
+def test_remove_candidate_keyboard_single_season_no_season_suffix(tmp_path) -> None:
+    from patchy_bot.handlers.remove import remove_candidate_keyboard
+
+    show_dir = tmp_path / "Severance"
+    season_dir = show_dir / "Season 1"
+    season_dir.mkdir(parents=True)
+    (season_dir / "Severance.S01E01.1080p.mkv").write_text("x")
+
+    candidate = {
+        "name": "Severance",
+        "remove_kind": "show",
+        "show_name": "Severance",
+        "path": str(show_dir),
+        "root_key": "tv",
+        "root_label": "TV",
+        "root_path": str(tmp_path),
+        "is_dir": True,
+        "size_bytes": None,
+    }
+
+    markup = remove_candidate_keyboard([candidate], set())
+    labels = [button.text for row in markup.inline_keyboard for button in row]
+
+    assert any(label == "Severance" for label in labels), f"Expected plain show name button, got: {labels}"
+    assert not any(label == "Severance Season 1" for label in labels)
+
+
+def test_remove_candidate_keyboard_multi_season_has_season_suffix(tmp_path) -> None:
+    from patchy_bot.handlers.remove import remove_candidate_keyboard
+
+    show_dir = tmp_path / "Breaking Bad"
+    for number in [1, 2, 3]:
+        season_dir = show_dir / f"Season {number}"
+        season_dir.mkdir(parents=True)
+        (season_dir / f"BreakingBad.S0{number}E01.mkv").write_text("x")
+
+    candidate = {
+        "name": "Breaking Bad",
+        "remove_kind": "show",
+        "show_name": "Breaking Bad",
+        "path": str(show_dir),
+        "root_key": "tv",
+        "root_label": "TV",
+        "root_path": str(tmp_path),
+        "is_dir": True,
+        "size_bytes": None,
+    }
+
+    markup = remove_candidate_keyboard([candidate], set())
+    labels = [button.text for row in markup.inline_keyboard for button in row]
+
+    assert any("Season 1" in label for label in labels)
+    assert any("Season 2" in label for label in labels)
+    assert any("Season 3" in label for label in labels)
+
+
 def test_store_remove_job_round_trip(tmp_path) -> None:
     store = Store(str(tmp_path / "state.sqlite3"))
 
@@ -885,8 +1137,8 @@ def test_remove_library_and_search_candidates_skip_non_media_files(tmp_path) -> 
     search_items = BotApp._find_remove_candidates(bot, "Show Name")
 
     assert [item["name"] for item in movie_items] == ["Movie.One.2024.mkv"]
-    assert [item["name"] for item in tv_items] == ["Show.Name.S01E02.1080p.mkv"]
-    assert [item["name"] for item in search_items] == ["Show.Name.S01E02.1080p.mkv"]
+    assert [item["name"] for item in tv_items] == ["S1 Episode 2"]
+    assert [item["name"] for item in search_items] == ["S1 Episode 2"]
 
 
 def test_remove_show_group_children_formats_direct_episode_files(tmp_path) -> None:

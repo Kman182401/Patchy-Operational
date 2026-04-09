@@ -74,6 +74,7 @@ class Store:
                     file_url TEXT,
                     descr_link TEXT,
                     hash TEXT,
+                    uploader TEXT,
                     PRIMARY KEY (search_id, idx),
                     FOREIGN KEY (search_id) REFERENCES searches(search_id) ON DELETE CASCADE
                 );
@@ -211,6 +212,7 @@ class Store:
                     error_text   TEXT,
                     notified     INTEGER NOT NULL DEFAULT 0,
                     enabled      INTEGER NOT NULL DEFAULT 1,
+                    home_date_is_inferred INTEGER NOT NULL DEFAULT 1,
                     created_ts   INTEGER NOT NULL
                 );
 
@@ -250,6 +252,8 @@ class Store:
             conn.execute("ALTER TABLE results ADD COLUMN quality_score INTEGER DEFAULT 0")
         if "quality_json" not in results_cols:
             conn.execute("ALTER TABLE results ADD COLUMN quality_json TEXT")
+        if "uploader" not in results_cols:
+            conn.execute("ALTER TABLE results ADD COLUMN uploader TEXT")
 
         schedule_track_cols = {row[1] for row in conn.execute("PRAGMA table_info(schedule_tracks)")}
         if "auto_state_json" not in schedule_track_cols:
@@ -288,6 +292,8 @@ class Store:
             conn.execute("ALTER TABLE movie_tracks ADD COLUMN last_release_check_ts INTEGER")
         if "enabled" not in mt_cols:
             conn.execute("ALTER TABLE movie_tracks ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1")
+        if "home_date_is_inferred" not in mt_cols:
+            conn.execute("ALTER TABLE movie_tracks ADD COLUMN home_date_is_inferred INTEGER NOT NULL DEFAULT 1")
         if "plex_check_failures" not in mt_cols:
             try:
                 conn.execute("ALTER TABLE movie_tracks ADD COLUMN plex_check_failures INTEGER NOT NULL DEFAULT 0")
@@ -544,8 +550,8 @@ class Store:
                 conn.execute(
                     """
                     INSERT INTO results(search_id, idx, name, size, seeds, leechers, site, url, file_url, descr_link, hash,
-                                        quality_score, quality_json)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                                        uploader, quality_score, quality_json)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         search_id,
@@ -559,6 +565,13 @@ class Store:
                         str(row.get("fileUrl") or row.get("file_url") or ""),
                         str(row.get("descrLink") or row.get("descr_link") or ""),
                         str(row.get("fileHash") or row.get("hash") or ""),
+                        str(
+                            row.get("uploader")
+                            or row.get("author")
+                            or row.get("poster")
+                            or row.get("username")
+                            or ""
+                        ),
                         ts.format_score,
                         q_json,
                     ),
@@ -1299,6 +1312,7 @@ class Store:
         release_date_type: str,
         release_date_ts: int,
         search_query: str,
+        home_date_is_inferred: bool = True,
     ) -> str:
         """Create a movie track and return its track_id."""
         with self._lock:
@@ -1308,8 +1322,8 @@ class Store:
             track_id = secrets.token_hex(8)
             conn.execute(
                 "INSERT INTO movie_tracks(track_id, user_id, tmdb_id, title, year, release_date_type, "
-                "release_date_ts, search_query, status, notified, created_ts) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?)",
+                "release_date_ts, search_query, status, notified, home_date_is_inferred, created_ts) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)",
                 (
                     track_id,
                     int(user_id),
@@ -1319,6 +1333,7 @@ class Store:
                     str(release_date_type),
                     int(release_date_ts),
                     str(search_query),
+                    1 if home_date_is_inferred else 0,
                     now_ts(),
                 ),
             )
@@ -1466,17 +1481,19 @@ class Store:
         home_release_ts: int | None,
         digital_estimated: bool,
         release_status: str,
+        home_date_is_inferred: bool | None = None,
     ) -> None:
         """Update release date tracking columns for a movie track."""
         with self._lock:
             if self._closed:
                 raise RuntimeError("Store is closed")
             conn = self._conn
+            inferred = digital_estimated if home_date_is_inferred is None else home_date_is_inferred
             conn.execute(
                 "UPDATE movie_tracks SET "
                 "theatrical_ts = ?, digital_ts = ?, physical_ts = ?, "
                 "home_release_ts = ?, digital_estimated = ?, release_status = ?, "
-                "last_release_check_ts = ? "
+                "home_date_is_inferred = ?, last_release_check_ts = ? "
                 "WHERE track_id = ?",
                 (
                     theatrical_ts,
@@ -1485,6 +1502,7 @@ class Store:
                     home_release_ts,
                     1 if digital_estimated else 0,
                     str(release_status),
+                    1 if inferred else 0,
                     now_ts(),
                     track_id,
                 ),
