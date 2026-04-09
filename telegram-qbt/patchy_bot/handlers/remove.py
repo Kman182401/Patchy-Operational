@@ -702,7 +702,7 @@ def remove_paginated_keyboard(
 
     if compact_browse_footer and not chosen:
         if len(nav_row) == 1 and back_button is not None:
-            rows[-1] = [nav_row[0], back_button]
+            rows[-1] = [back_button, nav_row[0]]
             rows.append([review_button, home_button])
         else:
             rows.append([review_button])

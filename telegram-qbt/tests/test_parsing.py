@@ -671,7 +671,7 @@ def test_remove_browse_movie_list_compacts_footer_without_changing_item_rows(tmp
     ).inline_keyboard
 
     assert [[button.text for button in row] for row in keyboard[-2:]] == [
-        ["Next ➡️", "⬅️ Back"],
+        ["⬅️ Back", "Next ➡️"],
         ["🧾 Review Selection (0)", "🏠 Home"],
     ]
 
