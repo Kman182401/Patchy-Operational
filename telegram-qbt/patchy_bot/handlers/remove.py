@@ -528,6 +528,47 @@ def remove_confirm_name(candidate: dict[str, Any]) -> str:
     return remove_display_name(candidate)
 
 
+def remove_confirm_summary_items(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    effective = remove_effective_candidates(candidates)
+    summaries: list[dict[str, Any]] = []
+    index_by_key: dict[tuple[Any, ...], int] = {}
+    for raw in effective:
+        candidate = remove_enrich_candidate(dict(raw))
+        kind = str(candidate.get("remove_kind") or "").strip()
+        root_label = str(candidate.get("root_label") or "").strip()
+        show_name = str(candidate.get("show_name") or "").strip()
+        if kind == "show":
+            key = ("show", root_label, show_name or remove_confirm_name(candidate))
+        elif kind == "season":
+            season_number = int(candidate.get("season_number") or 0)
+            key = ("season", root_label, show_name, season_number, remove_confirm_scope_label(candidate))
+        elif kind == "episode":
+            key = ("episode", root_label, show_name, remove_confirm_scope_label(candidate))
+        else:
+            key = ("item", root_label, remove_selected_path(candidate))
+
+        summary_idx = index_by_key.get(key)
+        if summary_idx is None:
+            summary_idx = len(summaries)
+            index_by_key[key] = summary_idx
+            summaries.append(
+                {
+                    "name": remove_confirm_name(candidate),
+                    "kind": remove_kind_label(kind, bool(candidate.get("is_dir"))),
+                    "root_label": root_label,
+                    "size_bytes": 0,
+                    "paths": [],
+                }
+            )
+
+        summary = summaries[summary_idx]
+        summary["size_bytes"] = int(summary.get("size_bytes") or 0) + int(candidate.get("size_bytes") or 0)
+        path = str(candidate.get("path") or "")
+        if path and path not in summary["paths"]:
+            summary["paths"].append(path)
+    return summaries
+
+
 def remove_series_selected(candidate: dict[str, Any], selected_paths: set[str]) -> bool:
     group_items = list(candidate.get("group_items") or [])
     if group_items:
@@ -570,22 +611,25 @@ def remove_candidates_text(query: str, candidates: list[dict[str, Any]], selecte
 
 
 def remove_confirm_text(candidates: list[dict[str, Any]]) -> str:
-    effective = remove_effective_candidates(candidates)
-    count = len(effective)
-    total_size = human_size(remove_selection_total_size(effective))
+    summaries = remove_confirm_summary_items(candidates)
+    count = len(summaries)
+    total_size = human_size(sum(int(item.get("size_bytes") or 0) for item in summaries))
     numbered_items = []
     path_lines = []
-    for idx, candidate in enumerate(effective[:12], start=1):
-        candidate = remove_enrich_candidate(candidate)
-        kind = remove_kind_label(str(candidate.get("remove_kind") or ""), bool(candidate.get("is_dir")))
-        size_txt = human_size(int(candidate.get("size_bytes") or 0))
-        name = _h(remove_confirm_name(candidate))
-        root_label = _h(candidate.get("root_label") or "")
-        numbered_items.append(f"{idx}. <b>{name}</b> ({root_label} {_h(kind)}, <code>{_h(size_txt)}</code>)")
-        path_lines.append(_h(str(candidate.get("path") or "")))
+    for idx, item in enumerate(summaries[:12], start=1):
+        size_txt = human_size(int(item.get("size_bytes") or 0))
+        name = _h(str(item.get("name") or "Item"))
+        root_label = _h(str(item.get("root_label") or ""))
+        kind = _h(str(item.get("kind") or "item"))
+        numbered_items.append(f"{idx}. <b>{name}</b> ({root_label} {kind}, <code>{_h(size_txt)}</code>)")
+        path_lines.append(f"{name}:")
+        path_lines.extend(_h(str(path)) for path in list(item.get("paths") or []))
+        path_lines.append("")
     if count > 12:
         numbered_items.append(f"\u2026and {count - 12} more item(s).")
         path_lines.append(f"\u2026and {count - 12} more.")
+    while path_lines and not path_lines[-1]:
+        path_lines.pop()
     paths_block = "\n".join(path_lines)
     lines = [
         "<b>\u26a0\ufe0f Confirm Permanent Delete</b>",
@@ -2434,6 +2478,7 @@ async def on_cb_remove(bot_app: Any, *, data: str, q: Any, user_id: int) -> None
         effective = remove_effective_candidates(selected_items)
         if not effective:
             return
+        summary_items = remove_confirm_summary_items(effective)
         flow["stage"] = "confirm_delete"
         bot_app._set_flow(user_id, flow)
         await bot_app._render_remove_ui(
@@ -2441,7 +2486,7 @@ async def on_cb_remove(bot_app: Any, *, data: str, q: Any, user_id: int) -> None
             q.message,
             flow,
             remove_confirm_text(effective),
-            reply_markup=remove_confirm_keyboard(len(effective)),
+            reply_markup=remove_confirm_keyboard(len(summary_items)),
             current_ui_message=q.message,
         )
         return
@@ -2495,7 +2540,7 @@ async def on_cb_remove(bot_app: Any, *, data: str, q: Any, user_id: int) -> None
             user_id,
             q.message,
             flow,
-            f"\U0001f5d1 Deleting {len(effective)} selected item(s) from disk\u2026",
+            f"\U0001f5d1 Deleting {len(remove_confirm_summary_items(effective))} selected item(s) from disk\u2026",
             reply_markup=None,
             current_ui_message=q.message,
         )

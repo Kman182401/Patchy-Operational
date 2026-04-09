@@ -883,6 +883,62 @@ def test_remove_confirm_text_uses_explicit_tv_scope_labels() -> None:
     )
 
 
+def test_remove_confirm_text_collapses_duplicate_show_folders_into_one_full_series_entry(tmp_path) -> None:
+    from patchy_bot.handlers.remove import remove_confirm_summary_items, remove_confirm_text
+
+    first = tmp_path / "Daredevil Born Again"
+    second = tmp_path / "www.UIndex.org - Daredevil Born Again"
+    third = tmp_path / "Daredevil Born Again Alt"
+    first.mkdir()
+    second.mkdir()
+    third.mkdir()
+
+    candidates = [
+        {
+            "name": "Daredevil Born Again",
+            "path": str(first),
+            "root_key": "tv",
+            "root_label": "TV",
+            "root_path": str(tmp_path),
+            "is_dir": True,
+            "remove_kind": "show",
+            "show_name": "Daredevil Born Again",
+            "size_bytes": 10,
+        },
+        {
+            "name": "www.UIndex.org - Daredevil Born Again",
+            "path": str(second),
+            "root_key": "tv",
+            "root_label": "TV",
+            "root_path": str(tmp_path),
+            "is_dir": True,
+            "remove_kind": "show",
+            "show_name": "Daredevil Born Again",
+            "size_bytes": 20,
+        },
+        {
+            "name": "Daredevil Born Again Alt",
+            "path": str(third),
+            "root_key": "tv",
+            "root_label": "TV",
+            "root_path": str(tmp_path),
+            "is_dir": True,
+            "remove_kind": "show",
+            "show_name": "Daredevil Born Again",
+            "size_bytes": 30,
+        },
+    ]
+
+    summary = remove_confirm_summary_items(candidates)
+    text = remove_confirm_text(candidates)
+
+    assert len(summary) == 1
+    assert summary[0]["name"] == "Daredevil Born Again Full Series"
+    assert summary[0]["size_bytes"] == 60
+    assert "Selected <b>1</b> item(s)" in text
+    assert text.count("Daredevil Born Again Full Series") == 2
+
+
 def test_remove_virtual_season_toggle_selects_underlying_episode_files(tmp_path) -> None:
     from patchy_bot.handlers.remove import remove_selection_items, remove_show_children, remove_toggle_candidate
 
