@@ -497,6 +497,37 @@ def remove_display_name(candidate: dict[str, Any], *, single_season_show: bool =
     return name
 
 
+def remove_confirm_scope_label(candidate: dict[str, Any]) -> str:
+    kind = str(candidate.get("remove_kind") or "").strip()
+    if kind == "show":
+        return "Full Series"
+    if kind == "season":
+        season_number = int(candidate.get("season_number") or 0)
+        if season_number > 0:
+            return f"Season {season_number}"
+        return format_remove_season_label(str(candidate.get("name") or ""))
+    if kind == "episode":
+        source_name = str(candidate.get("source_name") or candidate.get("name") or "").strip()
+        season_number = int(candidate.get("season_number") or 0) or None
+        codes = sorted(extract_episode_codes(source_name))
+        if codes:
+            return codes[0]
+        return format_remove_episode_label(source_name, season_number)
+    return remove_display_name(candidate)
+
+
+def remove_confirm_name(candidate: dict[str, Any]) -> str:
+    candidate = remove_enrich_candidate(candidate)
+    kind = str(candidate.get("remove_kind") or "").strip()
+    if kind in {"show", "season", "episode"}:
+        show_name = str(candidate.get("show_name") or "").strip()
+        scope_label = remove_confirm_scope_label(candidate)
+        if show_name:
+            return f"{show_name} {scope_label}"
+        return scope_label
+    return remove_display_name(candidate)
+
+
 def remove_series_selected(candidate: dict[str, Any], selected_paths: set[str]) -> bool:
     group_items = list(candidate.get("group_items") or [])
     if group_items:
@@ -548,7 +579,7 @@ def remove_confirm_text(candidates: list[dict[str, Any]]) -> str:
         candidate = remove_enrich_candidate(candidate)
         kind = remove_kind_label(str(candidate.get("remove_kind") or ""), bool(candidate.get("is_dir")))
         size_txt = human_size(int(candidate.get("size_bytes") or 0))
-        name = _h(remove_display_name(candidate))
+        name = _h(remove_confirm_name(candidate))
         root_label = _h(candidate.get("root_label") or "")
         numbered_items.append(f"{idx}. <b>{name}</b> ({root_label} {_h(kind)}, <code>{_h(size_txt)}</code>)")
         path_lines.append(_h(str(candidate.get("path") or "")))

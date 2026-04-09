@@ -845,6 +845,44 @@ def test_remove_show_group_children_groups_loose_files_without_raw_names(tmp_pat
     assert "UIndex" not in remove_season_children(season_items[0])[0]["name"]
 
 
+def test_remove_confirm_text_uses_explicit_tv_scope_labels() -> None:
+    from patchy_bot.handlers.remove import remove_confirm_name
+
+    assert (
+        remove_confirm_name(
+            {
+                "name": "Daredevil Born Again",
+                "remove_kind": "show",
+                "show_name": "Daredevil Born Again",
+            }
+        )
+        == "Daredevil Born Again Full Series"
+    )
+    assert (
+        remove_confirm_name(
+            {
+                "name": "Season 1",
+                "remove_kind": "season",
+                "show_name": "Daredevil Born Again",
+                "season_number": 1,
+            }
+        )
+        == "Daredevil Born Again Season 1"
+    )
+    assert (
+        remove_confirm_name(
+            {
+                "name": "S1 Episode 2",
+                "source_name": "Daredevil.Born.Again.S01E02.1080p.mkv",
+                "remove_kind": "episode",
+                "show_name": "Daredevil Born Again",
+                "season_number": 1,
+            }
+        )
+        == "Daredevil Born Again S01E02"
+    )
+
+
 def test_remove_virtual_season_toggle_selects_underlying_episode_files(tmp_path) -> None:
     from patchy_bot.handlers.remove import remove_selection_items, remove_show_children, remove_toggle_candidate
 
