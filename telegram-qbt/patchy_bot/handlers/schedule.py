@@ -1935,8 +1935,8 @@ async def on_cb_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> No
             user_id,
             q.message,
             flow,
-            bot_app._schedule_dl_confirm_text(flow),
-            reply_markup=bot_app._schedule_dl_confirm_keyboard(),
+            schedule_dl_confirm_text(flow),
+            reply_markup=schedule_dl_confirm_keyboard(),
             current_ui_message=q.message,
         )
         return
@@ -1960,8 +1960,8 @@ async def on_cb_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> No
             user_id,
             q.message,
             flow,
-            bot_app._schedule_dl_confirm_text(flow),
-            reply_markup=bot_app._schedule_dl_confirm_keyboard(),
+            schedule_dl_confirm_text(flow),
+            reply_markup=schedule_dl_confirm_keyboard(),
             current_ui_message=q.message,
         )
         return
@@ -2007,8 +2007,8 @@ async def on_cb_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> No
             user_id,
             q.message,
             flow,
-            bot_app._schedule_dl_confirm_text(flow),
-            reply_markup=bot_app._schedule_dl_confirm_keyboard(),
+            schedule_dl_confirm_text(flow),
+            reply_markup=schedule_dl_confirm_keyboard(),
             current_ui_message=q.message,
         )
         return
@@ -2119,8 +2119,8 @@ async def on_cb_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> No
             user_id,
             q.message,
             flow,
-            bot_app._schedule_dl_confirm_text(flow),
-            reply_markup=bot_app._schedule_dl_confirm_keyboard(),
+            schedule_dl_confirm_text(flow),
+            reply_markup=schedule_dl_confirm_keyboard(),
             current_ui_message=q.message,
         )
         return
@@ -2313,8 +2313,8 @@ async def on_cb_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> No
             user_id,
             q.message,
             ep_flow,
-            bot_app._schedule_dl_confirm_text(ep_flow),
-            reply_markup=bot_app._schedule_dl_confirm_keyboard(),
+            schedule_dl_confirm_text(ep_flow),
+            reply_markup=schedule_dl_confirm_keyboard(),
             current_ui_message=q.message,
         )
         return

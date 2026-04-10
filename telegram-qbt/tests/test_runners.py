@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -541,6 +542,28 @@ class _BatchDummyBot:
         self._acquire_results = acquire_results
         self.acquire_calls: list[str] = []
         self.notify_calls: list[tuple[str, dict]] = []
+        self.schedule_source_state_lock = __import__("threading").Lock()
+        self.schedule_source_state: dict[str, dict] = {
+            "metadata": {
+                "status": "unknown",
+                "consecutive_failures": 0,
+                "backoff_until": 0,
+                "last_error": None,
+                "last_success_at": None,
+            },
+            "inventory": {
+                "status": "unknown",
+                "consecutive_failures": 0,
+                "backoff_until": 0,
+                "last_error": None,
+                "last_success_at": None,
+                "effective_source": "unknown",
+            },
+        }
+        self._ctx = self  # schedule_refresh_track expects ctx with these attrs
+        # Minimal cfg/client stubs so schedule_reconcile_pending can run
+        self.cfg = SimpleNamespace(tv_category="TV", tv_path="/srv/tv")
+        self.qbt = SimpleNamespace(list_torrents=lambda **_kw: [])
 
     def _schedule_probe_track(self, track: dict[str, Any]) -> dict[str, Any]:
         return dict(track.get("_test_probe") or {})
@@ -607,8 +630,13 @@ def _make_batch_track(actionable: list[str]) -> dict[str, Any]:
 async def test_schedule_runner_batch_downloads_multiple_episodes(monkeypatch: Any) -> None:
     """All three episodes are acquired and notified in one refresh cycle."""
     monkeypatch.setattr("patchy_bot.bot.now_ts", lambda: 5000)
+    monkeypatch.setattr("patchy_bot.handlers.schedule.now_ts", lambda: 5000)
     codes = ["S01E01", "S01E02", "S01E03"]
     track = _make_batch_track(codes)
+    monkeypatch.setattr(
+        "patchy_bot.handlers.schedule.schedule_probe_track",
+        lambda ctx, t, season=None: dict(t.get("_test_probe") or {}),
+    )
     acquire_results = {c: {"name": f"Test.{c}", "hash": f"hash_{c}"} for c in codes}
     store = _BatchDummyStore(track)
     bot = _BatchDummyBot(store, acquire_results)
@@ -625,8 +653,13 @@ async def test_schedule_runner_batch_downloads_multiple_episodes(monkeypatch: An
 async def test_schedule_runner_batch_partial_failure(monkeypatch: Any) -> None:
     """Partial success: 2 of 3 episodes succeed, no cooldown set."""
     monkeypatch.setattr("patchy_bot.bot.now_ts", lambda: 5000)
+    monkeypatch.setattr("patchy_bot.handlers.schedule.now_ts", lambda: 5000)
     codes = ["S01E01", "S01E02", "S01E03"]
     track = _make_batch_track(codes)
+    monkeypatch.setattr(
+        "patchy_bot.handlers.schedule.schedule_probe_track",
+        lambda ctx, t, season=None: dict(t.get("_test_probe") or {}),
+    )
     acquire_results = {
         "S01E01": {"name": "Test.E01", "hash": "h1"},
         "S01E02": None,  # fails
@@ -647,8 +680,13 @@ async def test_schedule_runner_batch_partial_failure(monkeypatch: Any) -> None:
 async def test_schedule_runner_batch_all_fail(monkeypatch: Any) -> None:
     """All episodes fail: cooldown is set."""
     monkeypatch.setattr("patchy_bot.bot.now_ts", lambda: 5000)
+    monkeypatch.setattr("patchy_bot.handlers.schedule.now_ts", lambda: 5000)
     codes = ["S01E01", "S01E02", "S01E03"]
     track = _make_batch_track(codes)
+    monkeypatch.setattr(
+        "patchy_bot.handlers.schedule.schedule_probe_track",
+        lambda ctx, t, season=None: dict(t.get("_test_probe") or {}),
+    )
     acquire_results: dict[str, dict | None] = {c: None for c in codes}
     store = _BatchDummyStore(track)
     bot = _BatchDummyBot(store, acquire_results)

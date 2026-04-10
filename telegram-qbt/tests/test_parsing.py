@@ -34,7 +34,15 @@ def test_extract_episode_codes_ignores_noise_without_episode_markers() -> None:
     assert extract_episode_codes("Show Season 1 1080p") == set()
 
 
-def test_schedule_refresh_degrades_cleanly_when_metadata_lookup_fails() -> None:
+def test_schedule_refresh_degrades_cleanly_when_metadata_lookup_fails(monkeypatch) -> None:
+    import patchy_bot.handlers.schedule as _sch
+
+    monkeypatch.setattr(
+        _sch,
+        "schedule_probe_track",
+        lambda ctx, t, season=None: (_ for _ in ()).throw(RuntimeError("tv metadata offline")),
+    )
+
     class DummyStore:
         def __init__(self) -> None:
             self.updated: dict[str, object] = {}
@@ -53,30 +61,25 @@ def test_schedule_refresh_degrades_cleanly_when_metadata_lookup_fails() -> None:
     class DummyBot:
         def __init__(self) -> None:
             self.store = DummyStore()
-
-        def _schedule_probe_track(self, track: dict[str, object]) -> dict[str, object]:
-            raise RuntimeError("tv metadata offline")
-
-        def _schedule_source_snapshot(self, _key: str) -> dict[str, object]:
-            return {"consecutive_failures": 0}
-
-        def _schedule_metadata_retry_backoff_s(self, _failures: int) -> int:
-            return 900
-
-        def _schedule_episode_auto_state(self, track):
-            return track.get("auto_state_json") or {}
-
-        def _schedule_sanitize_auto_state(self, auto_state, *, probe=None):
-            return auto_state or {}
-
-        def _schedule_reconcile_pending(self, track, probe):
-            return set(), set(), set()
-
-        def _schedule_should_attempt_auto(self, track, probe):
-            return False, "metadata offline"
-
-        def _schedule_next_check_at(self, next_air_ts, *, has_actionable_missing, auto_state):
-            return (next_air_ts or now_ts()) + 3600
+            self.schedule_source_state_lock = __import__("threading").Lock()
+            self.schedule_source_state: dict[str, dict] = {
+                "metadata": {
+                    "status": "unknown",
+                    "consecutive_failures": 0,
+                    "backoff_until": 0,
+                    "last_error": None,
+                    "last_success_at": None,
+                },
+                "inventory": {
+                    "status": "unknown",
+                    "consecutive_failures": 0,
+                    "backoff_until": 0,
+                    "last_error": None,
+                    "last_success_at": None,
+                    "effective_source": "unknown",
+                },
+            }
+            self._ctx = self
 
     track = {"track_id": "track-1", "last_probe_json": {"show": {"name": "Example Show"}}}
     updated, probe = asyncio.run(BotApp._schedule_refresh_track(DummyBot(), track))
