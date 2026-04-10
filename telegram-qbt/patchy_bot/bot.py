@@ -602,6 +602,48 @@ class BotApp:
     async def _cleanup_private_user_message(self, message: Any) -> None:
         await render_mod.cleanup_private_user_message(message)
 
+    async def _send_poster_photo(
+        self,
+        chat_id: int,
+        image_url: str | None,
+        flow: dict[str, Any],
+        user_id: int,
+    ) -> None:
+        """Send a poster thumbnail as a separate photo message and track its ID in flow.
+
+        If image_url is None or the send fails, silently skips — the text UI
+        continues normally without a poster.
+        """
+        if not image_url:
+            return
+        try:
+            photo_msg = await self.app.bot.send_photo(
+                chat_id=chat_id,
+                photo=image_url,
+            )
+            flow["poster_msg_id"] = photo_msg.message_id
+            flow["poster_chat_id"] = chat_id
+            self._set_flow(user_id, flow)
+        except Exception:
+            # CDN unreachable, invalid URL, Telegram rejected the image —
+            # silently skip; the text-only UI is the fallback.
+            pass
+
+    async def _cleanup_poster_photo(self, user_id: int, flow: dict[str, Any] | None = None) -> None:
+        """Delete the poster photo message if one was sent. Idempotent."""
+        if flow is None:
+            flow = self._get_flow(user_id)
+        if not flow:
+            return
+        poster_msg_id = flow.pop("poster_msg_id", None)
+        poster_chat_id = flow.pop("poster_chat_id", None)
+        if poster_msg_id and poster_chat_id:
+            try:
+                await self.app.bot.delete_message(chat_id=poster_chat_id, message_id=poster_msg_id)
+            except Exception:
+                pass  # Already deleted or expired — harmless
+            self._set_flow(user_id, flow)
+
     # ---------- Live progress (delegated to handlers.download) ----------
 
     @staticmethod
@@ -3090,6 +3132,7 @@ class BotApp:
 
     async def _schedule_pick_candidate(self, msg: Any, user_id: int, idx: int) -> None:
         flow = self._get_flow(user_id)
+        await self._cleanup_poster_photo(user_id, flow)
         if not flow or flow.get("mode") != "schedule":
             await self._render_schedule_ui(
                 user_id,
@@ -4296,6 +4339,13 @@ class BotApp:
                 flow["stage"] = "choose_show"
                 flow["candidates"] = candidates
                 self._set_flow(user_id, flow)
+                # Send poster for top candidate (if available)
+                await self._send_poster_photo(
+                    chat_id=msg.chat_id,
+                    image_url=candidates[0].get("image_url") if candidates else None,
+                    flow=flow,
+                    user_id=user_id,
+                )
                 lines = ["<b>📺 Pick the Correct Show</b>", ""]
                 for idx, candidate in enumerate(candidates, start=1):
                     net = candidate.get("network") or candidate.get("country") or "Unknown network"
@@ -4316,6 +4366,8 @@ class BotApp:
                 return
 
             if mode == "schedule" and stage in {"choose_show", "confirm"}:
+                # Clean up any existing poster before resetting the flow
+                await self._cleanup_poster_photo(user_id)
                 self._schedule_start_flow(user_id)
                 flow = self._get_flow(user_id) or {"mode": "schedule", "stage": "await_show"}
                 await self._render_schedule_ui(
@@ -4340,6 +4392,13 @@ class BotApp:
                 flow["stage"] = "choose_show"
                 flow["candidates"] = candidates
                 self._set_flow(user_id, flow)
+                # Send poster for top candidate (if available)
+                await self._send_poster_photo(
+                    chat_id=msg.chat_id,
+                    image_url=candidates[0].get("image_url") if candidates else None,
+                    flow=flow,
+                    user_id=user_id,
+                )
                 lines = ["<b>📺 Pick the Correct Show</b>", ""]
                 for idx, candidate in enumerate(candidates, start=1):
                     net = candidate.get("network") or candidate.get("country") or "Unknown network"
@@ -4619,6 +4678,7 @@ class BotApp:
     # ---------- Callback handler methods ----------
 
     async def _on_cb_nav_home(self, *, data: str, q: Any, user_id: int) -> None:
+        await self._cleanup_poster_photo(user_id)
         self._clear_flow(user_id)
         # Cancel active progress pollers so they stop editing this message
         for key, task in list(self.progress_tasks.items()):

@@ -87,6 +87,7 @@ class TVMetadataClient:
             "url": str(show.get("url") or ""),
             "imdb_id": str(externals.get("imdb") or "").strip() or None,
             "tmdb_id": None,
+            "image_url": str(((show.get("image") or {}).get("medium")) or "") or None,
         }
 
     def search_shows(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
@@ -199,6 +200,7 @@ class TVMetadataClient:
             for r in list(data.get("results") or [])[:5]:
                 release = r.get("release_date") or ""
                 year: int | None = int(release[:4]) if len(release) >= 4 and release[:4].isdigit() else None
+                poster_path = str(r.get("poster_path") or "").strip()
                 out.append(
                     {
                         "tmdb_id": int(r["id"]),
@@ -206,6 +208,7 @@ class TVMetadataClient:
                         "year": year,
                         "overview": str(r.get("overview") or ""),
                         "popularity": float(r.get("popularity") or 0),
+                        "poster_url": f"https://image.tmdb.org/t/p/w185{poster_path}" if poster_path else None,
                     }
                 )
             return out

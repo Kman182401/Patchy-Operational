@@ -1894,6 +1894,7 @@ async def on_cb_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> No
     ctx = getattr(bot_app, "_ctx", bot_app)
 
     if data == "sch:cancel":
+        await bot_app._cleanup_poster_photo(user_id)
         bot_app._clear_flow(user_id)
         await bot_app._render_command_center(q.message, user_id=user_id)
         return
@@ -1904,6 +1905,7 @@ async def on_cb_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> No
         return
 
     if data == "sch:change":
+        await bot_app._cleanup_poster_photo(user_id)
         bot_app._schedule_start_flow(user_id)
         flow = bot_app._get_flow(user_id) or {"mode": "schedule", "stage": "await_show"}
         await bot_app._render_schedule_ui(
