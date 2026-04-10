@@ -26,6 +26,7 @@ from patchy_bot.handlers.remove import (
     remove_runner_interval_s,
     remove_runner_job,
 )
+from patchy_bot.handlers.schedule import schedule_refresh_track
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -215,6 +216,7 @@ def test_clamd_available_uses_valid_ping_arguments(monkeypatch: Any) -> None:
     """The clamd probe sends a valid ping invocation and accepts a zero exit code."""
 
     monkeypatch.setattr("patchy_bot.handlers.download.shutil.which", lambda name: "/usr/bin/clamdscan")
+    monkeypatch.setattr("patchy_bot.handlers.download._clamd_cache", (False, 0.0))
 
     captured: dict[str, Any] = {}
 
@@ -659,3 +661,109 @@ async def test_schedule_runner_batch_all_fail(monkeypatch: Any) -> None:
     assert bot.notify_calls == []
     retry_at = store.last_update_kwargs.get("auto_state_json", {}).get("next_auto_retry_at")
     assert retry_at is not None and retry_at > 5000
+
+
+async def test_schedule_refresh_removes_track_when_season_complete(mock_ctx: Any, monkeypatch: Any) -> None:
+    """A track is silently removed once the final episode is present in inventory."""
+    show = {"id": 101, "name": "Test Show"}
+    initial_probe = {
+        "show": show,
+        "episode_order": ["S01E01", "S01E02", "S01E03"],
+        "present_codes": ["S01E01", "S01E02"],
+        "pending_codes": [],
+        "actionable_missing_codes": ["S01E03"],
+        "signature": "S01E03",
+        "next_air_ts": None,
+    }
+    _created, track = mock_ctx.store.create_schedule_track(
+        user_id=12345,
+        chat_id=12345,
+        show=show,
+        season=1,
+        probe=initial_probe,
+        next_check_at=100,
+        initial_auto_state={"enabled": True},
+    )
+    mock_ctx.qbt.list_torrents.return_value = []
+    delete_track = MagicMock(return_value=True)
+    monkeypatch.setattr(mock_ctx.store, "delete_schedule_track", delete_track)
+    monkeypatch.setattr(
+        "patchy_bot.handlers.schedule.schedule_probe_track",
+        lambda ctx, current_track: {
+            "show": show,
+            "season": 1,
+            "episode_order": ["S01E01", "S01E02", "S01E03"],
+            "present_codes": ["S01E01", "S01E02", "S01E03"],
+            "pending_codes": [],
+            "actionable_missing_codes": [],
+            "missing_codes": [],
+            "all_missing_codes": [],
+            "unreleased_codes": [],
+            "signature": "",
+            "next_air_ts": None,
+            "_auto_state": {"enabled": True},
+        },
+    )
+
+    await schedule_refresh_track(
+        mock_ctx,
+        track,
+        allow_notify=False,
+        qbt_category_aliases_fn=lambda *_args, **_kwargs: set(),
+        should_attempt_auto_fn=lambda _track, _probe: (False, "no actionable missing"),
+    )
+
+    delete_track.assert_called_once_with(str(track["track_id"]), 12345)
+
+
+async def test_schedule_refresh_does_not_remove_when_last_episode_absent(mock_ctx: Any, monkeypatch: Any) -> None:
+    """The track remains when the final episode is not yet present."""
+    show = {"id": 102, "name": "Test Show"}
+    initial_probe = {
+        "show": show,
+        "episode_order": ["S01E01", "S01E02", "S01E03"],
+        "present_codes": ["S01E01"],
+        "pending_codes": [],
+        "actionable_missing_codes": ["S01E02", "S01E03"],
+        "signature": "S01E02|S01E03",
+        "next_air_ts": None,
+    }
+    _created, track = mock_ctx.store.create_schedule_track(
+        user_id=12345,
+        chat_id=12345,
+        show=show,
+        season=1,
+        probe=initial_probe,
+        next_check_at=100,
+        initial_auto_state={"enabled": True},
+    )
+    mock_ctx.qbt.list_torrents.return_value = []
+    delete_track = MagicMock(return_value=True)
+    monkeypatch.setattr(mock_ctx.store, "delete_schedule_track", delete_track)
+    monkeypatch.setattr(
+        "patchy_bot.handlers.schedule.schedule_probe_track",
+        lambda ctx, current_track: {
+            "show": show,
+            "season": 1,
+            "episode_order": ["S01E01", "S01E02", "S01E03"],
+            "present_codes": ["S01E01", "S01E02"],
+            "pending_codes": [],
+            "actionable_missing_codes": [],
+            "missing_codes": ["S01E03"],
+            "all_missing_codes": ["S01E03"],
+            "unreleased_codes": [],
+            "signature": "",
+            "next_air_ts": None,
+            "_auto_state": {"enabled": True},
+        },
+    )
+
+    await schedule_refresh_track(
+        mock_ctx,
+        track,
+        allow_notify=False,
+        qbt_category_aliases_fn=lambda *_args, **_kwargs: set(),
+        should_attempt_auto_fn=lambda _track, _probe: (False, "no actionable missing"),
+    )
+
+    delete_track.assert_not_called()

@@ -87,6 +87,9 @@ class BotApp:
         self._chat_history_max_users: int = _chat_max
         self.progress_tasks: dict[tuple[int, str], asyncio.Task] = {}
         self.pending_tracker_tasks: dict[tuple[int, str, str], asyncio.Task] = {}
+        self.batch_monitor_messages: dict[int, Any] = {}
+        self.batch_monitor_tasks: dict[int, asyncio.Task[Any]] = {}
+        self.batch_monitor_data: dict[tuple[int, str], dict[str, Any]] = {}
         self.user_ephemeral_messages: dict[int, list[dict[str, int]]] = {}
         self.command_center_refresh_tasks: dict[int, asyncio.Task] = {}
         if cfg.patchy_chat_enabled:
@@ -138,6 +141,9 @@ class BotApp:
             user_nav_ui=self.user_nav_ui,
             progress_tasks=self.progress_tasks,
             pending_tracker_tasks=self.pending_tracker_tasks,
+            batch_monitor_messages=self.batch_monitor_messages,
+            batch_monitor_tasks=self.batch_monitor_tasks,
+            batch_monitor_data=self.batch_monitor_data,
             user_ephemeral_messages=self.user_ephemeral_messages,
             command_center_refresh_tasks=self.command_center_refresh_tasks,
             chat_history=self.chat_history,
@@ -165,6 +171,7 @@ class BotApp:
         d.register_prefix("menu:", self._on_cb_menu)
         d.register_prefix("flow:", self._on_cb_flow)
         d.register_exact("dl:manage", self._on_cb_dl_manage)
+        d.register_prefix("stop:all:", self._on_cb_stop)
         d.register_prefix("stop:", self._on_cb_stop)
         d.register_prefix("tvpost:", self._on_cb_tvpost)
         d.register_prefix("moviepost:", self._on_cb_moviepost)
@@ -338,6 +345,9 @@ class BotApp:
 
         self.progress_tasks.clear()
         self.pending_tracker_tasks.clear()
+        self.batch_monitor_tasks.clear()
+        self.batch_monitor_messages.clear()
+        self.batch_monitor_data.clear()
         self.command_center_refresh_tasks.clear()
         self._ctx.background_tasks.clear()
 
@@ -1641,26 +1651,9 @@ class BotApp:
         if actionable:
             rows.append([InlineKeyboardButton(f"⬇️ Download Season {chosen_season}", callback_data="sch:confirm:all")])
         if other_season_actionable or len(series_actionable) > len(actionable):
-            rows.append([InlineKeyboardButton("⬇️ Download Missing Episodes", callback_data="sch:confirm:series")])
+            rows.append([InlineKeyboardButton("⬇️ Download All Missing Episodes", callback_data="sch:confirm:series")])
         if has_any_missing:
             rows.append([InlineKeyboardButton("🎯 Choose specific episodes", callback_data="sch:confirm:pick")])
-        # Season navigation arrows (replaces old "Change Season" button)
-        avail: list[int] = sorted(int(x) for x in (probe.get("available_seasons") or []) if int(x) > 0)
-        current: int = int(probe.get("season") or 1)
-        if len(avail) > 1 and current in avail:
-            idx = avail.index(current)
-            prev_season: int | None = avail[idx - 1] if idx > 0 else None
-            next_season: int | None = avail[idx + 1] if idx < len(avail) - 1 else None
-            arrow_row: list[InlineKeyboardButton] = []
-            if prev_season is not None:
-                arrow_row.append(InlineKeyboardButton("◀️", callback_data=f"sch:nav:{prev_season}"))
-            else:
-                arrow_row.append(InlineKeyboardButton("◀️", callback_data="sch:noop"))
-            if next_season is not None:
-                arrow_row.append(InlineKeyboardButton("▶️", callback_data=f"sch:nav:{next_season}"))
-            else:
-                arrow_row.append(InlineKeyboardButton("▶️", callback_data="sch:noop"))
-            rows.append(arrow_row)
         rows.append([InlineKeyboardButton("🏠 Home", callback_data="nav:home")])
         rows.extend(self._nav_footer(include_home=False))
         return InlineKeyboardMarkup(rows)
@@ -1678,6 +1671,14 @@ class BotApp:
 
     def _schedule_episode_picker_keyboard(self, track_id: str, codes: list[str]) -> InlineKeyboardMarkup:
         rows: list[list[InlineKeyboardButton]] = []
+        if codes:
+            try:
+                season_num = int(codes[0][1:3])
+                rows.append(
+                    [InlineKeyboardButton(f"⬇️ Download Season {season_num}", callback_data=f"sch:all:{track_id}")]
+                )
+            except (ValueError, IndexError):
+                pass
         pair: list[InlineKeyboardButton] = []
         for code in codes[:12]:
             episode_num = int(code[-2:])
@@ -2413,7 +2414,9 @@ class BotApp:
         # Release gate: skip torrent search if movie isn't on home video yet
         should_search = await self._check_movie_release_gate(track)
         if not should_search:
-            LOG.debug("Movie track %s: skipping search (release gate: %s)", track_id, track.get("release_status", "unknown"))
+            LOG.debug(
+                "Movie track %s: skipping search (release gate: %s)", track_id, track.get("release_status", "unknown")
+            )
             return
 
         LOG.info("Movie track check: searching for '%s'", search_query)
@@ -2478,7 +2481,7 @@ class BotApp:
                         self.store.log_malware_block,
                         torrent_hash or str(row.get("hash") or row.get("fileHash") or row.get("name") or ""),
                         str(row.get("name") or ""),
-                        "download",
+                        "search",
                         malware_scan.reasons,
                     )
                 except Exception:
@@ -2622,128 +2625,155 @@ class BotApp:
     async def _schedule_refresh_track(
         self, track: dict[str, Any], *, allow_notify: bool = False
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        track_id = str(track.get("track_id") or "")
-        try:
-            probe = await asyncio.to_thread(self._schedule_probe_track, track)
-        except Exception as e:
-            metadata_state = self._schedule_source_snapshot("metadata")
-            retry_at = now_ts() + self._schedule_metadata_retry_backoff_s(
-                max(1, int(metadata_state.get("consecutive_failures") or 0))
+        if not hasattr(self, "_ctx"):
+            track_id = str(track.get("track_id") or "")
+            try:
+                probe = await asyncio.to_thread(self._schedule_probe_track, track)
+            except Exception as e:
+                metadata_state = self._schedule_source_snapshot("metadata")
+                retry_at = now_ts() + self._schedule_metadata_retry_backoff_s(
+                    max(1, int(metadata_state.get("consecutive_failures") or 0))
+                )
+                LOG.warning("Schedule metadata refresh failed for %s: %s", track_id, e)
+                last_probe = dict(track.get("last_probe_json") or {})
+                if last_probe:
+                    last_probe["metadata_error"] = str(e)
+                    last_probe["last_refresh_error_at"] = now_ts()
+                    last_probe["metadata_stale"] = bool(last_probe.get("metadata_stale"))
+                await asyncio.to_thread(
+                    self.store.update_schedule_track,
+                    track_id,
+                    last_probe_json=last_probe,
+                    last_probe_at=now_ts(),
+                    next_check_at=retry_at,
+                )
+                updated = await asyncio.to_thread(self.store.get_schedule_track_any, track_id)
+                if updated is None:
+                    raise RuntimeError(f"Schedule track {track_id} disappeared after metadata retry update")
+                return updated, last_probe
+
+            auto_state = dict(self._schedule_episode_auto_state(track))
+            auto_state.update(dict(probe.get("_auto_state") or {}))
+            auto_state = self._schedule_sanitize_auto_state(auto_state, probe=probe)
+            pending = set(track.get("pending_json") or [])
+            cleared, stale, qbt_codes = self._schedule_reconcile_pending(track, probe)
+            if cleared:
+                pending -= cleared
+                LOG.info(
+                    "Schedule cleared %d pending episodes now present locally: %s",
+                    len(cleared),
+                    ", ".join(sorted(cleared)),
+                )
+            if stale:
+                pending -= stale
+                retry_codes = dict(auto_state.get("retry_codes") or {})
+                for code in stale:
+                    retry_codes.pop(code, None)
+                auto_state["retry_codes"] = retry_codes
+                LOG.info("Schedule recovered %d stale pending episodes: %s", len(stale), ", ".join(sorted(stale)))
+            should_auto, target_codes_or_reason = self._schedule_should_attempt_auto(track, probe)
+            auto_acquired_codes: list[str] = []
+            if should_auto and isinstance(target_codes_or_reason, list) and target_codes_or_reason:
+                for target_code in target_codes_or_reason:
+                    try:
+                        result = await self._schedule_attempt_auto_acquire(track, target_code)
+                    except schedule_handler.No1080pError as _e:
+                        no_1080p_miss = dict(auto_state.get("no_1080p_miss") or {})
+                        miss_count = int(no_1080p_miss.get(target_code) or 0) + 1
+                        no_1080p_miss[target_code] = miss_count
+                        auto_state["no_1080p_miss"] = no_1080p_miss
+                        backoff_s = schedule_handler.schedule_no_1080p_backoff_s(miss_count)
+                        auto_state["next_auto_retry_at"] = now_ts() + backoff_s
+                        LOG.info(
+                            "Schedule no-1080p miss %d for %s, backing off %ds",
+                            miss_count,
+                            target_code,
+                            backoff_s,
+                        )
+                        if miss_count == 3 and allow_notify:
+                            await self._schedule_notify_no_1080p(
+                                track, target_code, miss_count, _e.lower_res_count, backoff_s
+                            )
+                        continue
+                    if result:
+                        auto_acquired_codes.append(target_code)
+                        pending.add(target_code)
+                        retry_codes = dict(auto_state.get("retry_codes") or {})
+                        retry_codes[target_code] = now_ts()
+                        auto_state["retry_codes"] = retry_codes
+                        auto_state["last_auto_code"] = target_code
+                        auto_state["last_auto_at"] = now_ts()
+                        no_1080p_miss = dict(auto_state.get("no_1080p_miss") or {})
+                        no_1080p_miss.pop(target_code, None)
+                        auto_state["no_1080p_miss"] = no_1080p_miss
+                        if allow_notify:
+                            await self._schedule_notify_auto_queued(track, target_code, result)
+                if auto_acquired_codes:
+                    auto_state["next_auto_retry_at"] = None
+                elif auto_state.get("next_auto_retry_at") is None:
+                    auto_state["next_auto_retry_at"] = now_ts() + self._schedule_retry_interval_s()
+            elif not probe.get("actionable_missing_codes"):
+                auto_state["next_auto_retry_at"] = None
+            auto_state = self._schedule_sanitize_auto_state(auto_state, probe=probe)
+            next_check_at = self._schedule_next_check_at(
+                probe.get("next_air_ts"),
+                has_actionable_missing=bool(probe.get("actionable_missing_codes")),
+                auto_state=auto_state,
             )
-            LOG.warning("Schedule metadata refresh failed for %s: %s", track_id, e)
-            last_probe = dict(track.get("last_probe_json") or {})
-            if last_probe:
-                last_probe["metadata_error"] = str(e)
-                last_probe["last_refresh_error_at"] = now_ts()
-                last_probe["metadata_stale"] = bool(last_probe.get("metadata_stale"))
-            await asyncio.to_thread(
-                self.store.update_schedule_track,
-                track_id,
-                last_probe_json=last_probe,
-                last_probe_at=now_ts(),
-                next_check_at=retry_at,
-            )
+
+            store_probe = dict(probe)
+            store_probe.pop("_auto_state", None)
+
+            update_fields: dict[str, Any] = {
+                "pending_json": sorted(pending),
+                "auto_state_json": auto_state,
+                "last_probe_json": store_probe,
+                "last_probe_at": now_ts(),
+                "next_check_at": next_check_at,
+                "next_air_ts": store_probe.get("next_air_ts"),
+                "show_json": probe.get("show") or track.get("show_json") or {},
+            }
+            if not probe.get("signature"):
+                update_fields["last_missing_signature"] = None
+                update_fields["skipped_signature"] = None
+            await asyncio.to_thread(self.store.update_schedule_track, track_id, **update_fields)
             updated = await asyncio.to_thread(self.store.get_schedule_track_any, track_id)
             if updated is None:
-                raise RuntimeError(f"Schedule track {track_id} disappeared after metadata retry update")
-            return updated, last_probe
-        auto_state = dict(self._schedule_episode_auto_state(track))
-        auto_state.update(dict(probe.get("_auto_state") or {}))
-        auto_state = self._schedule_sanitize_auto_state(auto_state, probe=probe)
-        pending = set(track.get("pending_json") or [])
-        cleared, stale, qbt_codes = self._schedule_reconcile_pending(track, probe)
-        if cleared:
-            pending -= cleared
-            LOG.info(
-                "Schedule cleared %d pending episodes now present locally: %s", len(cleared), ", ".join(sorted(cleared))
-            )
-        if stale:
-            pending -= stale
-            retry_codes = dict(auto_state.get("retry_codes") or {})
-            for code in stale:
-                retry_codes.pop(code, None)
-            auto_state["retry_codes"] = retry_codes
-            LOG.info("Schedule recovered %d stale pending episodes: %s", len(stale), ", ".join(sorted(stale)))
-        should_auto, target_codes_or_reason = self._schedule_should_attempt_auto(track, probe)
-        auto_acquired_codes: list[str] = []
-        if should_auto and isinstance(target_codes_or_reason, list) and target_codes_or_reason:
-            for target_code in target_codes_or_reason:
-                try:
-                    result = await self._schedule_attempt_auto_acquire(track, target_code)
-                except schedule_handler.No1080pError as _e:
-                    no_1080p_miss = dict(auto_state.get("no_1080p_miss") or {})
-                    miss_count = int(no_1080p_miss.get(target_code) or 0) + 1
-                    no_1080p_miss[target_code] = miss_count
-                    auto_state["no_1080p_miss"] = no_1080p_miss
-                    backoff_s = schedule_handler.schedule_no_1080p_backoff_s(miss_count)
-                    auto_state["next_auto_retry_at"] = now_ts() + backoff_s
-                    LOG.info(
-                        "Schedule no-1080p miss %d for %s, backing off %ds",
-                        miss_count,
-                        target_code,
-                        backoff_s,
-                    )
-                    if miss_count == 3 and allow_notify:
-                        await self._schedule_notify_no_1080p(
-                            track, target_code, miss_count, _e.lower_res_count, backoff_s
-                        )
-                    continue
-                if result:
-                    auto_acquired_codes.append(target_code)
-                    pending.add(target_code)
-                    retry_codes = dict(auto_state.get("retry_codes") or {})
-                    retry_codes[target_code] = now_ts()
-                    auto_state["retry_codes"] = retry_codes
-                    auto_state["last_auto_code"] = target_code
-                    auto_state["last_auto_at"] = now_ts()
-                    # Clear no-1080p miss counter on success
-                    no_1080p_miss = dict(auto_state.get("no_1080p_miss") or {})
-                    no_1080p_miss.pop(target_code, None)
-                    auto_state["no_1080p_miss"] = no_1080p_miss
-                    if allow_notify:
-                        await self._schedule_notify_auto_queued(track, target_code, result)
-            if auto_acquired_codes:
-                auto_state["next_auto_retry_at"] = None
-            elif auto_state.get("next_auto_retry_at") is None:
-                # Only set generic retry if No1080pError handler didn't already set a backoff
-                auto_state["next_auto_retry_at"] = now_ts() + self._schedule_retry_interval_s()
-        elif not probe.get("actionable_missing_codes"):
-            auto_state["next_auto_retry_at"] = None
-        auto_state = self._schedule_sanitize_auto_state(auto_state, probe=probe)
-        next_check_at = self._schedule_next_check_at(
-            probe.get("next_air_ts"),
-            has_actionable_missing=bool(probe.get("actionable_missing_codes")),
-            auto_state=auto_state,
+                raise RuntimeError(f"Schedule track {track_id} disappeared after refresh update")
+            if (
+                allow_notify
+                and not auto_acquired_codes
+                and probe.get("signature")
+                and probe.get("signature") != updated.get("skipped_signature")
+                and probe.get("signature") != updated.get("last_missing_signature")
+            ):
+                await self._schedule_notify_missing(updated, probe)
+            if schedule_handler.schedule_is_season_complete(store_probe):
+                LOG.info(
+                    "Schedule track %s complete — final episode present in Plex, removing track",
+                    track_id,
+                )
+                await asyncio.to_thread(
+                    self.store.delete_schedule_track,
+                    track_id,
+                    int(updated.get("user_id") or track.get("user_id") or 0),
+                )
+                return updated, store_probe
+            return updated, probe
+
+        qbt_category_aliases_fn = getattr(self, "_qbt_category_aliases", lambda *_args, **_kwargs: set())
+        return await schedule_handler.schedule_refresh_track(
+            getattr(self, "_ctx", self),
+            track,
+            allow_notify=allow_notify,
+            qbt_category_aliases_fn=qbt_category_aliases_fn,
+            should_attempt_auto_fn=getattr(self, "_schedule_should_attempt_auto", None),
+            attempt_auto_acquire_fn=getattr(self, "_schedule_attempt_auto_acquire", None),
+            download_season_pack_fn=getattr(self, "_schedule_download_season_pack", None),
+            notify_auto_queued_fn=getattr(self, "_schedule_notify_auto_queued", None),
+            notify_no_1080p_fn=getattr(self, "_schedule_notify_no_1080p", None),
+            notify_missing_fn=getattr(self, "_schedule_notify_missing", None),
         )
-
-        store_probe = dict(probe)
-        store_probe.pop("_auto_state", None)
-
-        update_fields: dict[str, Any] = {
-            "pending_json": sorted(pending),
-            "auto_state_json": auto_state,
-            "last_probe_json": store_probe,
-            "last_probe_at": now_ts(),
-            "next_check_at": next_check_at,
-            "next_air_ts": store_probe.get("next_air_ts"),
-            "show_json": probe.get("show") or track.get("show_json") or {},
-        }
-        if not probe.get("signature"):
-            update_fields["last_missing_signature"] = None
-            update_fields["skipped_signature"] = None
-        await asyncio.to_thread(self.store.update_schedule_track, track_id, **update_fields)
-        updated = await asyncio.to_thread(self.store.get_schedule_track_any, track_id)
-        if updated is None:
-            raise RuntimeError(f"Schedule track {track_id} disappeared after refresh update")
-        if (
-            allow_notify
-            and not auto_acquired_codes
-            and probe.get("signature")
-            and probe.get("signature") != updated.get("skipped_signature")
-            and probe.get("signature") != updated.get("last_missing_signature")
-        ):
-            await self._schedule_notify_missing(updated, probe)
-        return updated, probe
 
     async def _schedule_notify_missing(self, track: dict[str, Any], probe: dict[str, Any]) -> None:
         if not self.app:
@@ -2803,6 +2833,154 @@ class BotApp:
             do_add_fn=self._do_add,
         )
 
+    async def _schedule_download_season_pack(self, track: dict[str, Any]) -> dict[str, Any] | None:
+        return await schedule_handler.schedule_download_season_pack(
+            self._ctx,
+            track,
+            do_add_fn=self._do_add,
+        )
+
+    async def _schedule_download_all_missing(self, msg: Any, track: dict[str, Any], codes: list[str]) -> None:
+        """Download all missing episodes, using season packs for full seasons."""
+        if not codes:
+            await self._schedule_download_requested(msg, track, codes)
+            return
+
+        # Group codes by season
+        by_season: dict[int, list[str]] = {}
+        for code in codes:
+            m = re.fullmatch(r"S(\d{2})E\d{2}", code)
+            if m:
+                by_season.setdefault(int(m.group(1)), []).append(code)
+
+        show = track.get("show_json") or {}
+        show_name = show.get("name") or "Show"
+        user_id = int(track.get("user_id") or 0)
+
+        edit_text = getattr(msg, "edit_text", None)
+        can_edit = callable(edit_text) and asyncio.iscoroutinefunction(edit_text)
+        ep_word = "episode" if len(codes) == 1 else "episodes"
+        status_lines = [
+            "<b>⬇️ Queuing Episodes</b>",
+            f"<b>{_h(show_name)}</b> · {len(codes)} {ep_word}",
+            "",
+            "<i>Searching for season packs…</i>",
+        ]
+        if can_edit:
+            await msg.edit_text("\n".join(status_lines), reply_markup=None, parse_mode=_PM)
+            status_msg = msg
+        else:
+            status_msg = await msg.reply_text("\n".join(status_lines), parse_mode=_PM)
+
+        probe = track.get("last_probe_json") or {}
+        available = set(probe.get("actionable_missing_codes") or probe.get("missing_codes") or [])
+        pending = set(track.get("pending_json") or [])
+
+        pack_success_lines: list[str] = []
+        pack_failure_lines: list[str] = []
+        remaining_codes: list[str] = []
+
+        for season_num in sorted(by_season):
+            season_codes = by_season[season_num]
+            wanted_in_season = [c for c in season_codes if c in available and c not in pending]
+            if not wanted_in_season:
+                continue
+
+            # Build a temporary track dict with this season number for pack search
+            pack_track = dict(track)
+            pack_track["season"] = season_num
+            try:
+                pack_result = await self._schedule_download_season_pack(pack_track)
+            except Exception:
+                pack_result = None
+
+            if pack_result:
+                pack_name = str(pack_result.get("name") or f"S{season_num:02d} pack")
+                pack_success_lines.append(f"✅ Season {season_num} pack: {_h(pack_name)}")
+                # Mark all season codes as pending
+                updated_pending = sorted(set(pending) | set(wanted_in_season))
+                await asyncio.to_thread(
+                    self.store.update_schedule_track,
+                    str(track.get("track_id") or ""),
+                    pending_json=updated_pending,
+                    skipped_signature=None,
+                )
+                pending = set(updated_pending)
+                if pack_result.get("hash"):
+                    self._start_progress_tracker(user_id, pack_result["hash"], status_msg, pack_name)
+                else:
+                    self._start_pending_progress_tracker(
+                        user_id, pack_name, pack_result.get("category", "tv"), status_msg
+                    )
+            else:
+                # Season pack not found — queue these individually
+                remaining_codes.extend(wanted_in_season)
+
+        # Download remaining episodes individually
+        individual_success: list[str] = []
+        individual_failures: list[tuple[str, str]] = []
+        if remaining_codes:
+            await status_msg.edit_text(
+                "\n".join(
+                    [
+                        "<b>⬇️ Queuing Episodes</b>",
+                        f"<b>{_h(show_name)}</b>",
+                        "",
+                    ]
+                    + pack_success_lines
+                    + [
+                        "",
+                        f"<i>Searching for {len(remaining_codes)} individual episode{'s' if len(remaining_codes) != 1 else ''}…</i>",
+                    ]
+                ),
+                reply_markup=None,
+                parse_mode=_PM,
+            )
+            updated_pending = sorted(set(pending) | set(remaining_codes))
+            await asyncio.to_thread(
+                self.store.update_schedule_track,
+                str(track.get("track_id") or ""),
+                pending_json=updated_pending,
+                skipped_signature=None,
+            )
+            for code in remaining_codes:
+                try:
+                    out = await self._schedule_download_episode(track, code)
+                    individual_success.append(f"✅ <code>{_h(code)}</code>: {_h(out['name'])}")
+                    if out.get("hash"):
+                        self._start_progress_tracker(user_id, out["hash"], status_msg, out["name"])
+                    else:
+                        self._start_pending_progress_tracker(user_id, out["name"], out["category"], status_msg)
+                except Exception as e:
+                    individual_failures.append((code, str(e)))
+            if individual_failures:
+                final_pending = sorted(set(updated_pending) - {c for c, _ in individual_failures})
+                await asyncio.to_thread(
+                    self.store.update_schedule_track, str(track.get("track_id") or ""), pending_json=final_pending
+                )
+
+        # Build final result message
+        result_lines = [
+            "<b>⬇️ Queue Results</b>",
+            f"<b>{_h(show_name)}</b>",
+            "",
+        ]
+        result_lines.extend(pack_success_lines)
+        result_lines.extend(individual_success)
+        if not pack_success_lines and not individual_success:
+            result_lines.append("• No episodes were queued.")
+        for code, detail in individual_failures:
+            result_lines.append(f"❌ <code>{_h(code)}</code>: <i>{_h(detail)}</i>")
+        for line in pack_failure_lines:
+            result_lines.append(line)
+        result_lines.extend(["", "<i>Background monitoring is now active for queued episodes.</i>"])
+        await status_msg.edit_text(
+            "\n".join(result_lines), reply_markup=self._command_center_keyboard(), parse_mode=_PM
+        )
+        refreshed = await asyncio.to_thread(self.store.get_schedule_track, user_id, str(track.get("track_id") or ""))
+        if refreshed:
+            await self._schedule_refresh_track(refreshed, allow_notify=False)
+
     async def _schedule_download_requested(self, msg: Any, track: dict[str, Any], codes: list[str]) -> None:
         probe = track.get("last_probe_json") or {}
         available = set(probe.get("actionable_missing_codes") or probe.get("missing_codes") or [])
@@ -2843,21 +3021,18 @@ class BotApp:
             status_msg = await msg.reply_text("\n".join(status_lines), parse_mode=_PM)
         failures: list[tuple[str, str]] = []
         success_lines: list[str] = []
+        user_id_track = int(track.get("user_id") or 0)
         for code in wanted:
             try:
                 out = await self._schedule_download_episode(track, code)
-                success_lines.append(f"✅ <code>{_h(code)}</code>: {_h(out['name'])}")
+                success_lines.append(f"\u2705 <code>{_h(code)}</code>: {_h(out['name'])}")
                 if out.get("hash"):
-                    tracker_msg = await msg.reply_text(
-                        f"<b>📡 Live Monitor</b> · <code>{_h(code)}</code>\n<i>Tracking download progress…</i>",
-                        reply_markup=self._stop_download_keyboard(out["hash"]),
-                        parse_mode=_PM,
-                    )
-                    self._start_progress_tracker(int(track.get("user_id") or 0), out["hash"], tracker_msg, out["name"])
+                    # Use status_msg as the tracker — the batch monitor
+                    # shows consolidated progress, so we don't create
+                    # individual per-episode messages.
+                    self._start_progress_tracker(user_id_track, out["hash"], status_msg, out["name"])
                 else:
-                    self._start_pending_progress_tracker(
-                        int(track.get("user_id") or 0), out["name"], out["category"], msg
-                    )
+                    self._start_pending_progress_tracker(user_id_track, out["name"], out["category"], status_msg)
             except Exception as e:
                 failures.append((code, str(e)))
         if failures:
@@ -2994,13 +3169,14 @@ class BotApp:
             return
 
         if post_action == "series":
-            # Download all actionable missing across every season of this show
+            # Download all actionable missing across every season of this show,
+            # using season packs where possible.
             codes = list(
                 effective_probe.get("series_actionable_all") or effective_probe.get("actionable_missing_codes") or []
             )
             await self._render_schedule_ui(user_id, msg, flow, final_text, reply_markup=None)
             self._clear_flow(user_id)
-            await self._schedule_download_requested(msg, track, codes)
+            await self._schedule_download_all_missing(msg, track, codes)
             return
 
         if post_action == "pick":
@@ -4418,6 +4594,9 @@ class BotApp:
         for key, task in list(self.progress_tasks.items()):
             if key[0] == user_id and not task.done():
                 task.cancel()
+        batch_task = self.batch_monitor_tasks.get(user_id)
+        if batch_task and not batch_task.done():
+            batch_task.cancel()
         # Cancel pending trackers so they don't create monitor messages after cleanup
         self._cancel_pending_trackers_for_user(user_id)
         # Edit q.message in-place — no delete, no blank flash

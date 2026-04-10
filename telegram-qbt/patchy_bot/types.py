@@ -40,6 +40,9 @@ class HandlerContext:
     user_nav_ui: dict[int, dict[str, int]] = field(default_factory=dict)
     progress_tasks: dict[tuple[int, str], asyncio.Task[Any]] = field(default_factory=dict)
     pending_tracker_tasks: dict[tuple[int, str, str], asyncio.Task[Any]] = field(default_factory=dict)
+    batch_monitor_messages: dict[int, Any] = field(default_factory=dict)
+    batch_monitor_tasks: dict[int, asyncio.Task[Any]] = field(default_factory=dict)
+    batch_monitor_data: dict[tuple[int, str], dict[str, Any]] = field(default_factory=dict)
     user_ephemeral_messages: dict[int, list[dict[str, int]]] = field(default_factory=dict)
     command_center_refresh_tasks: dict[int, asyncio.Task[Any]] = field(default_factory=dict)
     chat_history: collections.OrderedDict[int, list[dict[str, str]]] = field(default_factory=collections.OrderedDict)
@@ -71,6 +74,12 @@ class HandlerContext:
     schedule_runner_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     remove_runner_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     state_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    # ---- Sequential download queue ----
+    # Only one torrent downloads at a time; others stay paused until their turn.
+    download_queue: asyncio.Queue[dict[str, Any]] = field(default_factory=asyncio.Queue)
+    active_download_hash: str | None = None  # hash of the currently-downloading torrent
+    download_queue_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     # ---- Fire-and-forget background tasks (auto-delete notices, etc.) ----
     background_tasks: set[asyncio.Task[Any]] = field(default_factory=set)

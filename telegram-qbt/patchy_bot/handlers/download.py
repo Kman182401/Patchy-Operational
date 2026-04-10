@@ -109,8 +109,22 @@ def _quarantine_payload(path: str, quarantine_root: str, torrent_hash: str) -> s
     return dest
 
 
+_clamd_cache: tuple[bool, float] = (False, 0.0)
+_CLAMD_CACHE_TTL = 60.0
+
+# Short-lived cache for pre-flight checks (categories, transport, VPN).
+# Avoids repeating expensive checks when adding multiple episodes in a batch.
+_preflight_cache: dict[str, tuple[Any, float]] = {}
+_PREFLIGHT_CACHE_TTL = 30.0
+
+
 def _clamd_available() -> bool:
+    global _clamd_cache
+    now = time.time()
+    if now - _clamd_cache[1] < _CLAMD_CACHE_TTL:
+        return _clamd_cache[0]
     if not shutil.which("clamdscan"):
+        _clamd_cache = (False, now)
         return False
     try:
         result = subprocess.run(
@@ -121,8 +135,11 @@ def _clamd_available() -> bool:
             check=False,
         )
     except Exception:
+        _clamd_cache = (False, now)
         return False
-    return result.returncode == 0
+    available = result.returncode == 0
+    _clamd_cache = (available, now)
+    return available
 
 
 def _run_clamav_scan(path: str, timeout_s: int) -> tuple[str, list[str]]:
@@ -155,6 +172,18 @@ def _run_clamav_scan(path: str, timeout_s: int) -> tuple[str, list[str]]:
     if result.returncode == 1:
         hits = [line for line in stdout_lines if "FOUND" in line]
         return ("infected", hits or ["ClamAV reported infected content"])
+
+    # ClamAV exits with code 2 for operational errors.  When the virus
+    # database is missing / empty the scanner literally cannot work —
+    # this is an infrastructure gap, not a suspicious file.  Treat it
+    # the same as "scanner not installed" and let the download through
+    # so the heuristic malware gate (which already ran at add-time) is
+    # the effective safety net.
+    all_output = " ".join(stderr_lines + stdout_lines)
+    if "No supported database files found" in all_output or "Can't open file or directory" in all_output:
+        LOG.warning("ClamAV database unavailable — skipping scan for %s", path)
+        return ("unavailable", stderr_lines or stdout_lines)
+
     reasons = stderr_lines or stdout_lines or [f"ClamAV exited with code {result.returncode}"]
     return ("error", reasons)
 
@@ -174,6 +203,40 @@ async def _apply_completion_security_gate(
     if status == "clean":
         return CompletionSecurityResult(True, media_path)
 
+    # --- ClamAV unavailable (no database) → allow through, log warning ---
+    if status == "unavailable":
+        LOG.warning("ClamAV unavailable for %s — allowing download (heuristic scan already passed)", name)
+        return CompletionSecurityResult(True, media_path)
+
+    # --- ClamAV error (timeout / crash) → pause + warn, allow retry next poll ---
+    if status == "error":
+        try:
+            await asyncio.to_thread(ctx.qbt.pause_torrents, torrent_hash)
+        except Exception:
+            LOG.warning("Failed to pause torrent after scan error: %s", torrent_hash, exc_info=True)
+        try:
+            await asyncio.to_thread(
+                ctx.store.log_health_event,
+                user_id,
+                torrent_hash,
+                "malware_scan_error",
+                "warn",
+                json.dumps({"reasons": reasons}),
+                name,
+            )
+        except Exception:
+            LOG.debug("Failed to log malware health event", exc_info=True)
+        reason_lines = "\n".join(f"• {_h(reason)}" for reason in reasons[:8])
+        notice = (
+            f"⚠️ <b>Security Hold</b>\n<code>{_h(name)}</code>\n\n"
+            f"ClamAV could not produce a safe verdict. Torrent paused pending manual review.\n\n"
+            f"{reason_lines}"
+        )
+        # Return allowed=False but don't quarantine — caller will skip organization
+        # but mark_completion_notified prevents infinite re-scan.
+        return CompletionSecurityResult(False, media_path, notice)
+
+    # --- ClamAV infected → delete, quarantine, block ---
     try:
         await asyncio.to_thread(ctx.qbt.delete_torrent, torrent_hash, delete_files=False)
     except Exception:
@@ -196,39 +259,26 @@ async def _apply_completion_security_gate(
     except Exception:
         LOG.debug("Failed to log malware block", exc_info=True)
 
-    severity = "critical" if status == "infected" else "warn"
-    event_type = "malware_quarantine" if status == "infected" else "malware_scan_error"
     try:
         await asyncio.to_thread(
             ctx.store.log_health_event,
             user_id,
             torrent_hash,
-            event_type,
-            severity,
+            "malware_quarantine",
+            "critical",
             json.dumps({"reasons": reasons, "quarantine_path": quarantine_path}),
             name,
         )
     except Exception:
         LOG.debug("Failed to log malware health event", exc_info=True)
 
-    title = "Malware Detected" if status == "infected" else "Security Hold"
-    intro = (
-        "ClamAV detected malicious content."
-        if status == "infected"
-        else "ClamAV could not produce a safe verdict."
-    )
     where = (
         f"\nQuarantined to: <code>{_h(quarantine_path)}</code>"
         if quarantine_path and quarantine_path != media_path
         else "\nPayload remains in place pending manual review."
     )
     reason_lines = "\n".join(f"• {_h(reason)}" for reason in reasons[:8])
-    notice = (
-        f"⚠️ <b>{title}</b>\n"
-        f"<code>{_h(name)}</code>\n\n"
-        f"{_h(intro)}{where}\n\n"
-        f"{reason_lines}"
-    )
+    notice = f"⚠️ <b>Malware Detected</b>\n<code>{_h(name)}</code>\n\nClamAV detected malicious content.{where}\n\n{reason_lines}"
     return CompletionSecurityResult(False, quarantine_path, notice)
 
 
@@ -381,6 +431,29 @@ def render_progress_text(
     return monitor
 
 
+def render_batch_monitor_text(entries: list[dict[str, Any]]) -> str:
+    """Render the consolidated live-monitor text for all active downloads."""
+    if not entries:
+        return "<b>⬇️ All downloads complete</b>"
+
+    blocks: list[str] = []
+    for entry in entries:
+        title = str(entry.get("title") or "Download")
+        info = dict(entry.get("info") or {})
+        try:
+            progress_pct = entry.get("progress_pct")
+            progress = float(info.get("progress", 0.0) or 0.0) * 100.0 if progress_pct is None else float(progress_pct)
+        except Exception:
+            progress = 0.0
+        progress = max(0.0, min(100.0, progress))
+        bar = progress_bar(progress)
+        eta_txt = eta_label(info)
+        blocks.append(
+            f"<code>{_h(title)}</code>\n<code>[{bar}] {progress:.1f}%</code> · ETA <code>{_h(eta_txt)}</code>"
+        )
+    return f"<b>⬇️ Downloading</b> · <i>{len(entries)} active</i>\n\n" + "\n\n".join(blocks)
+
+
 # ---------------------------------------------------------------------------
 # Keyboard builders
 # ---------------------------------------------------------------------------
@@ -405,6 +478,43 @@ def stop_download_keyboard(
         ]
     )
     return InlineKeyboardMarkup(rows)
+
+
+def batch_stop_keyboard(torrent_hashes: list[str]) -> InlineKeyboardMarkup:
+    """Build the inline keyboard used by the consolidated batch monitor."""
+    prefix = "stop:all:"
+    max_hash_bytes = 50
+    joined_hashes = []
+    total_bytes = 0
+    truncated = False
+    for raw_hash in torrent_hashes:
+        torrent_hash = str(raw_hash or "").strip()
+        if not torrent_hash:
+            continue
+        encoded = torrent_hash.encode("utf-8")
+        extra = len(encoded) + (1 if joined_hashes else 0)
+        if total_bytes + extra > max_hash_bytes:
+            truncated = True
+            break
+        joined_hashes.append(torrent_hash)
+        total_bytes += extra
+
+    if truncated:
+        LOG.warning(
+            "Batch stop callback truncated from %d to %d hash(es) to fit Telegram callback_data limits",
+            len([h for h in torrent_hashes if str(h or "").strip()]),
+            len(joined_hashes),
+        )
+
+    callback_data = prefix + ",".join(joined_hashes)
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("\U0001f3e0 Home", callback_data="nav:home"),
+                InlineKeyboardButton("\U0001f6d1 Stop All Downloads", callback_data=callback_data),
+            ]
+        ]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -473,6 +583,149 @@ async def safe_tracker_edit(tracker_msg: Any, text: str, reply_markup: Any = Non
 
 
 # ---------------------------------------------------------------------------
+# Batch monitor lifecycle (one live monitor per user)
+# ---------------------------------------------------------------------------
+
+
+def _active_progress_hashes(ctx: HandlerContext, user_id: int) -> list[str]:
+    hashes: list[str] = []
+    for (uid, torrent_hash), task in list(ctx.progress_tasks.items()):
+        if uid != user_id or task.done():
+            continue
+        hashes.append(torrent_hash)
+    return hashes
+
+
+async def _delete_batch_monitor_message(ctx: HandlerContext, user_id: int) -> None:
+    tracker_msg = ctx.batch_monitor_messages.pop(user_id, None)
+    if tracker_msg is None:
+        return
+    try:
+        await tracker_msg.delete()
+    except Exception:
+        pass
+
+
+async def _batch_monitor_entries(
+    ctx: HandlerContext,
+    user_id: int,
+    torrent_hashes: list[str],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    entries: list[dict[str, Any]] = []
+    active_hashes: list[str] = []
+    for torrent_hash in torrent_hashes:
+        key = (user_id, torrent_hash.lower())
+        shared = dict(ctx.batch_monitor_data.get(key) or {})
+        try:
+            info = await asyncio.to_thread(ctx.qbt.get_torrent, torrent_hash)
+        except Exception:
+            LOG.warning("Batch monitor qBittorrent poll failed for %s", torrent_hash, exc_info=True)
+            continue
+        if not info:
+            continue
+        active_hashes.append(torrent_hash.lower())
+        entries.append(
+            {
+                "title": str(shared.get("title") or info.get("name") or torrent_hash),
+                "info": info,
+                "progress_pct": shared.get("progress_pct"),
+            }
+        )
+    return entries, active_hashes
+
+
+async def _run_batch_monitor_loop(ctx: HandlerContext, user_id: int, initial_chat_id: int) -> None:
+    edit_backoff_until = 0.0
+    last_text = ""
+    last_callback_data = ""
+    try:
+        while True:
+            incumbent = ctx.batch_monitor_tasks.get(user_id)
+            if incumbent is not None and incumbent is not asyncio.current_task():
+                return
+
+            torrent_hashes = _active_progress_hashes(ctx, user_id)
+            if not torrent_hashes:
+                await _delete_batch_monitor_message(ctx, user_id)
+                return
+
+            entries, active_hashes = await _batch_monitor_entries(ctx, user_id, torrent_hashes)
+            if not entries or not active_hashes:
+                await asyncio.sleep(ctx.cfg.progress_refresh_s)
+                continue
+
+            tracker_msg = ctx.batch_monitor_messages.get(user_id)
+            text = render_batch_monitor_text(entries)
+            reply_markup = batch_stop_keyboard(active_hashes)
+            callback_data = str(reply_markup.inline_keyboard[0][1].callback_data or "")
+
+            if tracker_msg is None:
+                if not ctx.app or not initial_chat_id:
+                    return
+                tracker_msg = await ctx.app.bot.send_message(
+                    chat_id=initial_chat_id,
+                    text=text,
+                    reply_markup=reply_markup,
+                    parse_mode=_PM,
+                )
+                ctx.batch_monitor_messages[user_id] = tracker_msg
+                last_text = text
+                last_callback_data = callback_data
+                await asyncio.sleep(ctx.cfg.progress_refresh_s)
+                continue
+
+            now = time.time()
+            if now < edit_backoff_until:
+                await asyncio.sleep(min(ctx.cfg.progress_refresh_s, max(0.2, edit_backoff_until - now)))
+                continue
+
+            if text != last_text or callback_data != last_callback_data:
+                edit_result = await safe_tracker_edit(tracker_msg, text, reply_markup=reply_markup)
+                if edit_result.ok:
+                    last_text = text
+                    last_callback_data = callback_data
+                elif edit_result.retry_after_s > 0:
+                    edit_backoff_until = max(edit_backoff_until, time.time() + edit_result.retry_after_s)
+
+            await asyncio.sleep(ctx.cfg.progress_refresh_s)
+    except asyncio.CancelledError:
+        raise
+    finally:
+        if ctx.batch_monitor_tasks.get(user_id) is asyncio.current_task():
+            ctx.batch_monitor_tasks.pop(user_id, None)
+
+
+def start_batch_monitor(ctx: HandlerContext, user_id: int, initial_chat_id: int) -> None:
+    """Start a per-user consolidated live monitor if one is not already running."""
+    if initial_chat_id <= 0:
+        return
+    existing = ctx.batch_monitor_tasks.get(user_id)
+    if existing and not existing.done():
+        if ctx.batch_monitor_messages.get(user_id) is not None:
+            return
+        existing.cancel()
+    task = asyncio.create_task(
+        _run_batch_monitor_loop(ctx, user_id, initial_chat_id),
+        name=f"batch-monitor:{user_id}",
+    )
+    ctx.batch_monitor_tasks[user_id] = task
+
+
+async def stop_batch_monitor(ctx: HandlerContext, user_id: int) -> None:
+    """Cancel the per-user consolidated live monitor and delete its message."""
+    task = ctx.batch_monitor_tasks.pop(user_id, None)
+    if task and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    await _delete_batch_monitor_message(ctx, user_id)
+    for key in [key for key in list(ctx.batch_monitor_data) if key[0] == user_id]:
+        ctx.batch_monitor_data.pop(key, None)
+
+
+# ---------------------------------------------------------------------------
 # Tracker lifecycle (need ctx for progress_tasks, pending_tracker_tasks, qbt)
 # ---------------------------------------------------------------------------
 
@@ -506,6 +759,9 @@ def start_progress_tracker(
         name=f"progress:{user_id}:{torrent_hash.lower()}",
     )
     ctx.progress_tasks[key] = task
+    chat_id = int(getattr(tracker_msg, "chat_id", 0) or 0)
+    if chat_id > 0:
+        start_batch_monitor(ctx, user_id, chat_id)
 
 
 def start_pending_progress_tracker(
@@ -620,17 +876,11 @@ async def track_download_progress(
     header: str | None = None,
     post_add_rows: list[list[Any]] | None = None,
 ) -> None:
-    """The main progress-tracking loop: polls qBT every few seconds, edits the Telegram message."""
+    """The main progress-tracking loop: polls qBT and feeds the shared batch monitor state."""
     key = (user_id, torrent_hash.lower())
     start = time.time()
     tick = 0
-    edit_count = 0
-    last_text = ""
-    last_edit_at = 0.0
     qbt_error_streak = 0
-    edit_error_streak = 0
-    edit_backoff_until = 0.0
-    stop_kb = stop_download_keyboard(torrent_hash, post_add_rows=post_add_rows)
 
     smooth_progress_pct: float | None = None
     smooth_dls: float | None = None
@@ -668,22 +918,11 @@ async def track_download_progress(
                 except Exception:
                     state_line = "\n\n<i>Could not retrieve final torrent state.</i>"
 
-                timeout_text = (
-                    (last_text + "\n") if last_text else ""
-                ) + f"<b>\u23f1 Monitor Timed Out</b>\nUse <code>/active</code> for current status.{state_line}"
-                if timeout_text != last_text:
-                    edit_result = await safe_tracker_edit(tracker_msg, timeout_text, reply_markup=None)
-                    if edit_result.ok:
-                        last_text = timeout_text
-                    else:
-                        if edit_result.retry_after_s > 0:
-                            edit_backoff_until = max(edit_backoff_until, time.time() + edit_result.retry_after_s)
-                        else:
-                            await tracker_send_fallback(
-                                ctx,
-                                tracker_msg,
-                                f"<b>\u23f1 Monitor Timed Out</b>\nUse <code>/active</code> for current status.{state_line}",
-                            )
+                await tracker_send_fallback(
+                    ctx,
+                    tracker_msg,
+                    f"<b>\u23f1 Monitor Timed Out</b>\nUse <code>/active</code> for current status.{state_line}",
+                )
                 break
 
             try:
@@ -714,9 +953,7 @@ async def track_download_progress(
                     "This can happen if qBittorrent rejected the torrent or the magnet link was invalid.\n\n"
                     "Check qBittorrent WebUI directly, or use <code>/active</code>."
                 )
-                edit_result = await safe_tracker_edit(tracker_msg, notice, reply_markup=None)
-                if not edit_result.ok and edit_result.retry_after_s <= 0:
-                    await tracker_send_fallback(ctx, tracker_msg, notice)
+                await tracker_send_fallback(ctx, tracker_msg, notice)
                 try:
                     ctx.store.log_health_event(
                         user_id,
@@ -827,39 +1064,20 @@ async def track_download_progress(
                 if stall_warned:
                     stall_warned = False  # Reset warning flag if progress resumes
 
-            text = render_progress_text(
-                title,
-                info,
-                edit_count,
-                progress_pct=smooth_progress_pct,
-                dls_bps=int(smooth_dls),
-                uls_bps=int(smooth_uls),
-                header=header,
-            )
-
-            now = time.time()
-            if now < edit_backoff_until:
-                await asyncio.sleep(min(ctx.cfg.progress_refresh_s, max(0.2, edit_backoff_until - now)))
-                tick += 1
-                continue
-            if text != last_text and (now - last_edit_at) >= ctx.cfg.progress_edit_min_s:
-                edit_result = await safe_tracker_edit(tracker_msg, text, reply_markup=stop_kb)
-                if edit_result.ok:
-                    last_text = text
-                    last_edit_at = now
-                    edit_count += 1
-                    edit_error_streak = 0
-                else:
-                    edit_error_streak += 1
-                    if edit_result.retry_after_s > 0:
-                        edit_backoff_until = max(edit_backoff_until, time.time() + edit_result.retry_after_s)
+            ctx.batch_monitor_data[key] = {
+                "title": title,
+                "info": dict(info),
+                "progress_pct": smooth_progress_pct,
+                "dls_bps": int(smooth_dls),
+            }
 
             if is_complete_torrent(info):
+                ctx.batch_monitor_data.pop(key, None)
                 done_text = (
                     render_progress_text(
                         title,
                         info,
-                        edit_count,
+                        tick,
                         progress_pct=100.0,
                         dls_bps=int(raw_dls),
                         uls_bps=int(raw_uls),
@@ -923,6 +1141,12 @@ async def track_download_progress(
                         raise
                 if org_result is not None and org_result.moved:
                     media_path = org_result.new_path
+                    # Files have been moved — remove the now-stale qBT entry.
+                    try:
+                        await asyncio.to_thread(ctx.qbt.delete_torrent, torrent_hash, delete_files=False)
+                        LOG.info("Removed organised torrent from qBT: %s", torrent_hash)
+                    except Exception:
+                        LOG.debug("Failed to remove organised torrent %s from qBT", torrent_hash, exc_info=True)
                 if org_result is not None and not org_result.moved and "unknown category" in org_result.summary:
                     LOG.warning("Unknown category '%s' for torrent %s", category, title)
                     try:
@@ -976,7 +1200,79 @@ async def track_download_progress(
             "<b>\u26a0\ufe0f Monitor Error</b>\n<i>Unexpected error.</i> Use <code>/active</code> for status.",
         )
     finally:
+        ctx.batch_monitor_data.pop(key, None)
         ctx.progress_tasks.pop(key, None)
+        # If this was the active download, advance to the next queued torrent.
+        try:
+            await _advance_download_queue(ctx, expected_hash=torrent_hash.lower())
+        except Exception:
+            LOG.warning("Failed to advance download queue", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# Sequential download queue — advance to next queued torrent
+# ---------------------------------------------------------------------------
+
+
+async def _advance_download_queue(ctx: HandlerContext, *, expected_hash: str | None = None) -> None:
+    """Resume the next queued torrent after the active download finishes or is cancelled.
+
+    If *expected_hash* is given, only advance when the current active hash still
+    matches — this prevents a double-advance TOCTOU race when multiple callers
+    detect the same completion.
+    """
+    async with ctx.download_queue_lock:
+        if expected_hash is not None and ctx.active_download_hash != expected_hash:
+            return  # already advanced by another caller
+        ctx.active_download_hash = None
+        requeue: list[dict[str, Any]] = []
+        try:
+            while not ctx.download_queue.empty():
+                entry = ctx.download_queue.get_nowait()
+                torrent_hash = entry["hash"]
+                name = entry["name"]
+                # Verify the torrent still exists in qBT (user may have cancelled it).
+                try:
+                    info = await asyncio.to_thread(ctx.qbt.get_torrent, torrent_hash)
+                except Exception:
+                    # qBT unreachable — keep the entry so we can retry later.
+                    requeue.append(entry)
+                    LOG.warning("Queue advance: qBT unreachable checking %s, re-queuing", torrent_hash)
+                    continue
+                if not info:
+                    LOG.info("Queued torrent %s (%s) no longer in qBT, skipping", torrent_hash, name)
+                    continue
+                # Resume this torrent — it becomes the new active download.
+                ctx.active_download_hash = torrent_hash
+                try:
+                    await asyncio.to_thread(ctx.qbt.resume_torrents, torrent_hash)
+                    LOG.info("Queue advanced: resumed %s (%s)", torrent_hash, name)
+                except Exception:
+                    LOG.warning("Failed to resume queued torrent %s, re-queuing", torrent_hash, exc_info=True)
+                    ctx.active_download_hash = None
+                    requeue.append(entry)
+                    continue
+                break
+        finally:
+            # Put back any entries that failed due to qBT errors.
+            for entry in requeue:
+                ctx.download_queue.put_nowait(entry)
+
+
+async def _remove_from_download_queue(ctx: HandlerContext, torrent_hash: str) -> None:
+    """Remove a specific torrent from the download queue (drain + re-add others)."""
+    target = torrent_hash.lower()
+    async with ctx.download_queue_lock:
+        kept: list[dict[str, Any]] = []
+        while not ctx.download_queue.empty():
+            try:
+                entry = ctx.download_queue.get_nowait()
+            except Exception:
+                break
+            if entry["hash"] != target:
+                kept.append(entry)
+        for entry in kept:
+            await ctx.download_queue.put(entry)
 
 
 # ---------------------------------------------------------------------------
@@ -1025,6 +1321,48 @@ async def completion_poller_job(ctx: HandlerContext, context: ContextTypes.DEFAU
         category = str(info.get("category") or "")
 
         media_path = str(info.get("content_path") or info.get("save_path") or "").strip()
+
+        # File-list heuristics at completion — catches magnets that skipped inspection
+        try:
+            raw_files = await asyncio.to_thread(ctx.qbt.get_torrent_files, torrent_hash)
+            file_names = _torrent_file_names(raw_files)
+        except Exception:
+            file_names = []
+        if file_names:
+            cat_lower = category.lower()
+            mt = "episode" if cat_lower in ("tv", "shows", "tv shows") else "movie"
+            completion_scan = scan_download(
+                name=name,
+                size_bytes=size,
+                quality_tier=quality_tier(name),
+                media_type=mt,
+                files=file_names,
+            )
+            if completion_scan.is_blocked:
+                try:
+                    await asyncio.to_thread(ctx.qbt.delete_torrent, torrent_hash, delete_files=True)
+                except Exception:
+                    LOG.warning("Failed to delete blocked torrent at completion: %s", torrent_hash, exc_info=True)
+                try:
+                    await asyncio.to_thread(
+                        ctx.store.log_malware_block, torrent_hash, name, "download", completion_scan.reasons
+                    )
+                except Exception:
+                    pass
+                reason_lines = "\n".join(f"• {_h(r)}" for r in completion_scan.reasons[:8])
+                notice = f"⚠️ <b>Download Blocked</b>\n<code>{_h(name)}</code>\n\nFile-list heuristics flagged suspicious content.\n\n{reason_lines}"
+                await asyncio.to_thread(ctx.store.mark_completion_notified, torrent_hash, name)
+                for uid in ctx.cfg.allowed_user_ids:
+                    try:
+                        sent = await ctx.app.bot.send_message(chat_id=uid, text=notice, parse_mode=_PM)
+                        track_ephemeral_message(ctx, uid, sent)
+                    except Exception:
+                        LOG.warning(
+                            "Completion poller: failed to send heuristic block alert to user %s", uid, exc_info=True
+                        )
+                _poller_seen_hashes.add(torrent_hash)
+                continue
+
         security = await _apply_completion_security_gate(
             ctx,
             user_id=0,
@@ -1083,6 +1421,12 @@ async def completion_poller_job(ctx: HandlerContext, context: ContextTypes.DEFAU
                 raise
         if org_result is not None and org_result.moved:
             media_path = org_result.new_path
+            # Files have been moved — remove the now-stale qBT entry.
+            try:
+                await asyncio.to_thread(ctx.qbt.delete_torrent, torrent_hash, delete_files=False)
+                LOG.info("Removed organised torrent from qBT: %s", torrent_hash)
+            except Exception:
+                LOG.debug("Failed to remove organised torrent %s from qBT", torrent_hash, exc_info=True)
         if org_result is not None and not org_result.moved and "unknown category" in org_result.summary:
             LOG.warning("Unknown category '%s' for torrent %s", category, name)
             try:
@@ -1136,11 +1480,78 @@ async def completion_poller_job(ctx: HandlerContext, context: ContextTypes.DEFAU
         LOG.info("Completion poller: notified for '%s' (hash=%s)", name, torrent_hash)
         _poller_seen_hashes.add(torrent_hash)
 
+        # If this was the active download, advance the queue.
+        try:
+            await _advance_download_queue(ctx, expected_hash=torrent_hash)
+        except Exception:
+            LOG.warning("Completion poller: failed to advance download queue", exc_info=True)
+
     # Housekeeping: clean up old records once per run.
     try:
         await asyncio.to_thread(ctx.store.cleanup_old_completion_records)
     except Exception:
         pass
+
+    # Housekeeping: if the active download no longer exists in qBT
+    # (e.g. deleted via WebUI), advance the queue so it doesn't stay stuck.
+    active = ctx.active_download_hash
+    if active:
+        try:
+            info = await asyncio.to_thread(ctx.qbt.get_torrent, active)
+            if not info:
+                LOG.info("Active download %s no longer in qBT, advancing queue", active)
+                await _advance_download_queue(ctx, expected_hash=active)
+        except Exception:
+            pass  # qBT unreachable — leave active hash for next poll
+
+    # Housekeeping: purge qBT entries stuck in missingFiles state.
+    await _cleanup_missing_files_torrents(ctx)
+
+
+async def _cleanup_missing_files_torrents(ctx: HandlerContext) -> None:
+    """Remove torrents in 'missingFiles' state from qBittorrent.
+
+    These are stale entries where the organizer already moved files to
+    the Plex library structure but the original qBT entry was never
+    cleaned up.  Also triggers a Plex empty-trash pass when any entries
+    are removed so ghost metadata gets purged.
+    """
+    try:
+        all_torrents = await asyncio.to_thread(ctx.qbt.list_torrents)
+    except Exception:
+        LOG.warning("missingFiles cleanup: failed to list torrents", exc_info=True)
+        return
+    missing = [t for t in all_torrents if str(t.get("state") or "") == "missingFiles"]
+    if not missing:
+        return
+    removed = 0
+    affected_sections: set[str] = set()
+    for t in missing:
+        h = str(t.get("hash") or "").strip()
+        name = str(t.get("name") or "unknown")
+        category = str(t.get("category") or "").strip().lower()
+        if not h:
+            continue
+        try:
+            await asyncio.to_thread(ctx.qbt.delete_torrent, h, delete_files=False)
+            removed += 1
+            LOG.info("Purged missingFiles torrent: %s (%s)", name, h)
+        except Exception:
+            LOG.debug("Failed to purge missingFiles torrent %s", h, exc_info=True)
+            continue
+        if category in ("tv", "shows", "tv shows"):
+            affected_sections.add("show")
+        elif category in ("movies", "movie", "films"):
+            affected_sections.add("movie")
+    if removed:
+        LOG.info("Purged %d missingFiles torrent(s) from qBT", removed)
+    # Ask Plex to scan + empty trash for affected section types.
+    if affected_sections and ctx.plex.ready():
+        try:
+            refreshed = await asyncio.to_thread(ctx.plex.refresh_all_by_type, sorted(affected_sections))
+            LOG.info("Plex trash cleanup after missingFiles purge: %s", refreshed)
+        except Exception:
+            LOG.debug("Plex trash cleanup after missingFiles purge failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1302,20 +1713,39 @@ async def do_add(
     if not row:
         raise RuntimeError("Search result not found")
 
-    try:
-        cat_result = await asyncio.wait_for(asyncio.to_thread(ensure_media_categories, ctx), timeout=10.0)
-    except TimeoutError:
-        raise RuntimeError("Storage/category check timed out (10s). Check qBittorrent connectivity.")
+    # Pre-flight checks with short-lived cache to avoid repeating for each
+    # episode when adding multiple in a batch.
+    now = time.time()
 
-    try:
-        transport_result = await asyncio.wait_for(asyncio.to_thread(qbt_transport_status, ctx), timeout=10.0)
-    except TimeoutError:
-        raise RuntimeError("qBittorrent transport check timed out (10s). Is qBittorrent running?")
+    cached_cat = _preflight_cache.get("categories")
+    if cached_cat and (now - cached_cat[1]) < _PREFLIGHT_CACHE_TTL:
+        cat_result = cached_cat[0]
+    else:
+        try:
+            cat_result = await asyncio.wait_for(asyncio.to_thread(ensure_media_categories, ctx), timeout=10.0)
+        except TimeoutError:
+            raise RuntimeError("Storage/category check timed out (10s). Check qBittorrent connectivity.")
+        _preflight_cache["categories"] = (cat_result, now)
 
-    try:
-        vpn_result = await asyncio.wait_for(asyncio.to_thread(vpn_ready_for_download, ctx), timeout=10.0)
-    except TimeoutError:
-        raise RuntimeError("VPN status check timed out (10s). Check VPN connection.")
+    cached_transport = _preflight_cache.get("transport")
+    if cached_transport and (now - cached_transport[1]) < _PREFLIGHT_CACHE_TTL:
+        transport_result = cached_transport[0]
+    else:
+        try:
+            transport_result = await asyncio.wait_for(asyncio.to_thread(qbt_transport_status, ctx), timeout=10.0)
+        except TimeoutError:
+            raise RuntimeError("qBittorrent transport check timed out (10s). Is qBittorrent running?")
+        _preflight_cache["transport"] = (transport_result, now)
+
+    cached_vpn = _preflight_cache.get("vpn")
+    if cached_vpn and (now - cached_vpn[1]) < _PREFLIGHT_CACHE_TTL:
+        vpn_result = cached_vpn[0]
+    else:
+        try:
+            vpn_result = await asyncio.wait_for(asyncio.to_thread(vpn_ready_for_download, ctx), timeout=10.0)
+        except TimeoutError:
+            raise RuntimeError("VPN status check timed out (10s). Check VPN connection.")
+        _preflight_cache["vpn"] = (vpn_result, now)
 
     ok, reason = cat_result
     transport_ok, transport_reason = transport_result
@@ -1391,7 +1821,7 @@ async def do_add(
             ctx.store.log_malware_block(
                 torrent_hash=_torrent_hash_key,
                 torrent_name=_torrent_name,
-                stage="download",
+                stage="search",
                 reasons=malware_scan.reasons,
             )
         except Exception:
@@ -1421,11 +1851,13 @@ async def do_add(
     if not torrent_hash:
         raise RuntimeError("Download blocked — qBittorrent did not assign a torrent hash for inspection.")
 
+    # Magnets need metadata from peers before file list is available — allow more time.
+    inspection_timeout = ctx.cfg.file_inspection_timeout_s * 3 if is_magnet else ctx.cfg.file_inspection_timeout_s
     try:
         files = await _wait_for_file_inspection(
             ctx,
             torrent_hash,
-            timeout_s=ctx.cfg.file_inspection_timeout_s,
+            timeout_s=inspection_timeout,
         )
     except Exception as exc:
         if is_magnet:
@@ -1466,7 +1898,30 @@ async def do_add(
             reasons_text = "\n".join(f"• {r}" for r in malware_scan.reasons)
             raise RuntimeError(f"Download blocked — suspicious content detected:\n{reasons_text}")
 
-    await asyncio.to_thread(ctx.qbt.resume_torrents, torrent_hash)
+    # --- Sequential download queue ---
+    # Only one torrent downloads at a time.  If the slot is free, resume
+    # immediately; otherwise keep paused and enqueue for later.
+    queued = False
+    async with ctx.download_queue_lock:
+        if ctx.active_download_hash is None:
+            ctx.active_download_hash = torrent_hash.lower()
+            await asyncio.to_thread(ctx.qbt.resume_torrents, torrent_hash)
+        else:
+            # Slot occupied — stay paused, enqueue for later resumption.
+            await ctx.download_queue.put(
+                {
+                    "hash": torrent_hash.lower(),
+                    "name": str(row["name"]),
+                }
+            )
+            queued = True
+
+    queue_note = ""
+    if queued:
+        queue_note = (
+            f"\n\U0001f4cb <b>Queued</b> — position {ctx.download_queue.qsize()} in queue. "
+            "Will start automatically when the current download finishes."
+        )
 
     summary = (
         f"\u2705 Added #{idx}: {_h(str(row['name']))}\n"
@@ -1475,6 +1930,7 @@ async def do_add(
         f"Path: {_h(str(target['path']))}\n"
         f"qBittorrent: {_h(str(resp))}"
         f"{inspection_note}"
+        f"{queue_note}"
     )
 
     return {
@@ -1483,11 +1939,57 @@ async def do_add(
         "category": str(target["category"]),
         "hash": torrent_hash,
         "path": str(target["path"]),
+        "queued": queued,
     }
 
 
 async def on_cb_stop(ctx: HandlerContext, *, data: str, q: Any, user_id: int) -> None:
     """Handle ``stop:*`` callback queries — cancel download and delete torrent."""
+    if data.startswith("stop:all:"):
+        hashes_str = data[len("stop:all:") :]
+        hashes = [
+            h.strip().lower()
+            for h in hashes_str.split(",")
+            if h.strip() and re.fullmatch(r"[a-f0-9]{40}", h.strip().lower())
+        ]
+        for torrent_hash in hashes:
+            task = ctx.progress_tasks.pop((user_id, torrent_hash), None)
+            if task and not task.done():
+                task.cancel()
+            media_path_all = ""
+            try:
+                torrent_info_all = await asyncio.to_thread(ctx.qbt.get_torrent, torrent_hash)
+                if torrent_info_all:
+                    media_path_all = str(
+                        torrent_info_all.get("content_path") or torrent_info_all.get("save_path") or ""
+                    ).strip()
+            except Exception:
+                pass
+            try:
+                await asyncio.to_thread(ctx.qbt.delete_torrent, torrent_hash, delete_files=True)
+                if ctx.plex.ready() and media_path_all:
+                    try:
+                        plex_msg = await asyncio.to_thread(ctx.plex.purge_deleted_path, media_path_all)
+                        LOG.info("stop:all Plex purge: %s", plex_msg)
+                    except Exception:
+                        LOG.warning("stop:all Plex purge failed for %s", media_path_all, exc_info=True)
+            except Exception:
+                LOG.warning("stop:all failed to delete torrent %s", torrent_hash, exc_info=True)
+        # Clear the download queue and reset active slot.
+        async with ctx.download_queue_lock:
+            while not ctx.download_queue.empty():
+                try:
+                    ctx.download_queue.get_nowait()
+                except Exception:
+                    break
+            ctx.active_download_hash = None
+        try:
+            await stop_batch_monitor(ctx, user_id)
+        except Exception:
+            LOG.warning("stop:all failed to stop batch monitor for user %s", user_id, exc_info=True)
+        await q.answer("All downloads stopped.")
+        return
+
     if data.startswith("stop:"):
         torrent_hash = data[5:]
         if not re.fullmatch(r"[a-f0-9]{40}", torrent_hash):
@@ -1498,14 +2000,28 @@ async def on_cb_stop(ctx: HandlerContext, *, data: str, q: Any, user_id: int) ->
         if task and not task.done():
             task.cancel()
         torrent_name = "Download"
+        media_path = ""
         try:
             torrent_info = await asyncio.to_thread(ctx.qbt.get_torrent, torrent_hash)
             if torrent_info:
                 torrent_name = torrent_info.get("name", "Download") or "Download"
+                media_path = str(torrent_info.get("content_path") or torrent_info.get("save_path") or "").strip()
         except Exception:
             pass
         try:
             await asyncio.to_thread(ctx.qbt.delete_torrent, torrent_hash, delete_files=True)
+            if ctx.plex.ready() and media_path:
+                try:
+                    plex_msg = await asyncio.to_thread(ctx.plex.purge_deleted_path, media_path)
+                    LOG.info("Cancel-download Plex purge: %s", plex_msg)
+                except Exception:
+                    LOG.warning("Cancel-download Plex purge failed for %s", media_path, exc_info=True)
+            # Remove from download queue if queued, or advance if it was active.
+            await _remove_from_download_queue(ctx, torrent_hash.lower())
+            try:
+                await _advance_download_queue(ctx, expected_hash=torrent_hash.lower())
+            except Exception:
+                LOG.warning("Failed to advance queue after single stop", exc_info=True)
             # Navigate to Command Center (replicating nav:home logic)
             flow_mod.clear_flow(ctx, user_id)
             render_mod.cancel_pending_trackers_for_user(ctx, user_id)

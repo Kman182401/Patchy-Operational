@@ -4251,6 +4251,66 @@ def test_schedule_apply_tracking_mode_single_episode_still_works(monkeypatch) ->
     assert result["actionable_missing_codes"] == ["S01E01"]
 
 
+def test_schedule_is_season_complete_last_episode_present() -> None:
+    from patchy_bot.handlers.schedule import schedule_is_season_complete
+
+    probe = {
+        "episode_order": ["S01E01", "S01E02", "S01E03"],
+        "present_codes": ["S01E01", "S01E02", "S01E03"],
+    }
+    assert schedule_is_season_complete(probe) is True
+
+
+def test_schedule_is_season_complete_last_episode_absent() -> None:
+    from patchy_bot.handlers.schedule import schedule_is_season_complete
+
+    probe = {
+        "episode_order": ["S01E01", "S01E02", "S01E03"],
+        "present_codes": ["S01E01", "S01E02"],
+    }
+    assert schedule_is_season_complete(probe) is False
+
+
+def test_schedule_is_season_complete_empty_episode_order() -> None:
+    from patchy_bot.handlers.schedule import schedule_is_season_complete
+
+    probe = {
+        "episode_order": [],
+        "present_codes": ["S01E01"],
+    }
+    assert schedule_is_season_complete(probe) is False
+
+
+def test_schedule_is_season_complete_empty_present_codes() -> None:
+    from patchy_bot.handlers.schedule import schedule_is_season_complete
+
+    probe = {
+        "episode_order": ["S01E01", "S01E02", "S01E03"],
+        "present_codes": [],
+    }
+    assert schedule_is_season_complete(probe) is False
+
+
+def test_schedule_is_season_complete_middle_episodes_missing_but_last_present() -> None:
+    from patchy_bot.handlers.schedule import schedule_is_season_complete
+
+    probe = {
+        "episode_order": ["S01E01", "S01E02", "S01E03", "S01E04", "S01E05"],
+        "present_codes": ["S01E03", "S01E04", "S01E05"],
+    }
+    assert schedule_is_season_complete(probe) is True
+
+
+def test_schedule_is_season_complete_only_first_present() -> None:
+    from patchy_bot.handlers.schedule import schedule_is_season_complete
+
+    probe = {
+        "episode_order": ["S01E01", "S01E02", "S01E03"],
+        "present_codes": ["S01E01"],
+    }
+    assert schedule_is_season_complete(probe) is False
+
+
 # ---------------------------------------------------------------------------
 # Strict guided parser — parse_strict_season_episode
 # ---------------------------------------------------------------------------

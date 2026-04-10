@@ -23,9 +23,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import math
 import re
 from typing import Any
+
+LOG = logging.getLogger("qbtg")
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -122,6 +125,7 @@ def apply_filters(
             uploader=uploader,
         )
         if malware_scan.is_blocked:
+            LOG.info("Search filter blocked %r: %s", name, "; ".join(malware_scan.reasons))
             continue
 
         if uploader:

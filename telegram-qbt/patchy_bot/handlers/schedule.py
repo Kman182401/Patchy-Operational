@@ -30,6 +30,7 @@ from ..utils import (
     format_local_ts,
     normalize_title,
     now_ts,
+    quality_tier,
 )
 from .search import deduplicate_results
 
@@ -703,6 +704,15 @@ def schedule_apply_tracking_mode(
     return probe
 
 
+def schedule_is_season_complete(probe: dict[str, Any]) -> bool:
+    """Return True if the final episode in episode_order is present in Plex."""
+    episode_order = list(probe.get("episode_order") or [])
+    present_codes = set(probe.get("present_codes") or [])
+    if not episode_order:
+        return False
+    return episode_order[-1] in present_codes
+
+
 def schedule_probe_track(ctx: HandlerContext, track: dict[str, Any], season: int | None = None) -> dict[str, Any]:
     bundle = schedule_get_show_bundle(
         ctx,
@@ -749,27 +759,10 @@ def schedule_preview_keyboard(probe: dict[str, Any], nav_footer_fn: Any) -> Inli
         )
     if other_season_actionable or len(series_actionable) > len(actionable):
         rows.append(
-            [InlineKeyboardButton("\u2b07\ufe0f Download Missing Episodes", callback_data="sch:confirm:series")]
+            [InlineKeyboardButton("\u2b07\ufe0f Download All Missing Episodes", callback_data="sch:confirm:series")]
         )
     if has_any_missing:
         rows.append([InlineKeyboardButton("\U0001f3af Choose specific episodes", callback_data="sch:confirm:pick")])
-    # Season navigation arrows (replaces old "Change Season" button)
-    avail: list[int] = sorted(int(x) for x in (probe.get("available_seasons") or []) if int(x) > 0)
-    current: int = int(probe.get("season") or 1)
-    if len(avail) > 1 and current in avail:
-        idx = avail.index(current)
-        prev_season: int | None = avail[idx - 1] if idx > 0 else None
-        next_season: int | None = avail[idx + 1] if idx < len(avail) - 1 else None
-        arrow_row: list[InlineKeyboardButton] = []
-        if prev_season is not None:
-            arrow_row.append(InlineKeyboardButton("\u25c0\ufe0f", callback_data=f"sch:nav:{prev_season}"))
-        else:
-            arrow_row.append(InlineKeyboardButton("\u25c0\ufe0f", callback_data="sch:noop"))
-        if next_season is not None:
-            arrow_row.append(InlineKeyboardButton("\u25b6\ufe0f", callback_data=f"sch:nav:{next_season}"))
-        else:
-            arrow_row.append(InlineKeyboardButton("\u25b6\ufe0f", callback_data="sch:noop"))
-        rows.append(arrow_row)
     rows.append([InlineKeyboardButton("\U0001f3e0 Home", callback_data="nav:home")])
     rows.extend(nav_footer_fn(include_home=False))
     return InlineKeyboardMarkup(rows)
@@ -789,6 +782,18 @@ def schedule_missing_keyboard(track_id: str, nav_footer_fn: Any) -> InlineKeyboa
 
 def schedule_episode_picker_keyboard(track_id: str, codes: list[str], nav_footer_fn: Any) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
+    if codes:
+        try:
+            season_num = int(codes[0][1:3])
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        f"\u2b07\ufe0f Download Season {season_num}", callback_data=f"sch:all:{track_id}"
+                    )
+                ]
+            )
+        except (ValueError, IndexError):
+            pass
     pair: list[InlineKeyboardButton] = []
     for code in codes[:12]:
         episode_num = int(code[-2:])
@@ -1155,6 +1160,144 @@ def schedule_episode_rank_key(row: dict[str, Any], show_name: str, season: int, 
     return (exact_episode, exact_show, seeds, ts.format_score)
 
 
+def schedule_season_pack_rank_key(row: dict[str, Any], show_name: str) -> tuple[int, ...]:
+    from ..quality import score_torrent
+
+    name = str(row.get("fileName") or row.get("name") or "")
+    seeds = int(row.get("nbSeeders") or row.get("seeders") or 0)
+    size = int(row.get("fileSize") or row.get("size") or 0)
+    exact_show = 1 if normalize_title(show_name) in normalize_title(name) else 0
+    ts = score_torrent(name, size, seeds, media_type="episode")
+    return (exact_show, seeds, ts.format_score)
+
+
+async def search_season_pack(
+    ctx: HandlerContext,
+    show_name: str,
+    season: int,
+    user_id: int,
+) -> dict[str, Any] | None:
+    """Search for a full-season pack and return the best 1080p non-episode result."""
+    del user_id  # reserved for future per-user search tuning/log correlation
+
+    queries = [
+        f"{show_name} S{season:02d} 1080p",
+        f"{show_name} S{season:02d}",
+        f"{show_name} Season {season} 1080p",
+        f"{show_name} Season {season}",
+    ]
+    want_norm = normalize_title(show_name)
+    poll_interval_s = float(getattr(ctx.cfg, "poll_interval_s", 1.0) or 1.0)
+    early_exit_min_results = int(getattr(ctx.cfg, "search_early_exit_min_results", 12) or 12)
+    early_exit_idle_s = float(getattr(ctx.cfg, "search_early_exit_idle_s", 2.5) or 2.5)
+    early_exit_max_wait_s = float(getattr(ctx.cfg, "search_early_exit_max_wait_s", 12.0) or 12.0)
+
+    for attempt, query in enumerate(queries, start=1):
+        try:
+            rows = await asyncio.to_thread(
+                ctx.qbt.search,
+                query,
+                plugin="enabled",
+                search_cat="tv",
+                timeout_s=15,
+                poll_interval_s=poll_interval_s,
+                early_exit_min_results=max(early_exit_min_results, 12),
+                early_exit_idle_s=early_exit_idle_s,
+                early_exit_max_wait_s=min(early_exit_max_wait_s, 12.0),
+            )
+        except Exception:
+            LOG.debug("Season pack query %d failed for %r", attempt, query, exc_info=True)
+            continue
+
+        filtered: list[dict[str, Any]] = []
+        for row in rows:
+            name = str(row.get("fileName") or row.get("name") or "")
+            if not name:
+                continue
+            if quality_tier(name) != 1080:
+                continue
+            if extract_episode_codes(name):
+                continue
+            if want_norm and want_norm not in normalize_title(name):
+                continue
+            filtered.append(dict(row))
+
+        LOG.debug("Season pack query %d: %r -> %d results", attempt, query, len(filtered))
+        if not filtered:
+            continue
+
+        ranked = sorted(filtered, key=lambda row: schedule_season_pack_rank_key(row, show_name), reverse=True)
+        top = dict(ranked[0])
+        top["_season_pack_query"] = query
+        return top
+    return None
+
+
+def schedule_should_attempt_season_pack(track: dict[str, Any], probe: dict[str, Any]) -> tuple[bool, list[str]]:
+    """Return whether a season-pack lookup should run and the targeted missing codes."""
+    tracking_mode = str(
+        probe.get("tracking_mode") or schedule_episode_auto_state(track).get("tracking_mode") or "upcoming"
+    )
+    if tracking_mode != "full_season":
+        return False, []
+
+    season = int(track.get("season") or probe.get("season") or 0)
+    if season <= 0:
+        return False, []
+
+    missing_codes = [
+        str(code) for code in list(probe.get("missing_codes") or []) if str(code).startswith(f"S{season:02d}")
+    ]
+    total_season_episodes = int(probe.get("total_season_episodes") or 0)
+    unreleased_codes = [
+        str(code) for code in list(probe.get("unreleased_codes") or []) if str(code).startswith(f"S{season:02d}")
+    ]
+    if total_season_episodes <= 0:
+        return False, []
+    if len(missing_codes) != total_season_episodes:
+        return False, []
+    if unreleased_codes:
+        return False, []
+    return True, missing_codes
+
+
+async def schedule_download_season_pack(
+    ctx: HandlerContext,
+    track: dict[str, Any],
+    *,
+    do_add_fn: Any,
+) -> dict[str, Any] | None:
+    """Find and queue a full-season pack for the track, or return None."""
+    show = dict(track.get("show_json") or {})
+    show_name = str(show.get("name") or "").strip()
+    season = int(track.get("season") or 0)
+    user_id = int(track.get("user_id") or 0)
+    if not show_name or season <= 0 or user_id <= 0:
+        return None
+
+    pack_result = await search_season_pack(ctx, show_name, season, user_id)
+    if not pack_result:
+        return None
+
+    query = str(pack_result.get("_season_pack_query") or f"{show_name} S{season:02d}")
+    search_id = ctx.store.save_search(
+        user_id,
+        query,
+        {
+            "query": query,
+            "plugin": "enabled",
+            "search_cat": "tv",
+            "media_hint": "tv",
+            "sort": "season-pack-rank",
+            "order": "desc",
+            "limit": 10,
+        },
+        [pack_result],
+        media_type="episode",
+    )
+    return await do_add_fn(user_id, search_id, 1, "tv")
+
+
 # ---------------------------------------------------------------------------
 # Download episode (async -- calls back into BotApp for _do_add / _apply_filters)
 # ---------------------------------------------------------------------------
@@ -1317,6 +1460,7 @@ async def schedule_refresh_track(
     qbt_category_aliases_fn: Any,
     should_attempt_auto_fn: Any = None,
     attempt_auto_acquire_fn: Any = None,
+    download_season_pack_fn: Any = None,
     notify_auto_queued_fn: Any = None,
     notify_no_1080p_fn: Any = None,
     notify_missing_fn: Any = None,
@@ -1370,44 +1514,81 @@ async def schedule_refresh_track(
     should_auto, target_codes_or_reason = _should_auto_fn(track, probe)
     auto_acquired_codes: list[str] = []
     if should_auto and isinstance(target_codes_or_reason, list) and target_codes_or_reason and attempt_auto_acquire_fn:
-        for target_code in target_codes_or_reason:
+        should_attempt_pack, pack_codes = schedule_should_attempt_season_pack(track, probe)
+        pack_result: dict[str, Any] | None = None
+        if should_attempt_pack and download_season_pack_fn:
             try:
-                result = await attempt_auto_acquire_fn(track, target_code)
-            except No1080pError as _e:
-                no_1080p_miss = dict(auto_state.get("no_1080p_miss") or {})
-                miss_count = int(no_1080p_miss.get(target_code) or 0) + 1
-                no_1080p_miss[target_code] = miss_count
-                auto_state["no_1080p_miss"] = no_1080p_miss
-                backoff_s = schedule_no_1080p_backoff_s(miss_count)
-                auto_state["next_auto_retry_at"] = now_ts() + backoff_s
-                LOG.info(
-                    "Schedule no-1080p miss %d for %s, backing off %ds",
-                    miss_count,
-                    target_code,
-                    backoff_s,
+                pack_result = await download_season_pack_fn(track)
+            except Exception:
+                LOG.warning(
+                    "Schedule season-pack acquire failed for %s",
+                    str((track.get("show_json") or probe.get("show") or {}).get("name") or "Show"),
+                    exc_info=True,
                 )
-                if miss_count == 3 and allow_notify and notify_no_1080p_fn:
-                    await notify_no_1080p_fn(track, target_code, miss_count, _e.lower_res_count, backoff_s)
-                continue
-            if result:
-                auto_acquired_codes.append(target_code)
-                pending.add(target_code)
+                pack_result = None
+            if pack_result:
+                season = int(track.get("season") or probe.get("season") or 0)
+                LOG.info(
+                    "Season pack found for %s S%02d, skipping per-episode downloads",
+                    str((track.get("show_json") or probe.get("show") or {}).get("name") or "Show"),
+                    season,
+                )
+                auto_acquired_codes.extend(pack_codes)
+                pending.update(pack_codes)
                 retry_codes = dict(auto_state.get("retry_codes") or {})
-                retry_codes[target_code] = now_ts()
+                acquired_at = now_ts()
+                for code in pack_codes:
+                    retry_codes[code] = acquired_at
                 auto_state["retry_codes"] = retry_codes
-                auto_state["last_auto_code"] = target_code
-                auto_state["last_auto_at"] = now_ts()
-                # Clear no-1080p miss counter on success
+                auto_state["last_auto_code"] = f"S{season:02d}"
+                auto_state["last_auto_at"] = acquired_at
                 no_1080p_miss = dict(auto_state.get("no_1080p_miss") or {})
-                no_1080p_miss.pop(target_code, None)
+                for code in pack_codes:
+                    no_1080p_miss.pop(code, None)
                 auto_state["no_1080p_miss"] = no_1080p_miss
                 if allow_notify and notify_auto_queued_fn:
-                    await notify_auto_queued_fn(track, target_code, result)
+                    await notify_auto_queued_fn(track, f"S{season:02d} pack", pack_result)
         if auto_acquired_codes:
             auto_state["next_auto_retry_at"] = None
-        elif auto_state.get("next_auto_retry_at") is None:
-            # Only set generic retry if No1080pError handler didn't already set a backoff
-            auto_state["next_auto_retry_at"] = now_ts() + schedule_retry_interval_s()
+        else:
+            for target_code in target_codes_or_reason:
+                try:
+                    result = await attempt_auto_acquire_fn(track, target_code)
+                except No1080pError as _e:
+                    no_1080p_miss = dict(auto_state.get("no_1080p_miss") or {})
+                    miss_count = int(no_1080p_miss.get(target_code) or 0) + 1
+                    no_1080p_miss[target_code] = miss_count
+                    auto_state["no_1080p_miss"] = no_1080p_miss
+                    backoff_s = schedule_no_1080p_backoff_s(miss_count)
+                    auto_state["next_auto_retry_at"] = now_ts() + backoff_s
+                    LOG.info(
+                        "Schedule no-1080p miss %d for %s, backing off %ds",
+                        miss_count,
+                        target_code,
+                        backoff_s,
+                    )
+                    if miss_count == 3 and allow_notify and notify_no_1080p_fn:
+                        await notify_no_1080p_fn(track, target_code, miss_count, _e.lower_res_count, backoff_s)
+                    continue
+                if result:
+                    auto_acquired_codes.append(target_code)
+                    pending.add(target_code)
+                    retry_codes = dict(auto_state.get("retry_codes") or {})
+                    retry_codes[target_code] = now_ts()
+                    auto_state["retry_codes"] = retry_codes
+                    auto_state["last_auto_code"] = target_code
+                    auto_state["last_auto_at"] = now_ts()
+                    # Clear no-1080p miss counter on success
+                    no_1080p_miss = dict(auto_state.get("no_1080p_miss") or {})
+                    no_1080p_miss.pop(target_code, None)
+                    auto_state["no_1080p_miss"] = no_1080p_miss
+                    if allow_notify and notify_auto_queued_fn:
+                        await notify_auto_queued_fn(track, target_code, result)
+            if auto_acquired_codes:
+                auto_state["next_auto_retry_at"] = None
+            elif auto_state.get("next_auto_retry_at") is None:
+                # Only set generic retry if No1080pError handler didn't already set a backoff
+                auto_state["next_auto_retry_at"] = now_ts() + schedule_retry_interval_s()
     elif not probe.get("actionable_missing_codes"):
         auto_state["next_auto_retry_at"] = None
     auto_state = schedule_sanitize_auto_state(auto_state, probe=probe)
@@ -1446,6 +1627,18 @@ async def schedule_refresh_track(
         and notify_missing_fn
     ):
         await notify_missing_fn(updated, probe)
+    # --- Season completion check ---
+    if schedule_is_season_complete(store_probe):
+        LOG.info(
+            "Schedule track %s complete — final episode present in Plex, removing track",
+            track_id,
+        )
+        await asyncio.to_thread(
+            ctx.store.delete_schedule_track,
+            track_id,
+            int(updated.get("user_id") or track.get("user_id") or 0),
+        )
+        return updated, store_probe
     return updated, probe
 
 
@@ -1679,55 +1872,6 @@ async def on_cb_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> No
             reply_markup=None,
             current_ui_message=q.message,
         )
-        return
-
-    if data == "sch:noop":
-        await q.answer()
-        return
-
-    if data.startswith("sch:nav:"):
-        target_season = int(data.split(":")[2])
-        flow = bot_app._get_flow(user_id)
-        if not flow or flow.get("mode") != "schedule" or flow.get("stage") != "confirm":
-            await q.answer()
-            return
-        available = [int(x) for x in (flow.get("probe") or {}).get("available_seasons") or []]
-        if target_season not in available:
-            await q.answer()
-            return
-        show_id = int(flow.get("selected_show", {}).get("id") or 0)
-        if not show_id:
-            await q.answer("Show data missing")
-            return
-        try:
-            bundle = await asyncio.to_thread(
-                bot_app._schedule_get_show_bundle,
-                show_id,
-                False,
-                False,
-            )
-            raw_probe = await asyncio.to_thread(bot_app._schedule_probe_bundle, bundle, None, target_season)
-            probe = bot_app._schedule_apply_tracking_mode(
-                {"auto_state_json": {"tracking_mode": str(flow.get("tracking_mode") or "upcoming")}},
-                raw_probe,
-            )
-        except Exception as exc:
-            LOG.debug("sch:nav probe failed: %s", exc)
-            await q.answer("Could not load that season")
-            return
-        flow["stage"] = "confirm"
-        flow["season"] = target_season
-        flow["probe"] = probe
-        bot_app._set_flow(user_id, flow)
-        await bot_app._render_schedule_ui(
-            user_id,
-            q.message,
-            flow,
-            bot_app._schedule_preview_text(probe),
-            reply_markup=schedule_preview_keyboard(probe, bot_app._nav_footer),
-            current_ui_message=q.message,
-        )
-        await q.answer()
         return
 
     if data == "sch:confirm:all":
@@ -2559,8 +2703,7 @@ async def on_cb_movie_schedule(bot_app: Any, *, data: str, q: Any, user_id: int)
                 user_id,
                 q.message,
                 flow,
-                f"Could not determine the release state for <b>{_h(title)}{_h(year_str)}</b>.\n\n"
-                f"Try again later.",
+                f"Could not determine the release state for <b>{_h(title)}{_h(year_str)}</b>.\n\nTry again later.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back", callback_data="msch:cancel")]]),
                 current_ui_message=q.message,
             )

@@ -14,6 +14,7 @@ from patchy_bot.handlers._shared import (
     check_free_space,
     normalize_media_choice,
 )
+import patchy_bot.handlers.download as _dl_mod
 from patchy_bot.handlers.download import (
     completion_poller_job,
     do_add,
@@ -26,6 +27,15 @@ from patchy_bot.handlers.download import (
 from patchy_bot.utils import _ACTIVE_DL_STATES
 
 # noqa: F401 — _dl_mod used in TestCompletionPollerJob._clear_seen_hashes fixture
+
+
+@pytest.fixture(autouse=True)
+def _clear_preflight_cache():
+    """Clear the do_add preflight cache between tests."""
+    _dl_mod._preflight_cache.clear()
+    yield
+    _dl_mod._preflight_cache.clear()
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -741,6 +751,56 @@ class TestOnCbStopHashValidation:
         ctx.navigate_to_command_center.assert_awaited_once()
         call_args = ctx.navigate_to_command_center.await_args
         assert call_args[0][1] == 12345  # user_id
+
+    @pytest.mark.asyncio
+    @patch("patchy_bot.handlers.download.stop_batch_monitor", new_callable=AsyncMock)
+    async def test_stop_all_cancels_user_hashes_and_stops_monitor(self, _mock_stop_batch_monitor, mock_callback_query):
+        """stop:all cancels matching user tasks, deletes each torrent, and answers cleanly."""
+
+        class DummyTask:
+            def __init__(self) -> None:
+                self.cancelled = False
+
+            def done(self) -> bool:
+                return False
+
+            def cancel(self) -> None:
+                self.cancelled = True
+
+        hash_a = "a" * 40
+        hash_b = "b" * 40
+        hash_c = "c" * 40
+
+        task_a = DummyTask()
+        task_b = DummyTask()
+        other_task = DummyTask()
+
+        ctx = MagicMock()
+        ctx.progress_tasks = {
+            (12345, hash_a): task_a,
+            (12345, hash_b): task_b,
+            (99999, hash_c): other_task,
+        }
+        ctx.qbt.delete_torrent = MagicMock(return_value=None)
+        ctx.download_queue_lock = asyncio.Lock()
+        ctx.download_queue = asyncio.Queue()
+        ctx.active_download_hash = None
+
+        await on_cb_stop(ctx, data=f"stop:all:{hash_a},{hash_b}", q=mock_callback_query, user_id=12345)
+
+        assert task_a.cancelled is True
+        assert task_b.cancelled is True
+        assert other_task.cancelled is False
+        assert (12345, hash_a) not in ctx.progress_tasks
+        assert (12345, hash_b) not in ctx.progress_tasks
+        assert (99999, hash_c) in ctx.progress_tasks
+        assert [call.args for call in ctx.qbt.delete_torrent.call_args_list] == [(hash_a,), (hash_b,)]
+        assert [call.kwargs for call in ctx.qbt.delete_torrent.call_args_list] == [
+            {"delete_files": True},
+            {"delete_files": True},
+        ]
+        _mock_stop_batch_monitor.assert_awaited_once_with(ctx, 12345)
+        mock_callback_query.answer.assert_awaited_once_with("All downloads stopped.")
 
 
 # ---------------------------------------------------------------------------
