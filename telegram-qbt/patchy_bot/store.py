@@ -565,13 +565,7 @@ class Store:
                         str(row.get("fileUrl") or row.get("file_url") or ""),
                         str(row.get("descrLink") or row.get("descr_link") or ""),
                         str(row.get("fileHash") or row.get("hash") or ""),
-                        str(
-                            row.get("uploader")
-                            or row.get("author")
-                            or row.get("poster")
-                            or row.get("username")
-                            or ""
-                        ),
+                        str(row.get("uploader") or row.get("author") or row.get("poster") or row.get("username") or ""),
                         ts.format_score,
                         q_json,
                     ),
@@ -798,6 +792,7 @@ class Store:
         probe: dict[str, Any],
         next_check_at: int,
         initial_auto_state: dict[str, Any] | None = None,
+        enabled: int = 1,
     ) -> tuple[bool, dict[str, Any]]:
         with self._lock:
             if self._closed:
@@ -827,7 +822,7 @@ class Store:
                     int(chat_id),
                     now_value,
                     now_value,
-                    1,
+                    1 if enabled else 0,
                     str(show.get("name") or "Unknown show"),
                     int(show.get("year") or 0) or None,
                     int(season),

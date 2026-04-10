@@ -1893,8 +1893,11 @@ async def on_cb_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> No
     """
     ctx = getattr(bot_app, "_ctx", bot_app)
 
+    _cleanup_poster = getattr(bot_app, "_cleanup_poster_photo", None)
+
     if data == "sch:cancel":
-        await bot_app._cleanup_poster_photo(user_id)
+        if _cleanup_poster:
+            await _cleanup_poster(user_id)
         bot_app._clear_flow(user_id)
         await bot_app._render_command_center(q.message, user_id=user_id)
         return
@@ -1905,7 +1908,8 @@ async def on_cb_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> No
         return
 
     if data == "sch:change":
-        await bot_app._cleanup_poster_photo(user_id)
+        if _cleanup_poster:
+            await _cleanup_poster(user_id)
         bot_app._schedule_start_flow(user_id)
         flow = bot_app._get_flow(user_id) or {"mode": "schedule", "stage": "await_show"}
         await bot_app._render_schedule_ui(
@@ -2132,6 +2136,11 @@ async def on_cb_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> No
         if not flow or flow.get("stage") != "picker":
             await q.answer("Session expired.", show_alert=True)
             return
+        # Delete the disabled track created during picker entry
+        pending_tid = str(flow.get("pending_track_id") or "")
+        if pending_tid:
+            await asyncio.to_thread(ctx.store.delete_schedule_track, pending_tid, user_id)
+            flow.pop("pending_track_id", None)
         if flow.get("picker_has_preview"):
             probe = dict(flow.get("probe") or {})
             flow["stage"] = "confirm"
@@ -2165,6 +2174,10 @@ async def on_cb_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> No
         if dl_from == "picker":
             selected_codes = list(flow.get("dl_confirm_codes") or [])
             pk_track_id = str(flow.get("picker_track_id") or "")
+            # Activate the disabled track created during picker entry
+            pending_tid = str(flow.get("pending_track_id") or "")
+            if pending_tid:
+                await asyncio.to_thread(ctx.store.update_schedule_track, pending_tid, enabled=1)
             pk_track = await asyncio.to_thread(ctx.store.get_schedule_track, user_id, pk_track_id)
             if not pk_track:
                 await bot_app._render_schedule_ui(
@@ -2597,7 +2610,11 @@ async def on_cb_movie_schedule(bot_app: Any, *, data: str, q: Any, user_id: int)
     # ------------------------------------------------------------------
     # msch:cancel — go back from an in-progress add-movie flow
     # ------------------------------------------------------------------
+    _cleanup_poster = getattr(bot_app, "_cleanup_poster_photo", None)
+
     if data == "msch:cancel":
+        if _cleanup_poster:
+            await _cleanup_poster(user_id)
         flow = bot_app._get_flow(user_id)
         if flow and flow.get("mode") == "msch_add":
             bot_app._clear_flow(user_id)
@@ -2800,6 +2817,8 @@ async def on_cb_movie_schedule(bot_app: Any, *, data: str, q: Any, user_id: int)
 
         tmdb_id_str = data.split(":", 2)[2]
         flow = bot_app._get_flow(user_id)
+        if _cleanup_poster:
+            await _cleanup_poster(user_id, flow)
         candidates: list[dict[str, Any]] = list(flow.get("candidates") or []) if flow else []
         candidate: dict[str, Any] | None = None
         for c in candidates:
@@ -3072,9 +3091,22 @@ async def on_text_movie_schedule(bot_app: Any, user_id: int, text: str, msg: Any
         )
         return True
 
-    # Store candidates in flow
+    # Store candidates in flow; clean up any previous poster before sending a new one
+    _cleanup_poster = getattr(bot_app, "_cleanup_poster_photo", None)
+    if _cleanup_poster:
+        await _cleanup_poster(user_id, flow)
     flow["candidates"] = results
     bot_app._set_flow(user_id, flow)
+
+    # Send poster for top result (if available)
+    _send_poster = getattr(bot_app, "_send_poster_photo", None)
+    if _send_poster:
+        await _send_poster(
+            chat_id=msg.chat_id,
+            image_url=results[0].get("poster_url") if results else None,
+            flow=flow,
+            user_id=user_id,
+        )
 
     result_rows: list[list[InlineKeyboardButton]] = []
     for r in results[:5]:

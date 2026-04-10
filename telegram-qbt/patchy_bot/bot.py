@@ -602,6 +602,8 @@ class BotApp:
     async def _cleanup_private_user_message(self, message: Any) -> None:
         await render_mod.cleanup_private_user_message(message)
 
+    _POSTER_ALLOWED_HOSTS: frozenset[str] = frozenset({"static.tvmaze.com", "image.tmdb.org"})
+
     async def _send_poster_photo(
         self,
         chat_id: int,
@@ -611,10 +613,15 @@ class BotApp:
     ) -> None:
         """Send a poster thumbnail as a separate photo message and track its ID in flow.
 
-        If image_url is None or the send fails, silently skips — the text UI
-        continues normally without a poster.
+        Only URLs whose hostname is in _POSTER_ALLOWED_HOSTS are sent.
+        If image_url is None, not on the allowlist, or the send fails, silently
+        skips — the text UI continues normally without a poster.
         """
         if not image_url:
+            return
+        from urllib.parse import urlparse
+
+        if urlparse(image_url).hostname not in self._POSTER_ALLOWED_HOSTS:
             return
         try:
             photo_msg = await self.app.bot.send_photo(
@@ -3204,6 +3211,14 @@ class BotApp:
                 reply_markup=None,
             )
             return
+
+        # Clean up orphaned disabled track from a previous interrupted picker flow
+        stale_tid = str(flow.get("pending_track_id") or "")
+        if stale_tid:
+            await asyncio.to_thread(self.store.delete_schedule_track, stale_tid, user_id)
+            flow.pop("pending_track_id", None)
+            self._set_flow(user_id, flow)
+
         probe = dict(flow.get("probe") or {})
         show = dict(flow.get("selected_show") or {})
         season = int(flow.get("season") or probe.get("season") or 1)
@@ -3229,6 +3244,7 @@ class BotApp:
             probe=store_probe,
             next_check_at=next_check_at,
             initial_auto_state=track_auto_state,
+            enabled=0 if post_action == "pick" else 1,
         )
         effective_probe = track.get("last_probe_json") or probe
         final_text = self._schedule_track_ready_text(track, effective_probe, duplicate=not created)
@@ -3258,6 +3274,9 @@ class BotApp:
             )
             all_missing = self._schedule_picker_all_missing(effective_probe, season, current_missing)
             if not any(all_missing.values()):
+                # No episodes to pick — activate the track immediately if it was created disabled
+                if created:
+                    await asyncio.to_thread(self.store.update_schedule_track, track_id, enabled=1)
                 await self._render_schedule_ui(user_id, msg, flow, final_text, reply_markup=None)
                 self._clear_flow(user_id)
                 return
@@ -3267,6 +3286,8 @@ class BotApp:
             flow["picker_all_missing"] = all_missing
             flow["picker_has_preview"] = True
             flow["picker_track_id"] = track_id
+            if created:
+                flow["pending_track_id"] = track_id
             self._set_flow(user_id, flow)
             await self._render_schedule_ui(
                 user_id,
