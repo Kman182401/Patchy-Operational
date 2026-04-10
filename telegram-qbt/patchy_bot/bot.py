@@ -1728,7 +1728,10 @@ class BotApp:
         season = int(flow.get("picker_season") or 1)
         all_missing: dict = flow.get("picker_all_missing") or {}
         season_codes = list(all_missing.get(str(season)) or [])
+        track_id = str(flow.get("picker_track_id") or "")
         rows: list[list[InlineKeyboardButton]] = []
+        if track_id and season > 0:
+            rows.append([InlineKeyboardButton(f"⬇️ Download Season {season}", callback_data=f"sch:all:{track_id}")])
         pair: list[InlineKeyboardButton] = []
         for code in season_codes:
             mark = "✅ " if code in selected else ""
@@ -1758,9 +1761,22 @@ class BotApp:
         show_name = str(show.get("name") or "this show")
         dl_from = str(flow.get("dl_confirm_from") or "confirm")
         n = len(codes)
+
+        # Build a map of all missing codes per season (for "Season X Full" detection)
+        series_missing: dict = probe.get("series_missing_by_season") or {}
+        all_missing_by_season: dict[str, set[str]] = {}
+        for s_key, s_codes in series_missing.items():
+            prefix = f"S{int(s_key):02d}"
+            all_missing_by_season[prefix] = set(str(c) for c in s_codes)
+        # Also include current-season missing_codes in case series_missing doesn't cover it
+        for c in list(probe.get("missing_codes") or []):
+            prefix = str(c)[:3]
+            all_missing_by_season.setdefault(prefix, set()).add(str(c))
+
         by_season: dict[str, list[str]] = {}
         for c in codes:
             by_season.setdefault(c[:3], []).append(c)
+
         lines = [
             "<b>📥 Confirm Download</b>",
             "━━━━━━━━━━━━━━━━━━━━",
@@ -1768,10 +1784,22 @@ class BotApp:
             f"<b>{n} episode{'s' if n != 1 else ''}</b> will be queued for download:",
         ]
         for prefix in sorted(by_season):
-            lines.append(f"  <code>{_h(' · '.join(by_season[prefix]))}</code>")
+            season_codes = by_season[prefix]
+            all_missing = all_missing_by_season.get(prefix, set())
+            # Show "Season X Full" when every missing episode for this season is included
+            if all_missing and set(season_codes) >= all_missing:
+                try:
+                    season_num = int(prefix[1:])
+                    lines.append(f"  <code>Season {season_num} Full</code>")
+                except ValueError:
+                    lines.append(f"  <code>{_h(' · '.join(season_codes))}</code>")
+            else:
+                lines.append(f"  <code>{_h(' · '.join(season_codes))}</code>")
         lines.append("")
         if dl_from == "picker":
             lines.append("<i>These episodes will be added to your download queue.</i>")
+        elif dl_from == "track":
+            lines.append("<i>These episodes will be queued for download.</i>")
         else:
             lines.append("<i>Tracking will also begin for future episodes of this show.</i>")
         return "\n".join(lines)

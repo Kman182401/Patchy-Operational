@@ -35,6 +35,12 @@ from ..utils import (
 from .search import deduplicate_results
 
 
+def _short_ep(code: str) -> str:
+    """S02E01 → Ep.1 (short label when season context is already shown)."""
+    n = episode_number_from_code(code)
+    return f"Ep.{n}" if n is not None else code
+
+
 class No1080pError(Exception):
     """Raised when search returns results but none meet the 1080p (tier 3) requirement."""
 
@@ -844,7 +850,12 @@ def schedule_picker_keyboard(flow: dict) -> InlineKeyboardMarkup:
     season = int(flow.get("picker_season") or 1)
     all_missing: dict = flow.get("picker_all_missing") or {}
     season_codes = list(all_missing.get(str(season)) or [])
+    track_id = str(flow.get("picker_track_id") or "")
     rows: list[list[InlineKeyboardButton]] = []
+    if track_id and season > 0:
+        rows.append(
+            [InlineKeyboardButton(f"\u2b07\ufe0f Download Season {season}", callback_data=f"sch:all:{track_id}")]
+        )
     pair: list[InlineKeyboardButton] = []
     for code in season_codes:
         mark = "\u2705 " if code in selected else ""
@@ -873,9 +884,22 @@ def schedule_dl_confirm_text(flow: dict) -> str:
     show_name = str(show.get("name") or "this show")
     dl_from = str(flow.get("dl_confirm_from") or "confirm")
     n = len(codes)
+
+    # Build a map of all missing codes per season (for "Season X Full" detection)
+    series_missing: dict = probe.get("series_missing_by_season") or {}
+    all_missing_by_season: dict[str, set[str]] = {}
+    for s_key, s_codes in series_missing.items():
+        pfx = f"S{int(s_key):02d}"
+        all_missing_by_season[pfx] = set(str(c) for c in s_codes)
+    # Also include current-season missing_codes in case series_missing doesn't cover it
+    for c in list(probe.get("missing_codes") or []):
+        pfx = str(c)[:3]
+        all_missing_by_season.setdefault(pfx, set()).add(str(c))
+
     by_season: dict[str, list[str]] = {}
     for c in codes:
         by_season.setdefault(c[:3], []).append(c)
+
     lines = [
         "<b>\U0001f4e5 Confirm Download</b>",
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501",
@@ -883,10 +907,22 @@ def schedule_dl_confirm_text(flow: dict) -> str:
         f"<b>{n} episode{'s' if n != 1 else ''}</b> will be queued for download:",
     ]
     for prefix in sorted(by_season):
-        lines.append(f"  <code>{_h(' \u00b7 '.join(by_season[prefix]))}</code>")
+        season_codes = by_season[prefix]
+        all_missing = all_missing_by_season.get(prefix, set())
+        # Show "Season X Full" when every missing episode for this season is included
+        if all_missing and set(season_codes) >= all_missing:
+            try:
+                season_num = int(prefix[1:])
+                lines.append(f"  <code>Season {season_num} Full</code>")
+            except ValueError:
+                lines.append(f"  <code>{_h(' \u00b7 '.join(season_codes))}</code>")
+        else:
+            lines.append(f"  <code>{_h(' \u00b7 '.join(season_codes))}</code>")
     lines.append("")
     if dl_from == "picker":
         lines.append("<i>These episodes will be added to your download queue.</i>")
+    elif dl_from == "track":
+        lines.append("<i>These episodes will be queued for download.</i>")
     else:
         lines.append("<i>Tracking will also begin for future episodes of this show.</i>")
     return "\n".join(lines)
@@ -1946,7 +1982,29 @@ async def on_cb_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> No
             return
         probe = dict(track.get("last_probe_json") or {})
         codes = list(probe.get("actionable_missing_codes") or probe.get("missing_codes") or [])
-        await bot_app._schedule_download_requested(q.message, track, codes)
+        if not codes:
+            await q.answer("No episodes to download.", show_alert=True)
+            return
+        show = dict(track.get("show_json") or probe.get("show") or {})
+        flow: dict = {
+            "mode": "schedule",
+            "stage": "dl_confirm",
+            "dl_confirm_codes": codes,
+            "dl_confirm_post_action": "all",
+            "dl_confirm_from": "track",
+            "dl_confirm_track_id": track_id,
+            "probe": probe,
+            "selected_show": show,
+        }
+        bot_app._set_flow(user_id, flow)
+        await bot_app._render_schedule_ui(
+            user_id,
+            q.message,
+            flow,
+            bot_app._schedule_dl_confirm_text(flow),
+            reply_markup=bot_app._schedule_dl_confirm_keyboard(),
+            current_ui_message=q.message,
+        )
         return
 
     if data.startswith("sch:pickeps:"):
@@ -2121,6 +2179,32 @@ async def on_cb_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> No
                 current_ui_message=q.message,
             )
             await bot_app._schedule_download_requested(q.message, pk_track, selected_codes)
+        elif dl_from == "track":
+            selected_codes = list(flow.get("dl_confirm_codes") or [])
+            tr_track_id = str(flow.get("dl_confirm_track_id") or "")
+            tr_track = await asyncio.to_thread(ctx.store.get_schedule_track, user_id, tr_track_id)
+            if not tr_track:
+                await bot_app._render_schedule_ui(
+                    user_id,
+                    q.message,
+                    flow,
+                    "That schedule entry was not found.",
+                    reply_markup=None,
+                    current_ui_message=q.message,
+                )
+                bot_app._clear_flow(user_id)
+                return
+            bot_app._clear_flow(user_id)
+            n = len(selected_codes)
+            await bot_app._render_schedule_ui(
+                user_id,
+                q.message,
+                flow,
+                f"Queuing {n} episode{'s' if n != 1 else ''}\u2026",
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            await bot_app._schedule_download_requested(q.message, tr_track, selected_codes)
         else:
             flow["stage"] = "confirm"
             bot_app._set_flow(user_id, flow)
@@ -2144,6 +2228,29 @@ async def on_cb_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> No
                 flow,
                 bot_app._schedule_picker_text(flow),
                 reply_markup=bot_app._schedule_picker_keyboard(flow),
+                current_ui_message=q.message,
+            )
+        elif dl_from == "track":
+            tr_track_id = str(flow.get("dl_confirm_track_id") or "")
+            bot_app._clear_flow(user_id)
+            tr_track = await asyncio.to_thread(ctx.store.get_schedule_track, user_id, tr_track_id)
+            if not tr_track:
+                await bot_app._render_nav_ui(
+                    user_id,
+                    q.message,
+                    "That schedule entry was not found.",
+                    reply_markup=bot_app._home_only_keyboard(),
+                    current_ui_message=q.message,
+                )
+                return
+            probe = dict(tr_track.get("last_probe_json") or {})
+            track_id_str = str(tr_track.get("track_id") or "")
+            missing_text = bot_app._schedule_missing_text(tr_track, probe)
+            await bot_app._render_nav_ui(
+                user_id,
+                q.message,
+                missing_text,
+                reply_markup=bot_app._schedule_missing_keyboard(track_id_str),
                 current_ui_message=q.message,
             )
         else:
