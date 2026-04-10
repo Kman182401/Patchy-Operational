@@ -1787,7 +1787,7 @@ class BotApp:
             season_codes = by_season[prefix]
             all_missing = all_missing_by_season.get(prefix, set())
             # Show "Season X Full" when every missing episode for this season is included
-            if all_missing and set(season_codes) >= all_missing:
+            if dl_from != "ep" and all_missing and set(season_codes) >= all_missing:
                 try:
                     season_num = int(prefix[1:])
                     lines.append(f"  <code>Season {season_num} Full</code>")
@@ -1798,6 +1798,8 @@ class BotApp:
         lines.append("")
         if dl_from == "picker":
             lines.append("<i>These episodes will be added to your download queue.</i>")
+        elif dl_from == "ep":
+            lines.append("<i>This episode will be queued for download.</i>")
         elif dl_from == "track":
             lines.append("<i>These episodes will be queued for download.</i>")
         else:

@@ -910,7 +910,7 @@ def schedule_dl_confirm_text(flow: dict) -> str:
         season_codes = by_season[prefix]
         all_missing = all_missing_by_season.get(prefix, set())
         # Show "Season X Full" when every missing episode for this season is included
-        if all_missing and set(season_codes) >= all_missing:
+        if dl_from != "ep" and all_missing and set(season_codes) >= all_missing:
             try:
                 season_num = int(prefix[1:])
                 lines.append(f"  <code>Season {season_num} Full</code>")
@@ -921,6 +921,8 @@ def schedule_dl_confirm_text(flow: dict) -> str:
     lines.append("")
     if dl_from == "picker":
         lines.append("<i>These episodes will be added to your download queue.</i>")
+    elif dl_from == "ep":
+        lines.append("<i>This episode will be queued for download.</i>")
     elif dl_from == "track":
         lines.append("<i>These episodes will be queued for download.</i>")
     else:
@@ -987,9 +989,11 @@ def schedule_preview_text(probe: dict[str, Any]) -> str:
         lines.append("")
         lines.append(f"<b>Missing (Season {chosen_season}):</b>")
         if not_queued:
-            lines.append(f"  \u274c <code>{_h(' \u00b7 '.join(not_queued))}</code>")
+            lines.append(f"  \u274c <code>{_h(' \u00b7 '.join(_short_ep(c) for c in not_queued))}</code>")
         if queued_missing:
-            lines.append(f"  \u2b07\ufe0f Queued: <code>{_h(' \u00b7 '.join(queued_missing[:8]))}</code>")
+            lines.append(
+                f"  \u2b07\ufe0f Queued: <code>{_h(' \u00b7 '.join(_short_ep(c) for c in queued_missing[:8]))}</code>"
+            )
 
     if other_season_gaps:
         lines.append("")
@@ -998,7 +1002,9 @@ def schedule_preview_text(probe: dict[str, Any]) -> str:
             codes = other_season_gaps[s]
             sample = codes[:4]
             suffix = f" +{len(codes) - 4} more" if len(codes) > 4 else ""
-            lines.append(f"  \u274c Season {s}: <code>{_h(' \u00b7 '.join(sample))}</code>{_h(suffix)}")
+            lines.append(
+                f"  \u274c Season {s}: <code>{_h(' \u00b7 '.join(_short_ep(c) for c in sample))}</code>{_h(suffix)}"
+            )
 
     summary = str(show.get("summary") or "")
     if summary:
@@ -2041,6 +2047,7 @@ async def on_cb_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> No
             "picker_has_preview": False,
             "picker_track_id": track_id,
             "picker_show": dict(track.get("show_json") or {}),
+            "probe": probe,
         }
         bot_app._set_flow(user_id, picker_flow)
         await bot_app._render_schedule_ui(
@@ -2179,7 +2186,7 @@ async def on_cb_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> No
                 current_ui_message=q.message,
             )
             await bot_app._schedule_download_requested(q.message, pk_track, selected_codes)
-        elif dl_from == "track":
+        elif dl_from in ("track", "ep"):
             selected_codes = list(flow.get("dl_confirm_codes") or [])
             tr_track_id = str(flow.get("dl_confirm_track_id") or "")
             tr_track = await asyncio.to_thread(ctx.store.get_schedule_track, user_id, tr_track_id)
@@ -2230,7 +2237,7 @@ async def on_cb_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> No
                 reply_markup=bot_app._schedule_picker_keyboard(flow),
                 current_ui_message=q.message,
             )
-        elif dl_from == "track":
+        elif dl_from in ("track", "ep"):
             tr_track_id = str(flow.get("dl_confirm_track_id") or "")
             bot_app._clear_flow(user_id)
             tr_track = await asyncio.to_thread(ctx.store.get_schedule_track, user_id, tr_track_id)
@@ -2280,7 +2287,27 @@ async def on_cb_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> No
             )
             return
         code = episode_code(int(track.get("season") or 1), int(episode_raw))
-        await bot_app._schedule_download_requested(q.message, track, [code])
+        probe = dict(track.get("last_probe_json") or {})
+        show = dict(track.get("show_json") or probe.get("show") or {})
+        ep_flow: dict[str, Any] = {
+            "mode": "schedule",
+            "stage": "dl_confirm",
+            "dl_confirm_codes": [code],
+            "dl_confirm_post_action": "all",
+            "dl_confirm_from": "ep",
+            "dl_confirm_track_id": track_id,
+            "probe": probe,
+            "selected_show": show,
+        }
+        bot_app._set_flow(user_id, ep_flow)
+        await bot_app._render_schedule_ui(
+            user_id,
+            q.message,
+            ep_flow,
+            bot_app._schedule_dl_confirm_text(ep_flow),
+            reply_markup=bot_app._schedule_dl_confirm_keyboard(),
+            current_ui_message=q.message,
+        )
         return
 
     if data.startswith("sch:skip:"):
