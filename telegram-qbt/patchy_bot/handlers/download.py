@@ -52,6 +52,12 @@ class CompletionSecurityResult:
     notice_text: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class TrackerEditResult:
+    ok: bool
+    retry_after_s: int = 0
+
+
 def _torrent_file_names(files: list[dict[str, Any]]) -> list[str]:
     out: list[str] = []
     for row in files:
@@ -108,7 +114,7 @@ def _clamd_available() -> bool:
         return False
     try:
         result = subprocess.run(
-            ["clamdscan", "--ping"],
+            ["clamdscan", "--ping=1"],
             capture_output=True,
             text=True,
             timeout=3,
@@ -424,24 +430,46 @@ async def tracker_send_fallback(ctx: HandlerContext, tracker_msg: Any, text: str
         bot = tracker_msg.get_bot()
         sent = await bot.send_message(chat_id=chat_id, text=text, parse_mode=_PM)
         track_ephemeral_message(ctx, int(chat_id), sent)
-    except Exception:
+    except Exception as exc:
+        retry_after_s = tracker_retry_after_seconds(exc)
+        if retry_after_s > 0:
+            LOG.warning("Tracker fallback suppressed due to Telegram flood control: retry in %ss", retry_after_s)
+            return
         LOG.warning("Tracker fallback send_message also failed", exc_info=True)
 
 
-async def safe_tracker_edit(tracker_msg: Any, text: str, reply_markup: Any = None) -> bool:
+def tracker_retry_after_seconds(exc: Exception) -> int:
+    raw = getattr(exc, "retry_after", 0) or 0
+    try:
+        retry_after_s = int(raw)
+    except Exception:
+        retry_after_s = 0
+    if retry_after_s > 0:
+        return retry_after_s
+    match = re.search(r"retry in (\d+) seconds?", str(exc), re.IGNORECASE)
+    if not match:
+        return 0
+    return int(match.group(1))
+
+
+async def safe_tracker_edit(tracker_msg: Any, text: str, reply_markup: Any = None) -> TrackerEditResult:
     """Edit a tracker message, handling transient Telegram errors gracefully."""
     try:
         await tracker_msg.edit_text(text, reply_markup=reply_markup, parse_mode=_PM)
-        return True
+        return TrackerEditResult(True)
     except Exception as e:
         msg = str(e).lower()
         if "message is not modified" in msg:
-            return True
-        if "timed out" in msg or "timeout" in msg or "retry after" in msg:
+            return TrackerEditResult(True)
+        retry_after_s = tracker_retry_after_seconds(e)
+        if retry_after_s > 0:
+            LOG.warning("Live monitor Telegram edit paused by flood control: retry in %ss", retry_after_s)
+            return TrackerEditResult(False, retry_after_s=retry_after_s)
+        if "timed out" in msg or "timeout" in msg:
             LOG.warning("Live monitor Telegram edit transient failure: %s", e)
-            return False
+            return TrackerEditResult(False)
         LOG.warning("Live monitor Telegram edit failed: %s", e)
-        return False
+        return TrackerEditResult(False)
 
 
 # ---------------------------------------------------------------------------
@@ -601,6 +629,7 @@ async def track_download_progress(
     last_edit_at = 0.0
     qbt_error_streak = 0
     edit_error_streak = 0
+    edit_backoff_until = 0.0
     stop_kb = stop_download_keyboard(torrent_hash, post_add_rows=post_add_rows)
 
     smooth_progress_pct: float | None = None
@@ -643,15 +672,18 @@ async def track_download_progress(
                     (last_text + "\n") if last_text else ""
                 ) + f"<b>\u23f1 Monitor Timed Out</b>\nUse <code>/active</code> for current status.{state_line}"
                 if timeout_text != last_text:
-                    edited = await safe_tracker_edit(tracker_msg, timeout_text, reply_markup=None)
-                    if edited:
+                    edit_result = await safe_tracker_edit(tracker_msg, timeout_text, reply_markup=None)
+                    if edit_result.ok:
                         last_text = timeout_text
                     else:
-                        await tracker_send_fallback(
-                            ctx,
-                            tracker_msg,
-                            f"<b>\u23f1 Monitor Timed Out</b>\nUse <code>/active</code> for current status.{state_line}",
-                        )
+                        if edit_result.retry_after_s > 0:
+                            edit_backoff_until = max(edit_backoff_until, time.time() + edit_result.retry_after_s)
+                        else:
+                            await tracker_send_fallback(
+                                ctx,
+                                tracker_msg,
+                                f"<b>\u23f1 Monitor Timed Out</b>\nUse <code>/active</code> for current status.{state_line}",
+                            )
                 break
 
             try:
@@ -682,8 +714,8 @@ async def track_download_progress(
                     "This can happen if qBittorrent rejected the torrent or the magnet link was invalid.\n\n"
                     "Check qBittorrent WebUI directly, or use <code>/active</code>."
                 )
-                edited = await safe_tracker_edit(tracker_msg, notice, reply_markup=None)
-                if not edited:
+                edit_result = await safe_tracker_edit(tracker_msg, notice, reply_markup=None)
+                if not edit_result.ok and edit_result.retry_after_s <= 0:
                     await tracker_send_fallback(ctx, tracker_msg, notice)
                 try:
                     ctx.store.log_health_event(
@@ -806,15 +838,21 @@ async def track_download_progress(
             )
 
             now = time.time()
+            if now < edit_backoff_until:
+                await asyncio.sleep(min(ctx.cfg.progress_refresh_s, max(0.2, edit_backoff_until - now)))
+                tick += 1
+                continue
             if text != last_text and (now - last_edit_at) >= ctx.cfg.progress_edit_min_s:
-                edited = await safe_tracker_edit(tracker_msg, text, reply_markup=stop_kb)
-                if edited:
+                edit_result = await safe_tracker_edit(tracker_msg, text, reply_markup=stop_kb)
+                if edit_result.ok:
                     last_text = text
                     last_edit_at = now
                     edit_count += 1
                     edit_error_streak = 0
                 else:
                     edit_error_streak += 1
+                    if edit_result.retry_after_s > 0:
+                        edit_backoff_until = max(edit_backoff_until, time.time() + edit_result.retry_after_s)
 
             if is_complete_torrent(info):
                 done_text = (

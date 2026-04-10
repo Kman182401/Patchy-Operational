@@ -538,6 +538,34 @@ async def test_cb_remove_browse_opens_root(fake_app: FakeBotApp, query: MagicMoc
     assert any(name == "remove_browse_root" for name, _, _ in fake_app.render_calls)
 
 
+@pytest.mark.asyncio
+async def test_cb_remove_browsecat_movies_renders_library(fake_app: FakeBotApp, query: MagicMock, tmp_path) -> None:
+    movies_dir = tmp_path / "Movies"
+    (movies_dir / "Movie.One.2024.mkv").write_text("x")
+    fake_app.cfg.movies_path = str(movies_dir)
+
+    await on_cb_remove(fake_app, data="rm:browsecat:movies", q=query, user_id=USER_ID)
+
+    flow = fake_app.flow[USER_ID]
+    assert flow["stage"] == "choose_item"
+    assert flow["browse_category"] == "movies"
+    assert any(name == "remove_ui" for name, _, _ in fake_app.render_calls)
+
+
+@pytest.mark.asyncio
+async def test_cb_remove_browsecat_tv_renders_library(fake_app: FakeBotApp, query: MagicMock, tmp_path) -> None:
+    tv_dir = tmp_path / "TV"
+    (tv_dir / "Show.Name.S01E02.1080p.mkv").write_text("x")
+    fake_app.cfg.tv_path = str(tv_dir)
+
+    await on_cb_remove(fake_app, data="rm:browsecat:tv", q=query, user_id=USER_ID)
+
+    flow = fake_app.flow[USER_ID]
+    assert flow["stage"] == "choose_item"
+    assert flow["browse_category"] == "tv"
+    assert any(name == "remove_ui" for name, _, _ in fake_app.render_calls)
+
+
 # ---------------------------------------------------------------------------
 # Schedule cancel (handlers/schedule.py: on_cb_schedule)
 # ---------------------------------------------------------------------------

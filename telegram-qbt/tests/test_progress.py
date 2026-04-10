@@ -259,25 +259,36 @@ class TestSafeTrackerEdit:
         msg = MagicMock()
         msg.edit_text = AsyncMock()
         result = await safe_tracker_edit(msg, "hello")
-        assert result is True
+        assert result.ok is True
+        assert result.retry_after_s == 0
 
     async def test_not_modified_returns_true(self):
         msg = MagicMock()
         msg.edit_text = AsyncMock(side_effect=Exception("message is not modified"))
         result = await safe_tracker_edit(msg, "hello")
-        assert result is True
+        assert result.ok is True
+        assert result.retry_after_s == 0
 
     async def test_timeout_returns_false(self):
         msg = MagicMock()
         msg.edit_text = AsyncMock(side_effect=Exception("Timed out"))
         result = await safe_tracker_edit(msg, "hello")
-        assert result is False
+        assert result.ok is False
+        assert result.retry_after_s == 0
+
+    async def test_retry_after_returns_backoff_seconds(self):
+        msg = MagicMock()
+        msg.edit_text = AsyncMock(side_effect=Exception("Flood control exceeded. Retry in 11 seconds"))
+        result = await safe_tracker_edit(msg, "hello")
+        assert result.ok is False
+        assert result.retry_after_s == 11
 
     async def test_other_error_returns_false(self):
         msg = MagicMock()
         msg.edit_text = AsyncMock(side_effect=Exception("bad request"))
         result = await safe_tracker_edit(msg, "hello")
-        assert result is False
+        assert result.ok is False
+        assert result.retry_after_s == 0
 
 
 # ---------------------------------------------------------------------------

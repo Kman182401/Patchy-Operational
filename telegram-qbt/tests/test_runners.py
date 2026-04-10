@@ -7,12 +7,14 @@ from handlers/download.py and handlers/remove.py.
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from patchy_bot.handlers.download import (
+    _clamd_available,
     completion_poller_job,
     extract_hash,
     is_direct_torrent_link,
@@ -207,6 +209,23 @@ async def test_completion_poller_cleans_old_records(mock_ctx: Any, monkeypatch: 
     await completion_poller_job(mock_ctx, None)
 
     mock_ctx.store.cleanup_old_completion_records.assert_called_once()
+
+
+def test_clamd_available_uses_valid_ping_arguments(monkeypatch: Any) -> None:
+    """The clamd probe sends a valid ping invocation and accepts a zero exit code."""
+
+    monkeypatch.setattr("patchy_bot.handlers.download.shutil.which", lambda name: "/usr/bin/clamdscan")
+
+    captured: dict[str, Any] = {}
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="PONG", stderr="")
+
+    monkeypatch.setattr("patchy_bot.handlers.download.subprocess.run", fake_run)
+
+    assert _clamd_available() is True
+    assert captured["cmd"] == ["clamdscan", "--ping=1"]
 
 
 # ---------------------------------------------------------------------------
