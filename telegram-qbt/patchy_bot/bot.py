@@ -11,6 +11,7 @@ import math
 import os
 import re
 import secrets
+import subprocess
 import threading
 from datetime import time as dt_time
 from typing import Any
@@ -64,13 +65,7 @@ from .utils import (
 LOG = logging.getLogger("qbtg")
 
 
-async def _auto_delete_after(bot: Any, chat_id: int, message_id: int, delay: float = 10) -> None:
-    """Delete a message after *delay* seconds (best-effort)."""
-    await asyncio.sleep(delay)
-    try:
-        await bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except Exception:
-        pass
+_auto_delete_after = _shared.auto_delete_after
 
 
 class BotApp:
@@ -384,12 +379,6 @@ class BotApp:
     def _storage_status(self) -> tuple[bool, str]:
         return _shared.storage_status(getattr(self, "_ctx", self))
 
-    @staticmethod
-    def _check_free_space(
-        target_path: str, warn_bytes: int = 10 * 1024**3, block_bytes: int = 5 * 1024**3
-    ) -> tuple[bool, str]:
-        return _shared.check_free_space(target_path, warn_bytes, block_bytes)
-
     def _qbt_transport_status(self) -> tuple[bool, str]:
         return _shared.qbt_transport_status(getattr(self, "_ctx", self))
 
@@ -465,10 +454,6 @@ class BotApp:
     def _cancel_pending_trackers_for_user(self, user_id: int) -> None:
         """Cancel pending tracker tasks for this user so they don't create monitor messages after home cleanup."""
         render_mod.cancel_pending_trackers_for_user(self._ctx, user_id)
-
-    async def _delete_old_nav_ui(self, user_id: int, bot: Any) -> None:
-        """Delete the previous nav-UI message (e.g. old Command Center) so /start shows a clean chat."""
-        await render_mod.delete_old_nav_ui(self._ctx, user_id, bot)
 
     async def _cleanup_ephemeral_messages(self, user_id: int, bot: Any) -> None:
         await render_mod.cleanup_ephemeral_messages(getattr(self, "_ctx", self), user_id, bot)
@@ -657,40 +642,6 @@ class BotApp:
     def _progress_bar(progress_pct: float, width: int = 18) -> str:
         return download_handler.progress_bar(progress_pct, width)
 
-    @staticmethod
-    def _completed_bytes(info: dict[str, Any]) -> int:
-        return download_handler.completed_bytes(info)
-
-    @staticmethod
-    def _is_complete_torrent(info: dict[str, Any]) -> bool:
-        return download_handler.is_complete_torrent(info)
-
-    @staticmethod
-    def _format_eta(eta_seconds: int) -> str:
-        return download_handler.format_eta(eta_seconds)
-
-    @staticmethod
-    def _state_label(info: dict[str, Any]) -> str:
-        return download_handler.state_label(info)
-
-    @classmethod
-    def _eta_label(cls, info: dict[str, Any]) -> str:
-        return download_handler.eta_label(info)
-
-    def _render_progress_text(
-        self,
-        name: str,
-        info: dict[str, Any],
-        tick: int,
-        *,
-        progress_pct: float | None = None,
-        dls_bps: int | None = None,
-        uls_bps: int | None = None,
-    ) -> str:
-        return download_handler.render_progress_text(
-            name, info, tick, progress_pct=progress_pct, dls_bps=dls_bps, uls_bps=uls_bps
-        )
-
     def _start_progress_tracker(
         self,
         user_id: int,
@@ -731,26 +682,6 @@ class BotApp:
             post_add_rows=post_add_rows,
         )
 
-    async def _attach_progress_tracker_when_ready(
-        self,
-        user_id: int,
-        title: str,
-        category: str,
-        base_msg: Any,
-        *,
-        header: str | None = None,
-        post_add_rows: list[list[Any]] | None = None,
-    ) -> None:
-        await download_handler.attach_progress_tracker_when_ready(
-            self._ctx,
-            user_id,
-            title,
-            category,
-            base_msg,
-            header=header,
-            post_add_rows=post_add_rows,
-        )
-
     def _stop_download_keyboard(
         self, torrent_hash: str, post_add_rows: list[list[Any]] | None = None
     ) -> InlineKeyboardMarkup:
@@ -767,20 +698,6 @@ class BotApp:
             if filtered:
                 rows.append(filtered)
         return rows or None
-
-    async def _tracker_send_fallback(self, tracker_msg: Any, text: str) -> None:
-        await download_handler.tracker_send_fallback(self._ctx, tracker_msg, text)
-
-    async def _safe_tracker_edit(self, tracker_msg: Any, text: str, reply_markup: Any = None) -> bool:
-        return await download_handler.safe_tracker_edit(tracker_msg, text, reply_markup)
-
-    async def _track_download_progress(self, user_id: int, torrent_hash: str, tracker_msg: Any, title: str) -> None:
-        await download_handler.track_download_progress(self._ctx, user_id, torrent_hash, tracker_msg, title)
-
-    # ---------- Background completion poller ----------
-
-    async def _completion_poller_job(self, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await download_handler.completion_poller_job(self._ctx, context)
 
     # ---------- UI ----------
 
@@ -1096,9 +1013,6 @@ class BotApp:
     def _schedule_retry_interval_s(self) -> int:
         return schedule_handler.schedule_retry_interval_s()
 
-    def _schedule_metadata_retry_s(self) -> int:
-        return schedule_handler.schedule_metadata_retry_s()
-
     def _schedule_pending_stale_s(self) -> int:
         return schedule_handler.schedule_pending_stale_s()
 
@@ -1132,9 +1046,6 @@ class BotApp:
 
     def _remove_runner_interval_s(self) -> int:
         return remove_handler.remove_runner_interval_s()
-
-    def _remove_retry_backoff_s(self, retry_count: int) -> int:
-        return remove_handler.remove_retry_backoff_s(retry_count)
 
     async def _schedule_bootstrap(self, app: Application) -> None:
         if app.job_queue is None:
@@ -1187,8 +1098,12 @@ class BotApp:
 
         for job in app.job_queue.get_jobs_by_name("completion-poller"):
             job.schedule_removal()
+
+        async def _completion_poller_cb(context: ContextTypes.DEFAULT_TYPE) -> None:
+            await download_handler.completion_poller_job(self._ctx, context)
+
         app.job_queue.run_repeating(
-            self._completion_poller_job,
+            _completion_poller_cb,
             interval=60,
             first=10,
             name="completion-poller",
@@ -3348,10 +3263,6 @@ class BotApp:
         """Delegation stub -- logic lives in handlers/search.py."""
         return search_handler.sort_rows(rows, key, order)
 
-    def _parse_tv_filter(self, text: str) -> tuple[int | None, int | None] | None:
-        """Delegation stub -- logic lives in handlers/search.py."""
-        return search_handler.parse_tv_filter(text)
-
     @staticmethod
     def _parse_strict_season_episode(text: str) -> tuple[int, int] | None:
         """Delegation stub -- logic lives in handlers/search.py."""
@@ -3367,26 +3278,9 @@ class BotApp:
         """Delegation stub -- logic lives in handlers/search.py."""
         return search_handler.build_tv_query(title, season, episode)
 
-    def _strip_patchy_name(self, text: str) -> str:
-        """Delegation stub -- logic lives in handlers/search.py."""
-        return search_handler.strip_patchy_name(text, self.cfg.patchy_chat_name)
-
     def _extract_search_intent(self, text: str) -> tuple[str | None, str]:
         """Delegation stub -- logic lives in handlers/search.py."""
         return search_handler.extract_search_intent(text, self.cfg.patchy_chat_name)
-
-    @staticmethod
-    def _chat_needs_qbt_snapshot(text: str) -> bool:
-        """Delegation stub — logic lives in handlers/chat.py."""
-        return chat_handler.chat_needs_qbt_snapshot(text)
-
-    def _build_qbt_snapshot(self) -> str:
-        """Delegation stub — logic lives in handlers/chat.py."""
-        return chat_handler.build_qbt_snapshot(self._ctx)
-
-    def _patchy_system_prompt(self) -> str:
-        """Delegation stub — logic lives in handlers/chat.py."""
-        return chat_handler.patchy_system_prompt(self._ctx)
 
     async def _reply_patchy_chat(self, msg: Any, user_id: int, text: str) -> None:
         """Delegation stub — logic lives in handlers/chat.py."""
@@ -3713,17 +3607,6 @@ class BotApp:
 
     # ---------- Remove system (delegated to handlers.remove) ----------
 
-    def _remove_roots(self) -> list[dict[str, str]]:
-        return remove_handler.remove_roots(self._ctx)
-
-    @staticmethod
-    def _path_size_bytes(path: str) -> int:
-        return remove_handler.path_size_bytes(path)
-
-    @staticmethod
-    def _remove_match_score(query_norm: str, candidate_norm: str) -> int:
-        return remove_handler.remove_match_score(query_norm, candidate_norm)
-
     def _find_remove_candidates(self, query: str, limit: int = 8) -> list[dict[str, Any]]:
         return remove_handler.find_remove_candidates(self._ctx, query, limit)
 
@@ -3735,30 +3618,11 @@ class BotApp:
     ) -> InlineKeyboardMarkup:
         return remove_handler.remove_browse_root_keyboard(movie_count, show_count, selected_count)
 
-    @staticmethod
-    def _remove_selected_path(candidate: dict[str, Any]) -> str:
-        return remove_handler.remove_selected_path(candidate)
-
-    def _remove_selection_items(self, flow: dict[str, Any] | None) -> list[dict[str, Any]]:
-        return remove_handler.remove_selection_items(flow)
-
     def _remove_selected_paths(self, flow: dict[str, Any] | None) -> set[str]:
         return remove_handler.remove_selected_paths(flow)
 
     def _remove_selection_count(self, flow: dict[str, Any] | None) -> int:
         return remove_handler.remove_selection_count(flow)
-
-    def _remove_toggle_candidate(self, flow: dict[str, Any], candidate: dict[str, Any]) -> bool:
-        return remove_handler.remove_toggle_candidate(flow, candidate)
-
-    def _remove_selection_total_size(self, candidates: list[dict[str, Any]]) -> int:
-        return remove_handler.remove_selection_total_size(candidates)
-
-    def _remove_effective_candidates(self, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return remove_handler.remove_effective_candidates(candidates)
-
-    def _remove_toggle_label(self, candidate: dict[str, Any], selected_paths: set[str]) -> str:
-        return remove_handler.remove_toggle_label(candidate, selected_paths)
 
     def _remove_candidate_keyboard(
         self, candidates: list[dict[str, Any]], selected_paths: set[str] | None = None
@@ -3792,41 +3656,6 @@ class BotApp:
     def _remove_season_action_keyboard(self, selected: bool, selected_count: int) -> InlineKeyboardMarkup:
         return remove_handler.remove_season_action_keyboard(selected, selected_count)
 
-    def _remove_season_detail_keyboard(
-        self, season_candidate: dict[str, Any], selected_paths: set[str] | None, show_idx: int
-    ) -> InlineKeyboardMarkup:
-        return remove_handler.remove_season_detail_keyboard(season_candidate, selected_paths, show_idx)
-
-    @staticmethod
-    def _remove_page_bounds(items: list[dict[str, Any]], page: int, per_page: int = 8) -> tuple[int, int, int, int]:
-        return remove_handler.remove_page_bounds(items, page, per_page)
-
-    def _remove_paginated_keyboard(
-        self,
-        items: list[dict[str, Any]],
-        page: int,
-        *,
-        item_prefix: str,
-        nav_prefix: str,
-        back_callback: str | None = None,
-        selected_paths: set[str] | None = None,
-        compact_browse_footer: bool = False,
-    ) -> InlineKeyboardMarkup:
-        return remove_handler.remove_paginated_keyboard(
-            items,
-            page,
-            item_prefix=item_prefix,
-            nav_prefix=nav_prefix,
-            back_callback=back_callback,
-            selected_paths=selected_paths,
-            compact_browse_footer=compact_browse_footer,
-        )
-
-    def _remove_list_text(
-        self, title: str, items: list[dict[str, Any]], page: int, *, hint: str, selected_paths: set[str] | None = None
-    ) -> str:
-        return remove_handler.remove_list_text(title, items, page, hint=hint, selected_paths=selected_paths)
-
     def _remove_library_items(self, root_key: str) -> list[dict[str, Any]]:
         return remove_handler.remove_library_items(self._ctx, root_key)
 
@@ -3850,30 +3679,10 @@ class BotApp:
     def _remove_show_group_children(self, group_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return remove_handler.remove_show_group_children(group_items)
 
-    def _remove_group_any_selected(self, flow: dict[str, Any], group_item: dict[str, Any]) -> bool:
-        return remove_handler.remove_group_any_selected(flow, group_item)
-
-    def _remove_toggle_group(self, flow: dict[str, Any], group_item: dict[str, Any]) -> bool:
-        return remove_handler.remove_toggle_group(flow, group_item)
-
-    def _remove_show_actions_text(self, show_candidate: dict[str, Any], series_selected: bool) -> str:
-        return remove_handler.remove_show_actions_text(show_candidate, series_selected)
-
-    def _remove_season_actions_text(self, season_candidate: dict[str, Any]) -> str:
-        return remove_handler.remove_season_actions_text(season_candidate)
-
-    def _cleanup_qbt_for_path(self, target_path: str) -> list[str]:
-        return remove_handler.cleanup_qbt_for_path(self._ctx, target_path)
-
     def _delete_remove_candidate(
         self, candidate: dict[str, Any], *, user_id: int | None = None, chat_id: int | None = None
     ) -> dict[str, Any]:
         return remove_handler.delete_remove_candidate(self._ctx, candidate, user_id=user_id, chat_id=chat_id)
-
-    def _delete_remove_candidates(
-        self, candidates: list[dict[str, Any]], *, user_id: int | None = None, chat_id: int | None = None
-    ) -> str:
-        return remove_handler.delete_remove_candidates(self._ctx, candidates, user_id=user_id, chat_id=chat_id)
 
     def _schedule_active_line(self, track: dict[str, Any]) -> str:
         from .ui.text import tv_track_line as _tv_track_line

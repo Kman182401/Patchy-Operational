@@ -32,6 +32,7 @@ from ..utils import (
     now_ts,
     quality_tier,
 )
+from . import _shared
 from .search import deduplicate_results
 
 
@@ -52,14 +53,7 @@ class No1080pError(Exception):
 
 LOG = logging.getLogger("qbtg")
 
-
-async def _auto_delete_after(bot: Any, chat_id: int, message_id: int, delay: float = 10) -> None:
-    """Delete a message after *delay* seconds (best-effort)."""
-    await asyncio.sleep(delay)
-    try:
-        await bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except Exception:
-        pass
+_auto_delete_after = _shared.auto_delete_after
 
 
 # ---------------------------------------------------------------------------

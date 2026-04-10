@@ -400,15 +400,12 @@ def test_store_schedule_runner_status_round_trip(tmp_path) -> None:
 
 
 def test_remove_toggle_label_omits_empty_checkbox_prefix() -> None:
-    class DummyBot:
-        @staticmethod
-        def _remove_selected_path(candidate: dict[str, object]) -> str:
-            return str(candidate.get("path") or "")
+    from patchy_bot.handlers.remove import remove_toggle_label
 
     candidate = {"name": "Season 1", "path": "/srv/tv/Show/Season 1"}
 
-    unselected = BotApp._remove_toggle_label(DummyBot(), candidate, set())
-    selected = BotApp._remove_toggle_label(DummyBot(), candidate, {"/srv/tv/Show/Season 1"})
+    unselected = remove_toggle_label(candidate, set())
+    selected = remove_toggle_label(candidate, {"/srv/tv/Show/Season 1"})
 
     assert unselected == "Season 1"
     assert selected == "✅ Season 1"
@@ -586,18 +583,10 @@ def test_remove_season_action_keyboard_keeps_stacked_layout_when_more_than_five_
 
 
 def test_remove_show_action_screen_displays_series_selected_in_text_not_button(tmp_path) -> None:
+    from patchy_bot.handlers.remove import remove_show_actions_text, remove_show_action_keyboard
+
     show_dir = tmp_path / "Silicon Valley"
     show_dir.mkdir()
-
-    class DummyBot:
-        _nav_footer = BotApp._nav_footer
-        _compact_action_rows = staticmethod(BotApp._compact_action_rows)
-        _remove_show_actions_text = BotApp._remove_show_actions_text
-        _remove_show_action_keyboard = BotApp._remove_show_action_keyboard
-        _remove_candidate_text = BotApp._remove_candidate_text
-        _remove_enrich_candidate = BotApp._remove_enrich_candidate
-        _remove_kind_label = staticmethod(BotApp._remove_kind_label)
-        _path_size_bytes = staticmethod(BotApp._path_size_bytes)
 
     candidate = {
         "name": "Silicon Valley",
@@ -610,9 +599,9 @@ def test_remove_show_action_screen_displays_series_selected_in_text_not_button(t
         "size_bytes": 0,
     }
 
-    text = BotApp._remove_show_actions_text(DummyBot(), candidate, True)
-    selected_keyboard = BotApp._remove_show_action_keyboard(DummyBot(), True, 1).inline_keyboard
-    unselected_keyboard = BotApp._remove_show_action_keyboard(DummyBot(), False, 1).inline_keyboard
+    text = remove_show_actions_text(candidate, True)
+    selected_keyboard = remove_show_action_keyboard(True, 1).inline_keyboard
+    unselected_keyboard = remove_show_action_keyboard(False, 1).inline_keyboard
 
     assert "Entire series is selected for deletion" in text
     assert [[button.text for button in row] for row in selected_keyboard] == [
@@ -732,15 +721,10 @@ def test_remove_browse_movie_list_keeps_selected_footer_actions_available(tmp_pa
 
 
 def test_remove_show_action_screen_defaults_to_unselected_series_state(tmp_path) -> None:
+    from patchy_bot.handlers.remove import remove_show_actions_text
+
     show_dir = tmp_path / "Silicon Valley"
     show_dir.mkdir()
-
-    class DummyBot:
-        _remove_show_actions_text = BotApp._remove_show_actions_text
-        _remove_candidate_text = BotApp._remove_candidate_text
-        _remove_enrich_candidate = BotApp._remove_enrich_candidate
-        _remove_kind_label = staticmethod(BotApp._remove_kind_label)
-        _path_size_bytes = staticmethod(BotApp._path_size_bytes)
 
     candidate = {
         "name": "Silicon Valley",
@@ -753,7 +737,7 @@ def test_remove_show_action_screen_defaults_to_unselected_series_state(tmp_path)
         "size_bytes": 0,
     }
 
-    text = BotApp._remove_show_actions_text(DummyBot(), candidate, False)
+    text = remove_show_actions_text(candidate, False)
 
     assert "Entire series is not currently selected" in text
 
@@ -1307,12 +1291,10 @@ def test_delete_remove_candidates_surfaces_pending_plex_cleanup(monkeypatch) -> 
 
     monkeypatch.setattr(_rm, "delete_remove_candidate", fake_delete)
 
-    class DummyBot:
-        _delete_remove_candidates = BotApp._delete_remove_candidates
-        _ctx = SimpleNamespace()
+    ctx = SimpleNamespace()
 
-    text = BotApp._delete_remove_candidates(
-        DummyBot(),
+    text = _rm.delete_remove_candidates(
+        ctx,
         [
             {
                 "name": "Example Show",
@@ -1712,7 +1694,6 @@ def test_open_remove_browse_root_skips_search_or_browse_landing_screen() -> None
         _open_remove_browse_root = BotApp._open_remove_browse_root
         _set_flow = BotApp._set_flow
         _get_flow = BotApp._get_flow
-        _remove_selection_items = BotApp._remove_selection_items
         _remove_selection_count = BotApp._remove_selection_count
 
         def __init__(self) -> None:
@@ -2174,8 +2155,6 @@ def test_on_callback_remove_review_is_noop_when_selection_is_empty() -> None:
 
     class DummyBot:
         on_callback = BotApp.on_callback
-        _remove_selection_items = BotApp._remove_selection_items
-        _remove_effective_candidates = BotApp._remove_effective_candidates
         _remove_enrich_candidate = BotApp._remove_enrich_candidate
 
         def __init__(self) -> None:

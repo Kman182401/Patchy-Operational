@@ -6,14 +6,25 @@ bot.py, handlers/commands.py, handlers/chat.py, and handlers/download.py.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import subprocess
+from typing import Any
 
 from ..types import HandlerContext
 from ..utils import human_size
 
 LOG = logging.getLogger("qbtg")
+
+
+async def auto_delete_after(bot: Any, chat_id: int, message_id: int, delay: float = 10) -> None:
+    """Delete a message after *delay* seconds (best-effort)."""
+    await asyncio.sleep(delay)
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
 
 
 def targets(ctx: HandlerContext) -> dict[str, dict[str, str]]:
