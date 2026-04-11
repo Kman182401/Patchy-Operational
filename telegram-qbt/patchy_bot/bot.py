@@ -636,6 +636,54 @@ class BotApp:
                 pass  # Already deleted or expired — harmless
             self._set_flow(user_id, flow)
 
+    async def _send_poster_candidates_ui(
+        self,
+        msg: Any,
+        user_id: int,
+        flow: dict[str, Any],
+        candidates: list[dict[str, Any]],
+        caption_text: str,
+        reply_markup: Any,
+    ) -> bool:
+        """Send the candidate list as a photo caption with the top result's poster.
+
+        Returns True if the combined photo+caption was sent successfully.
+        Returns False if no image was available or the send failed, so the
+        caller should fall back to ``_render_schedule_ui``.
+        """
+        image_url = candidates[0].get("image_url") if candidates else None
+        if not image_url:
+            return False
+        from urllib.parse import urlparse
+
+        if urlparse(image_url).hostname not in self._POSTER_ALLOWED_HOSTS:
+            return False
+        try:
+            # Strip the old schedule UI message so it doesn't linger
+            old_chat = int(flow.get("schedule_ui_chat_id") or 0)
+            old_mid = int(flow.get("schedule_ui_message_id") or 0)
+            if old_chat and old_mid:
+                try:
+                    await self.app.bot.delete_message(chat_id=old_chat, message_id=old_mid)
+                except Exception:
+                    pass
+            photo_msg = await self.app.bot.send_photo(
+                chat_id=msg.chat_id,
+                photo=image_url,
+                caption=caption_text,
+                parse_mode=_PM,
+                reply_markup=reply_markup,
+            )
+            # Track as both poster and schedule UI so cleanup handles it
+            flow["poster_msg_id"] = photo_msg.message_id
+            flow["poster_chat_id"] = msg.chat_id
+            flow["schedule_ui_chat_id"] = msg.chat_id
+            flow["schedule_ui_message_id"] = photo_msg.message_id
+            self._set_flow(user_id, flow)
+            return True
+        except Exception:
+            return False
+
     # ---------- Live progress (delegated to handlers.download) ----------
 
     @staticmethod
@@ -3948,13 +3996,6 @@ class BotApp:
                 flow["stage"] = "choose_show"
                 flow["candidates"] = candidates
                 self._set_flow(user_id, flow)
-                # Send poster for top candidate (if available)
-                await self._send_poster_photo(
-                    chat_id=msg.chat_id,
-                    image_url=candidates[0].get("image_url") if candidates else None,
-                    flow=flow,
-                    user_id=user_id,
-                )
                 lines = ["<b>📺 Pick the Correct Show</b>", ""]
                 for idx, candidate in enumerate(candidates, start=1):
                     net = candidate.get("network") or candidate.get("country") or "Unknown network"
@@ -3962,14 +4003,27 @@ class BotApp:
                         f"<b>{idx}.</b> {_h(candidate['name'])} (<code>{_h(candidate.get('year') or '?')}</code>) • <code>{_h(candidate.get('status') or 'Unknown')}</code> • <i>{_h(net)}</i>"
                     )
                 lines.append("")
+                lines.append("<i>Poster shown is for result #1.</i>")
                 lines.append("<i>Tap a show below, or send another title if you want to search again.</i>")
-                await self._render_schedule_ui(
-                    user_id,
+                caption = "\n".join(lines)
+                kb = self._schedule_candidate_keyboard(candidates)
+                sent = await self._send_poster_candidates_ui(
                     msg,
+                    user_id,
                     flow,
-                    "\n".join(lines),
-                    reply_markup=self._schedule_candidate_keyboard(candidates),
+                    candidates,
+                    caption,
+                    kb,
                 )
+                if not sent:
+                    # No poster available — fall back to text-only UI
+                    await self._render_schedule_ui(
+                        user_id,
+                        msg,
+                        flow,
+                        caption,
+                        reply_markup=kb,
+                    )
                 # Clean up user's typed show-name message
                 await self._cleanup_private_user_message(msg)
                 return
@@ -4001,13 +4055,6 @@ class BotApp:
                 flow["stage"] = "choose_show"
                 flow["candidates"] = candidates
                 self._set_flow(user_id, flow)
-                # Send poster for top candidate (if available)
-                await self._send_poster_photo(
-                    chat_id=msg.chat_id,
-                    image_url=candidates[0].get("image_url") if candidates else None,
-                    flow=flow,
-                    user_id=user_id,
-                )
                 lines = ["<b>📺 Pick the Correct Show</b>", ""]
                 for idx, candidate in enumerate(candidates, start=1):
                     net = candidate.get("network") or candidate.get("country") or "Unknown network"
@@ -4015,14 +4062,26 @@ class BotApp:
                         f"<b>{idx}.</b> {_h(candidate['name'])} (<code>{_h(candidate.get('year') or '?')}</code>) • <code>{_h(candidate.get('status') or 'Unknown')}</code> • <i>{_h(net)}</i>"
                     )
                 lines.append("")
+                lines.append("<i>Poster shown is for result #1.</i>")
                 lines.append("<i>Tap a show below, or send another title if you want to search again.</i>")
-                await self._render_schedule_ui(
-                    user_id,
+                caption = "\n".join(lines)
+                kb = self._schedule_candidate_keyboard(candidates)
+                sent = await self._send_poster_candidates_ui(
                     msg,
+                    user_id,
                     flow,
-                    "\n".join(lines),
-                    reply_markup=self._schedule_candidate_keyboard(candidates),
+                    candidates,
+                    caption,
+                    kb,
                 )
+                if not sent:
+                    await self._render_schedule_ui(
+                        user_id,
+                        msg,
+                        flow,
+                        caption,
+                        reply_markup=kb,
+                    )
                 # Clean up user's typed show-name message
                 await self._cleanup_private_user_message(msg)
                 return
