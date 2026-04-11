@@ -26,7 +26,7 @@
   "model": "sonnet",
   "enabledPlugins": {
     "pyright-lsp@claude-plugins-official": true,
-    "semgrep@claude-plugins-official": true,
+    "semgrep@claude-plugins-official": false,
     "context7@claude-plugins-official": true,
     "playwright@claude-plugins-official": false,
     "chrome-devtools-mcp@claude-plugins-official": false
