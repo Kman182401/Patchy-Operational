@@ -1860,18 +1860,11 @@ async def do_add(
             timeout_s=inspection_timeout,
         )
     except Exception as exc:
-        if is_magnet:
-            inspection_note = (
-                "\n\u26a0\ufe0f File inspection did not complete in time. "
-                "Continuing with completion-time ClamAV scanning only."
-            )
-            LOG.warning("Continuing after magnet inspection failure for %s: %s", torrent_hash, exc)
-        else:
-            try:
-                await asyncio.to_thread(ctx.qbt.delete_torrent, torrent_hash, delete_files=True)
-            except Exception:
-                LOG.warning("Failed to delete torrent after inspection failure %s", torrent_hash, exc_info=True)
-            raise RuntimeError(f"Download blocked — file inspection failed: {exc}") from exc
+        inspection_note = (
+            "\n\u26a0\ufe0f File inspection did not complete in time. "
+            "Continuing with completion-time ClamAV scanning only."
+        )
+        LOG.warning("Continuing after inspection failure for %s (magnet=%s): %s", torrent_hash, is_magnet, exc)
     else:
         malware_scan = scan_download(
             name=_torrent_name,

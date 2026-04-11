@@ -18,8 +18,15 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from ..types import HandlerContext
-from ..ui.keyboards import tracked_list_keyboard, tracked_list_page_bounds
-from ..ui.text import movie_track_line, tracked_list_header, tracked_list_text, tv_track_line
+from ..ui.keyboards import candidate_nav_keyboard, tracked_list_keyboard, tracked_list_page_bounds
+from ..ui.text import (
+    movie_candidate_caption,
+    movie_track_line,
+    tracked_list_header,
+    tracked_list_text,
+    tv_candidate_caption,
+    tv_track_line,
+)
 from ..utils import (
     _PM,
     _h,
@@ -730,14 +737,20 @@ def schedule_probe_track(ctx: HandlerContext, track: dict[str, Any], season: int
 # ---------------------------------------------------------------------------
 
 
-def schedule_candidate_keyboard(candidates: list[dict[str, Any]], nav_footer_fn: Any) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    for idx, candidate in enumerate(candidates[:5]):
-        year = candidate.get("year") or "?"
-        rows.append([InlineKeyboardButton(f"{candidate['name']} ({year})", callback_data=f"sch:pick:{idx}")])
-    rows.append([InlineKeyboardButton("\U0001f3e0 Home", callback_data="nav:home")])
-    rows.extend(nav_footer_fn(include_home=False))
-    return InlineKeyboardMarkup(rows)
+def schedule_candidate_keyboard(
+    candidates: list[dict[str, Any]], nav_footer_fn: Any, candidate_idx: int = 0
+) -> InlineKeyboardMarkup:
+    candidate = candidates[candidate_idx]
+    year = candidate.get("year") or "?"
+    pick_label = f"{candidate.get('name') or 'Unknown'} ({year})"
+    return candidate_nav_keyboard(
+        pick_label=pick_label,
+        pick_callback=f"sch:pick:{candidate_idx}",
+        candidate_idx=candidate_idx,
+        total_candidates=len(candidates),
+        nav_prefix="sch:cnav",
+        nav_footer_fn=nav_footer_fn,
+    )
 
 
 def schedule_preview_keyboard(probe: dict[str, Any], nav_footer_fn: Any) -> InlineKeyboardMarkup:
@@ -1899,6 +1912,105 @@ async def on_cb_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> No
         await bot_app._schedule_pick_candidate(q.message, user_id, idx)
         return
 
+    if data.startswith("sch:cnav:"):
+        nav_idx = int(data.split(":")[-1])
+        flow = bot_app._get_flow(user_id)
+        candidates: list[dict[str, Any]] = list(flow.get("candidates") or []) if flow else []
+        if not candidates:
+            try:
+                await q.answer("No candidates available.")
+            except Exception:
+                pass
+            return
+        nav_idx = nav_idx % len(candidates)
+        flow["candidate_idx"] = nav_idx
+        bot_app._set_flow(user_id, flow)
+
+        caption = tv_candidate_caption(candidates[nav_idx], nav_idx, len(candidates))
+        candidate = candidates[nav_idx]
+        year = candidate.get("year") or "?"
+        pick_label = f"{candidate.get('name') or 'Unknown'} ({year})"
+        kb = candidate_nav_keyboard(
+            pick_label=pick_label,
+            pick_callback=f"sch:pick:{nav_idx}",
+            candidate_idx=nav_idx,
+            total_candidates=len(candidates),
+            nav_prefix="sch:cnav",
+            nav_footer_fn=getattr(bot_app, "_nav_footer", None),
+        )
+
+        image_url = candidate.get("image_url")
+        # Validate poster URL
+        if image_url:
+            from urllib.parse import urlparse
+
+            allowed = getattr(bot_app, "_POSTER_ALLOWED_HOSTS", frozenset())
+            if urlparse(image_url).hostname not in allowed:
+                image_url = None
+
+        poster_chat_id = flow.get("poster_chat_id") or flow.get("schedule_ui_chat_id")
+        poster_msg_id = flow.get("poster_msg_id") or flow.get("schedule_ui_message_id")
+        is_current_photo = bool(flow.get("poster_msg_id"))
+
+        if image_url and is_current_photo:
+            from telegram import InputMediaPhoto
+
+            media = InputMediaPhoto(media=image_url, caption=caption, parse_mode="HTML")
+            try:
+                await bot_app.app.bot.edit_message_media(
+                    chat_id=poster_chat_id,
+                    message_id=poster_msg_id,
+                    media=media,
+                    reply_markup=kb,
+                )
+            except Exception:
+                pass
+        elif image_url and not is_current_photo:
+            try:
+                await bot_app.app.bot.delete_message(chat_id=poster_chat_id, message_id=poster_msg_id)
+            except Exception:
+                pass
+            photo_msg = await bot_app.app.bot.send_photo(
+                chat_id=poster_chat_id,
+                photo=image_url,
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
+            flow["poster_msg_id"] = photo_msg.message_id
+            flow["poster_chat_id"] = poster_chat_id
+            flow["schedule_ui_chat_id"] = poster_chat_id
+            flow["schedule_ui_message_id"] = photo_msg.message_id
+            bot_app._set_flow(user_id, flow)
+        elif not image_url and is_current_photo:
+            try:
+                await bot_app.app.bot.delete_message(chat_id=poster_chat_id, message_id=poster_msg_id)
+            except Exception:
+                pass
+            flow.pop("poster_msg_id", None)
+            flow.pop("poster_chat_id", None)
+            text_msg = await bot_app.app.bot.send_message(
+                chat_id=poster_chat_id,
+                text=caption,
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
+            flow["schedule_ui_chat_id"] = poster_chat_id
+            flow["schedule_ui_message_id"] = text_msg.message_id
+            bot_app._set_flow(user_id, flow)
+        else:
+            try:
+                await bot_app.app.bot.edit_message_text(
+                    chat_id=poster_chat_id,
+                    message_id=poster_msg_id,
+                    text=caption,
+                    parse_mode="HTML",
+                    reply_markup=kb,
+                )
+            except Exception:
+                pass
+        return
+
     if data == "sch:change":
         if _cleanup_poster:
             await _cleanup_poster(user_id)
@@ -2614,6 +2726,110 @@ async def on_cb_movie_schedule(bot_app: Any, *, data: str, q: Any, user_id: int)
         return
 
     # ------------------------------------------------------------------
+    # msch:cnav:{idx} — cycle through movie search result candidates
+    # ------------------------------------------------------------------
+    if data.startswith("msch:cnav:"):
+        nav_idx = int(data.split(":")[-1])
+        flow = bot_app._get_flow(user_id)
+        candidates_m: list[dict[str, Any]] = list(flow.get("candidates") or []) if flow else []
+        if not candidates_m:
+            try:
+                await q.answer("No candidates available.")
+            except Exception:
+                pass
+            return
+        nav_idx = nav_idx % len(candidates_m)
+        flow["candidate_idx"] = nav_idx
+        bot_app._set_flow(user_id, flow)
+
+        query = str(flow.get("search_query") or "")
+        caption = movie_candidate_caption(candidates_m[nav_idx], nav_idx, len(candidates_m), query)
+        candidate_m = candidates_m[nav_idx]
+        r_id = str(candidate_m.get("tmdb_id") or "")
+        r_title = str(candidate_m.get("title") or "")
+        r_year = candidate_m.get("year")
+        pick_label = f"{r_title} ({r_year})" if r_year else r_title
+        kb = candidate_nav_keyboard(
+            pick_label=pick_label,
+            pick_callback=f"msch:pick:{r_id}",
+            candidate_idx=nav_idx,
+            total_candidates=len(candidates_m),
+            nav_prefix="msch:cnav",
+        )
+
+        image_url = candidate_m.get("poster_url")
+        # Validate poster URL
+        if image_url:
+            from urllib.parse import urlparse
+
+            allowed = getattr(bot_app, "_POSTER_ALLOWED_HOSTS", frozenset())
+            if urlparse(image_url).hostname not in allowed:
+                image_url = None
+
+        poster_chat_id = flow.get("poster_chat_id") or flow.get("schedule_ui_chat_id")
+        poster_msg_id = flow.get("poster_msg_id") or flow.get("schedule_ui_message_id")
+        is_current_photo = bool(flow.get("poster_msg_id"))
+
+        if image_url and is_current_photo:
+            from telegram import InputMediaPhoto
+
+            media = InputMediaPhoto(media=image_url, caption=caption, parse_mode="HTML")
+            try:
+                await bot_app.app.bot.edit_message_media(
+                    chat_id=poster_chat_id,
+                    message_id=poster_msg_id,
+                    media=media,
+                    reply_markup=kb,
+                )
+            except Exception:
+                pass
+        elif image_url and not is_current_photo:
+            try:
+                await bot_app.app.bot.delete_message(chat_id=poster_chat_id, message_id=poster_msg_id)
+            except Exception:
+                pass
+            photo_msg = await bot_app.app.bot.send_photo(
+                chat_id=poster_chat_id,
+                photo=image_url,
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
+            flow["poster_msg_id"] = photo_msg.message_id
+            flow["poster_chat_id"] = poster_chat_id
+            flow["schedule_ui_chat_id"] = poster_chat_id
+            flow["schedule_ui_message_id"] = photo_msg.message_id
+            bot_app._set_flow(user_id, flow)
+        elif not image_url and is_current_photo:
+            try:
+                await bot_app.app.bot.delete_message(chat_id=poster_chat_id, message_id=poster_msg_id)
+            except Exception:
+                pass
+            flow.pop("poster_msg_id", None)
+            flow.pop("poster_chat_id", None)
+            text_msg = await bot_app.app.bot.send_message(
+                chat_id=poster_chat_id,
+                text=caption,
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
+            flow["schedule_ui_chat_id"] = poster_chat_id
+            flow["schedule_ui_message_id"] = text_msg.message_id
+            bot_app._set_flow(user_id, flow)
+        else:
+            try:
+                await bot_app.app.bot.edit_message_text(
+                    chat_id=poster_chat_id,
+                    message_id=poster_msg_id,
+                    text=caption,
+                    parse_mode="HTML",
+                    reply_markup=kb,
+                )
+            except Exception:
+                pass
+        return
+
+    # ------------------------------------------------------------------
     # msch:add — start the add-movie flow
     # ------------------------------------------------------------------
     if data == "msch:add":
@@ -3088,28 +3304,25 @@ async def on_text_movie_schedule(bot_app: Any, user_id: int, text: str, msg: Any
     if _cleanup_poster:
         await _cleanup_poster(user_id, flow)
     flow["candidates"] = results
+    flow["candidate_idx"] = 0
+    flow["search_query"] = text
     bot_app._set_flow(user_id, flow)
 
-    result_rows: list[list[InlineKeyboardButton]] = []
-    for r in results[:5]:
-        r_id = str(r.get("tmdb_id") or "")
-        r_title = str(r.get("title") or "")
-        r_year = r.get("year")
-        label = f"{r_title} ({r_year})" if r_year else r_title
-        result_rows.append([InlineKeyboardButton(label, callback_data=f"msch:pick:{r_id}")])
-    result_rows.append([InlineKeyboardButton("↩️ Back", callback_data="msch:cancel")])
-    kb = InlineKeyboardMarkup(result_rows)
+    candidate = results[0]
+    r_id = str(candidate.get("tmdb_id") or "")
+    r_title = str(candidate.get("title") or "")
+    r_year = candidate.get("year")
+    pick_label = f"{r_title} ({r_year})" if r_year else r_title
 
-    # Build caption with poster note
-    lines = [f"\U0001f3ac Results for <b>{_h(text)}</b>:", ""]
-    for idx, r in enumerate(results[:5], start=1):
-        r_title = str(r.get("title") or "")
-        r_year = r.get("year")
-        year_str = f" ({r_year})" if r_year else ""
-        lines.append(f"<b>{idx}.</b> {_h(r_title)}{year_str}")
-    lines.append("")
-    lines.append("<i>Poster shown is for result #1.</i>")
-    caption = "\n".join(lines)
+    kb = candidate_nav_keyboard(
+        pick_label=pick_label,
+        pick_callback=f"msch:pick:{r_id}",
+        candidate_idx=0,
+        total_candidates=len(results),
+        nav_prefix="msch:cnav",
+    )
+
+    caption = movie_candidate_caption(results[0], 0, len(results), text)
 
     # Try combined photo+caption; fall back to text-only
     poster_url = results[0].get("poster_url") if results else None
@@ -3145,12 +3358,12 @@ async def on_text_movie_schedule(bot_app: Any, user_id: int, text: str, msg: Any
                 pass
 
     if not sent_combined:
-        # Text-only fallback (no poster note)
+        # Text-only fallback
         await bot_app._render_schedule_ui(
             user_id,
             msg,
             flow,
-            f"\U0001f3ac Results for <b>{_h(text)}</b>:",
+            caption,
             reply_markup=kb,
         )
     return True

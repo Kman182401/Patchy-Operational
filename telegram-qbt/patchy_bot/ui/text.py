@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from ..utils import _h, _relative_time, now_ts
 
 # ---------------------------------------------------------------------------
@@ -375,6 +377,40 @@ HELP_LABELS: dict[int, str] = {
     6: "🔍 Search Options",
     7: "🎞 Quality Key",
 }
+
+
+# ---------------------------------------------------------------------------
+# Candidate cycling captions (TV + Movie search results)
+# ---------------------------------------------------------------------------
+
+
+def tv_candidate_caption(candidate: dict[str, Any], idx: int, total: int) -> str:
+    """Build a single-result caption for TV show candidate cycling UI."""
+    name = str(candidate.get("name") or "Unknown")
+    year = str(candidate.get("year") or "?")
+    status = str(candidate.get("status") or "Unknown")
+    net = str(candidate.get("network") or candidate.get("country") or "Unknown network")
+    return (
+        f"<b>📺 Pick the Correct Show ({idx + 1} of {total})</b>\n"
+        f"\n"
+        f"<b>{_h(name)}</b> (<code>{_h(year)}</code>) • <code>{_h(status)}</code> • <i>{_h(net)}</i>\n"
+        f"\n"
+        f"<i>Tap the button to select, or send another title to search again.</i>"
+    )
+
+
+def movie_candidate_caption(candidate: dict[str, Any], idx: int, total: int, query: str) -> str:
+    """Build a single-result caption for movie candidate cycling UI."""
+    title = str(candidate.get("title") or "Unknown")
+    year = candidate.get("year")
+    year_str = f" ({_h(str(year))})" if year else ""
+    return (
+        f'<b>🎬 Results for "{_h(query)}" ({idx + 1} of {total})</b>\n'
+        f"\n"
+        f"<b>{_h(title)}</b>{year_str}\n"
+        f"\n"
+        f"<i>Tap the button to select, or send another title to search again.</i>"
+    )
 
 
 def help_text() -> str:

@@ -621,14 +621,15 @@ class BotApp:
         candidates: list[dict[str, Any]],
         caption_text: str,
         reply_markup: Any,
+        candidate_idx: int = 0,
     ) -> bool:
-        """Send the candidate list as a photo caption with the top result's poster.
+        """Send the candidate list as a photo caption with a candidate's poster.
 
         Returns True if the combined photo+caption was sent successfully.
         Returns False if no image was available or the send failed, so the
         caller should fall back to ``_render_schedule_ui``.
         """
-        image_url = candidates[0].get("image_url") if candidates else None
+        image_url = candidates[candidate_idx].get("image_url") if candidates else None
         if not image_url:
             return False
         from urllib.parse import urlparse
@@ -656,6 +657,7 @@ class BotApp:
             flow["poster_chat_id"] = msg.chat_id
             flow["schedule_ui_chat_id"] = msg.chat_id
             flow["schedule_ui_message_id"] = photo_msg.message_id
+            flow["candidate_idx"] = candidate_idx
             self._set_flow(user_id, flow)
             return True
         except Exception:
@@ -1111,7 +1113,7 @@ class BotApp:
             for t in existing:
                 h = str(t.get("hash") or "").strip().lower()
                 n = str(t.get("name") or "Unknown")
-                if h and self._is_complete_torrent(t):
+                if h and download_handler.is_complete_torrent(t):
                     already = await asyncio.to_thread(self.store.is_completion_notified, h)
                     if not already:
                         await asyncio.to_thread(self.store.mark_completion_notified, h, n)
@@ -1614,14 +1616,20 @@ class BotApp:
         raw_probe = self._schedule_probe_bundle(bundle, track=track, season=target_season)
         return self._schedule_apply_tracking_mode(track, raw_probe)
 
-    def _schedule_candidate_keyboard(self, candidates: list[dict[str, Any]]) -> InlineKeyboardMarkup:
-        rows: list[list[InlineKeyboardButton]] = []
-        for idx, candidate in enumerate(candidates[:5]):
-            year = candidate.get("year") or "?"
-            rows.append([InlineKeyboardButton(f"{candidate['name']} ({year})", callback_data=f"sch:pick:{idx}")])
-        rows.append([InlineKeyboardButton("🏠 Home", callback_data="nav:home")])
-        rows.extend(self._nav_footer(include_home=False))
-        return InlineKeyboardMarkup(rows)
+    def _schedule_candidate_keyboard(
+        self, candidates: list[dict[str, Any]], candidate_idx: int = 0
+    ) -> InlineKeyboardMarkup:
+        candidate = candidates[candidate_idx]
+        year = candidate.get("year") or "?"
+        pick_label = f"{candidate.get('name') or 'Unknown'} ({year})"
+        return kb_mod.candidate_nav_keyboard(
+            pick_label=pick_label,
+            pick_callback=f"sch:pick:{candidate_idx}",
+            candidate_idx=candidate_idx,
+            total_candidates=len(candidates),
+            nav_prefix="sch:cnav",
+            nav_footer_fn=self._nav_footer,
+        )
 
     def _schedule_preview_keyboard(self, probe: dict[str, Any]) -> InlineKeyboardMarkup:
         rows: list[list[InlineKeyboardButton]] = [
@@ -2671,7 +2679,12 @@ class BotApp:
             status_msg = await msg.reply_text("\n".join(status_lines), parse_mode=_PM)
 
         probe = track.get("last_probe_json") or {}
-        available = set(probe.get("actionable_missing_codes") or probe.get("missing_codes") or [])
+        available = set(
+            probe.get("series_actionable_all")
+            or probe.get("actionable_missing_codes")
+            or probe.get("missing_codes")
+            or []
+        )
         pending = set(track.get("pending_json") or [])
 
         pack_success_lines: list[str] = []
@@ -2741,16 +2754,27 @@ class BotApp:
                 pending_json=updated_pending,
                 skipped_signature=None,
             )
-            for code in remaining_codes:
-                try:
-                    out = await self._schedule_download_episode(track, code)
-                    individual_success.append(f"✅ <code>{_h(code)}</code>: {_h(out['name'])}")
-                    if out.get("hash"):
-                        self._start_progress_tracker(user_id, out["hash"], status_msg, out["name"])
+            sem = asyncio.Semaphore(3)
+
+            async def _dl_ep(ep_code: str) -> tuple[str, dict[str, Any] | Exception]:
+                async with sem:
+                    try:
+                        return ep_code, await self._schedule_download_episode(track, ep_code)
+                    except Exception as exc:
+                        return ep_code, exc
+
+            dl_results = await asyncio.gather(*[_dl_ep(c) for c in remaining_codes])
+            for code, result in dl_results:
+                if isinstance(result, Exception):
+                    individual_failures.append((code, str(result)))
+                else:
+                    individual_success.append(f"✅ <code>{_h(code)}</code>: {_h(result['name'])}")
+                    if result.get("hash"):
+                        self._start_progress_tracker(user_id, result["hash"], status_msg, result["name"])
                     else:
-                        self._start_pending_progress_tracker(user_id, out["name"], out["category"], status_msg)
-                except Exception as e:
-                    individual_failures.append((code, str(e)))
+                        self._start_pending_progress_tracker(
+                            user_id, result["name"], result.get("category", "tv"), status_msg
+                        )
             if individual_failures:
                 final_pending = sorted(set(updated_pending) - {c for c, _ in individual_failures})
                 await asyncio.to_thread(
@@ -2820,19 +2844,27 @@ class BotApp:
         failures: list[tuple[str, str]] = []
         success_lines: list[str] = []
         user_id_track = int(track.get("user_id") or 0)
-        for code in wanted:
-            try:
-                out = await self._schedule_download_episode(track, code)
-                success_lines.append(f"\u2705 <code>{_h(code)}</code>: {_h(out['name'])}")
-                if out.get("hash"):
-                    # Use status_msg as the tracker — the batch monitor
-                    # shows consolidated progress, so we don't create
-                    # individual per-episode messages.
-                    self._start_progress_tracker(user_id_track, out["hash"], status_msg, out["name"])
+        sem = asyncio.Semaphore(3)
+
+        async def _dl_ep(ep_code: str) -> tuple[str, dict[str, Any] | Exception]:
+            async with sem:
+                try:
+                    return ep_code, await self._schedule_download_episode(track, ep_code)
+                except Exception as exc:
+                    return ep_code, exc
+
+        dl_results = await asyncio.gather(*[_dl_ep(c) for c in wanted])
+        for code, result in dl_results:
+            if isinstance(result, Exception):
+                failures.append((code, str(result)))
+            else:
+                success_lines.append(f"\u2705 <code>{_h(code)}</code>: {_h(result['name'])}")
+                if result.get("hash"):
+                    self._start_progress_tracker(user_id_track, result["hash"], status_msg, result["name"])
                 else:
-                    self._start_pending_progress_tracker(user_id_track, out["name"], out["category"], status_msg)
-            except Exception as e:
-                failures.append((code, str(e)))
+                    self._start_pending_progress_tracker(
+                        user_id_track, result["name"], result.get("category", "tv"), status_msg
+                    )
         if failures:
             remaining_pending = sorted(set(updated_pending) - {code for code, _detail in failures})
             await asyncio.to_thread(
@@ -3340,6 +3372,22 @@ class BotApp:
                         parse_mode=_PM,
                     )
                     return
+
+            # Specific episode — keep only torrents whose name contains
+            # the exact requested episode code (e.g. S02E01).
+            if (
+                isinstance(tv_flow, dict)
+                and not tv_flow.get("full_season")
+                and not tv_flow.get("full_series")
+                and tv_flow.get("season") is not None
+                and tv_flow.get("episode") is not None
+            ):
+                wanted_code = episode_code(tv_flow["season"], tv_flow["episode"])
+                ranked = [
+                    r
+                    for r in ranked
+                    if wanted_code in extract_episode_codes(str(r.get("fileName") or r.get("name") or ""))
+                ]
 
             final_rows = ranked[:limit]
 
@@ -3972,18 +4020,10 @@ class BotApp:
                     return
                 flow["stage"] = "choose_show"
                 flow["candidates"] = candidates
+                flow["candidate_idx"] = 0
                 self._set_flow(user_id, flow)
-                lines = ["<b>📺 Pick the Correct Show</b>", ""]
-                for idx, candidate in enumerate(candidates, start=1):
-                    net = candidate.get("network") or candidate.get("country") or "Unknown network"
-                    lines.append(
-                        f"<b>{idx}.</b> {_h(candidate['name'])} (<code>{_h(candidate.get('year') or '?')}</code>) • <code>{_h(candidate.get('status') or 'Unknown')}</code> • <i>{_h(net)}</i>"
-                    )
-                lines.append("")
-                lines.append("<i>Poster shown is for result #1.</i>")
-                lines.append("<i>Tap a show below, or send another title if you want to search again.</i>")
-                caption = "\n".join(lines)
-                kb = self._schedule_candidate_keyboard(candidates)
+                caption = text_mod.tv_candidate_caption(candidates[0], 0, len(candidates))
+                kb = self._schedule_candidate_keyboard(candidates, candidate_idx=0)
                 sent = await self._send_poster_candidates_ui(
                     msg,
                     user_id,
@@ -3991,6 +4031,7 @@ class BotApp:
                     candidates,
                     caption,
                     kb,
+                    candidate_idx=0,
                 )
                 if not sent:
                     # No poster available — fall back to text-only UI
@@ -4031,18 +4072,10 @@ class BotApp:
                     return
                 flow["stage"] = "choose_show"
                 flow["candidates"] = candidates
+                flow["candidate_idx"] = 0
                 self._set_flow(user_id, flow)
-                lines = ["<b>📺 Pick the Correct Show</b>", ""]
-                for idx, candidate in enumerate(candidates, start=1):
-                    net = candidate.get("network") or candidate.get("country") or "Unknown network"
-                    lines.append(
-                        f"<b>{idx}.</b> {_h(candidate['name'])} (<code>{_h(candidate.get('year') or '?')}</code>) • <code>{_h(candidate.get('status') or 'Unknown')}</code> • <i>{_h(net)}</i>"
-                    )
-                lines.append("")
-                lines.append("<i>Poster shown is for result #1.</i>")
-                lines.append("<i>Tap a show below, or send another title if you want to search again.</i>")
-                caption = "\n".join(lines)
-                kb = self._schedule_candidate_keyboard(candidates)
+                caption = text_mod.tv_candidate_caption(candidates[0], 0, len(candidates))
+                kb = self._schedule_candidate_keyboard(candidates, candidate_idx=0)
                 sent = await self._send_poster_candidates_ui(
                     msg,
                     user_id,
@@ -4050,6 +4083,7 @@ class BotApp:
                     candidates,
                     caption,
                     kb,
+                    candidate_idx=0,
                 )
                 if not sent:
                     await self._render_schedule_ui(
@@ -4669,7 +4703,7 @@ class BotApp:
                 media_hint="tv",
                 tv_flow=tv_flow,
                 nav_user_id=user_id,
-                current_nav_ui_message=q.message,
+                current_tv_ui_message=q.message,
             )
             return
 

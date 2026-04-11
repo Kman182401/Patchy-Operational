@@ -177,6 +177,55 @@ def tv_followup_same_season_keyboard(sid: str) -> InlineKeyboardMarkup:
     )
 
 
+def candidate_nav_keyboard(
+    *,
+    pick_label: str,
+    pick_callback: str,
+    candidate_idx: int,
+    total_candidates: int,
+    nav_prefix: str,
+    nav_footer_fn: Callable[..., list[list[InlineKeyboardButton]]] | None = None,
+) -> InlineKeyboardMarkup:
+    """Build a keyboard for cycling through search result candidates.
+
+    Layout (top to bottom):
+      1. Pick button row (single button)
+      2. Nav row (only if total_candidates > 1): ◀ Prev / Next ▶
+      3. 🏠 Home button
+      4. Optional nav footer (if provided)
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+
+    # Pick button
+    rows.append([InlineKeyboardButton(pick_label, callback_data=pick_callback)])
+
+    # Nav row (only when multiple candidates)
+    if total_candidates > 1:
+        prev_idx = (candidate_idx - 1) % total_candidates
+        next_idx = (candidate_idx + 1) % total_candidates
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"◀ Prev ({prev_idx + 1}/{total_candidates})",
+                    callback_data=f"{nav_prefix}:{prev_idx}",
+                ),
+                InlineKeyboardButton(
+                    f"Next ({next_idx + 1}/{total_candidates}) ▶",
+                    callback_data=f"{nav_prefix}:{next_idx}",
+                ),
+            ]
+        )
+
+    # Home button
+    rows.append([InlineKeyboardButton("🏠 Home", callback_data="nav:home")])
+
+    # Optional nav footer
+    if nav_footer_fn is not None:
+        rows.extend(nav_footer_fn(include_home=False))
+
+    return InlineKeyboardMarkup(rows)
+
+
 def media_picker_keyboard(sid: str, idx: int, *, back_data: str = "") -> InlineKeyboardMarkup:
     """Keyboard that asks the user to pick Movies or TV for a search result."""
     rows: list[list[InlineKeyboardButton]] = [
