@@ -9,9 +9,12 @@ import secrets
 import sqlite3
 import threading
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .quality import quality_label, score_torrent
+
+if TYPE_CHECKING:
+    from .config import Config
 from .utils import now_ts
 
 LOG = logging.getLogger("qbtg")
