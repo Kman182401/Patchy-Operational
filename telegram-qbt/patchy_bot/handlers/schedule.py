@@ -3092,16 +3092,6 @@ async def on_text_movie_schedule(bot_app: Any, user_id: int, text: str, msg: Any
     flow["candidates"] = results
     bot_app._set_flow(user_id, flow)
 
-    # Send poster for top result (if available)
-    _send_poster = getattr(bot_app, "_send_poster_photo", None)
-    if _send_poster:
-        await _send_poster(
-            chat_id=msg.chat_id,
-            image_url=results[0].get("poster_url") if results else None,
-            flow=flow,
-            user_id=user_id,
-        )
-
     result_rows: list[list[InlineKeyboardButton]] = []
     for r in results[:5]:
         r_id = str(r.get("tmdb_id") or "")
@@ -3110,12 +3100,59 @@ async def on_text_movie_schedule(bot_app: Any, user_id: int, text: str, msg: Any
         label = f"{r_title} ({r_year})" if r_year else r_title
         result_rows.append([InlineKeyboardButton(label, callback_data=f"msch:pick:{r_id}")])
     result_rows.append([InlineKeyboardButton("↩️ Back", callback_data="msch:cancel")])
+    kb = InlineKeyboardMarkup(result_rows)
 
-    await bot_app._render_schedule_ui(
-        user_id,
-        msg,
-        flow,
-        f"\U0001f3ac Results for <b>{_h(text)}</b>:",
-        reply_markup=InlineKeyboardMarkup(result_rows),
-    )
+    # Build caption with poster note
+    lines = [f"\U0001f3ac Results for <b>{_h(text)}</b>:", ""]
+    for idx, r in enumerate(results[:5], start=1):
+        r_title = str(r.get("title") or "")
+        r_year = r.get("year")
+        year_str = f" ({r_year})" if r_year else ""
+        lines.append(f"<b>{idx}.</b> {_h(r_title)}{year_str}")
+    lines.append("")
+    lines.append("<i>Poster shown is for result #1.</i>")
+    caption = "\n".join(lines)
+
+    # Try combined photo+caption; fall back to text-only
+    poster_url = results[0].get("poster_url") if results else None
+    sent_combined = False
+    if poster_url and len(caption) <= 1024:
+        from urllib.parse import urlparse
+
+        allowed = getattr(bot_app, "_POSTER_ALLOWED_HOSTS", frozenset())
+        if urlparse(poster_url).hostname in allowed:
+            try:
+                # Strip old schedule UI message
+                old_chat = int(flow.get("schedule_ui_chat_id") or 0)
+                old_mid = int(flow.get("schedule_ui_message_id") or 0)
+                if old_chat and old_mid:
+                    try:
+                        await bot_app.app.bot.delete_message(chat_id=old_chat, message_id=old_mid)
+                    except Exception:
+                        pass
+                photo_msg = await bot_app.app.bot.send_photo(
+                    chat_id=msg.chat_id,
+                    photo=poster_url,
+                    caption=caption,
+                    parse_mode="HTML",
+                    reply_markup=kb,
+                )
+                flow["poster_msg_id"] = photo_msg.message_id
+                flow["poster_chat_id"] = msg.chat_id
+                flow["schedule_ui_chat_id"] = msg.chat_id
+                flow["schedule_ui_message_id"] = photo_msg.message_id
+                bot_app._set_flow(user_id, flow)
+                sent_combined = True
+            except Exception:
+                pass
+
+    if not sent_combined:
+        # Text-only fallback (no poster note)
+        await bot_app._render_schedule_ui(
+            user_id,
+            msg,
+            flow,
+            f"\U0001f3ac Results for <b>{_h(text)}</b>:",
+            reply_markup=kb,
+        )
     return True

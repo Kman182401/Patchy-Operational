@@ -589,38 +589,6 @@ class BotApp:
 
     _POSTER_ALLOWED_HOSTS: frozenset[str] = frozenset({"static.tvmaze.com", "image.tmdb.org"})
 
-    async def _send_poster_photo(
-        self,
-        chat_id: int,
-        image_url: str | None,
-        flow: dict[str, Any],
-        user_id: int,
-    ) -> None:
-        """Send a poster thumbnail as a separate photo message and track its ID in flow.
-
-        Only URLs whose hostname is in _POSTER_ALLOWED_HOSTS are sent.
-        If image_url is None, not on the allowlist, or the send fails, silently
-        skips — the text UI continues normally without a poster.
-        """
-        if not image_url:
-            return
-        from urllib.parse import urlparse
-
-        if urlparse(image_url).hostname not in self._POSTER_ALLOWED_HOSTS:
-            return
-        try:
-            photo_msg = await self.app.bot.send_photo(
-                chat_id=chat_id,
-                photo=image_url,
-            )
-            flow["poster_msg_id"] = photo_msg.message_id
-            flow["poster_chat_id"] = chat_id
-            self._set_flow(user_id, flow)
-        except Exception:
-            # CDN unreachable, invalid URL, Telegram rejected the image —
-            # silently skip; the text-only UI is the fallback.
-            pass
-
     async def _cleanup_poster_photo(self, user_id: int, flow: dict[str, Any] | None = None) -> None:
         """Delete the poster photo message if one was sent. Idempotent."""
         if flow is None:
@@ -630,6 +598,15 @@ class BotApp:
         poster_msg_id = flow.pop("poster_msg_id", None)
         poster_chat_id = flow.pop("poster_chat_id", None)
         if poster_msg_id and poster_chat_id:
+            # If the poster was the combined photo+caption schedule UI,
+            # clear the schedule UI tracking so we don't try to edit a
+            # deleted message.
+            if (
+                flow.get("schedule_ui_message_id") == poster_msg_id
+                and flow.get("schedule_ui_chat_id") == poster_chat_id
+            ):
+                flow.pop("schedule_ui_message_id", None)
+                flow.pop("schedule_ui_chat_id", None)
             try:
                 await self.app.bot.delete_message(chat_id=poster_chat_id, message_id=poster_msg_id)
             except Exception:
