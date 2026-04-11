@@ -469,23 +469,6 @@ class Store:
             )
             conn.commit()
 
-    def get_malware_log(self, limit: int = 50) -> list[dict]:
-        """Retrieve recent malware scan log entries."""
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("Store is closed")
-            conn = self._conn
-            rows = conn.execute(
-                "SELECT * FROM malware_scan_log ORDER BY blocked_at DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
-            result = []
-            for row in rows:
-                d = dict(row)
-                d["reasons"] = json.loads(d["reasons"])
-                result.append(d)
-            return result
-
     def cleanup_old_health_events(self, retention_days: int = 30) -> int:
         """Delete health events older than retention_days. Return count deleted."""
         cutoff = now_ts() - retention_days * 86400
