@@ -3053,12 +3053,54 @@ def test_schedule_preview_text_inventory_uses_status_icons() -> None:
     assert "⏰ Unreleased" in text
     # New format: missing episodes listed explicitly under "Missing (Season N)"
     assert "Missing (Season 2)" in text
-    assert "S02E02" in text
+    assert "E02" in text
+    assert "S02E02" not in text  # season prefix stripped in Missing section
     # Old fields must be gone
     assert "🔍 To fetch" not in text
     assert "• Next targets:" not in text
     assert "• Released:" not in text
     assert "• In library:" not in text
+
+
+def test_schedule_preview_text_missing_strips_season_prefix() -> None:
+    """Missing and other-season-gaps lines show Exx, not SxxExx."""
+    from unittest.mock import MagicMock
+
+    from qbt_telegram_bot import BotApp
+
+    bot = MagicMock(spec=BotApp)
+    bot._relative_time = None
+    probe = {
+        "show": {"name": "Test Show", "year": 2024, "status": "Returning"},
+        "season": 2,
+        "tracking_mode": "upcoming",
+        "released_codes": ["S02E01", "S02E02", "S02E03"],
+        "total_season_episodes": 10,
+        "present_codes": [],
+        "unreleased_codes": [],
+        "tracked_missing_codes": ["S02E01", "S02E02", "S02E03"],
+        "missing_codes": ["S02E01", "S02E02", "S02E03"],
+        "inventory_source": "plex",
+        "next_air_ts": None,
+        "metadata_stale": False,
+        "inventory_degraded": False,
+        "pending_codes": ["S02E01"],
+        "series_missing_by_season": {
+            1: ["S01E01", "S01E02", "S01E03", "S01E04", "S01E05"],
+        },
+        "series_actionable_all": [],
+    }
+    text = BotApp._schedule_preview_text(bot, probe)
+    # Missing section should show short episode codes
+    assert "E02 · E03" in text
+    assert "S02E02" not in text  # no full code in Missing line
+    # Queued line must retain full SxxExx
+    assert "S02E01" in text
+    # Other seasons with gaps should strip prefix too
+    assert "Season 1:" in text
+    assert "E01 · E02 · E03 · E04" in text
+    assert "S01E01" not in text
+    assert "+1 more" in text
 
 
 def test_schedule_preview_text_next_air_ts_uses_relative_time() -> None:

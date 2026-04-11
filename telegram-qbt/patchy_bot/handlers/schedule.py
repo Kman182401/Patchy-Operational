@@ -37,9 +37,9 @@ from .search import deduplicate_results
 
 
 def _short_ep(code: str) -> str:
-    """S02E01 → Ep.1 (short label when season context is already shown)."""
+    """S02E01 → E01 (short label when season context is already shown)."""
     n = episode_number_from_code(code)
-    return f"Ep.{n}" if n is not None else code
+    return f"E{n:02d}" if n is not None else code
 
 
 class No1080pError(Exception):
@@ -983,10 +983,10 @@ def schedule_preview_text(probe: dict[str, Any]) -> str:
         lines.append("")
         lines.append(f"<b>Missing (Season {chosen_season}):</b>")
         if not_queued:
-            lines.append(f"  \u274c <code>{_h(' \u00b7 '.join(_short_ep(c) for c in not_queued))}</code>")
+            lines.append(f"  \u274c <code>{_h(', '.join(_short_ep(c) for c in not_queued))}</code>")
         if queued_missing:
             lines.append(
-                f"  \u2b07\ufe0f Queued: <code>{_h(' \u00b7 '.join(_short_ep(c) for c in queued_missing[:8]))}</code>"
+                f"  \u2b07\ufe0f Queued: <code>{_h(', '.join(_short_ep(c) for c in queued_missing[:8]))}</code>"
             )
 
     if other_season_gaps:
@@ -996,9 +996,7 @@ def schedule_preview_text(probe: dict[str, Any]) -> str:
             codes = other_season_gaps[s]
             sample = codes[:4]
             suffix = f" +{len(codes) - 4} more" if len(codes) > 4 else ""
-            lines.append(
-                f"  \u274c Season {s}: <code>{_h(' \u00b7 '.join(_short_ep(c) for c in sample))}</code>{_h(suffix)}"
-            )
+            lines.append(f"  \u274c Season {s}: <code>{_h(', '.join(_short_ep(c) for c in sample))}</code>{_h(suffix)}")
 
     summary = str(show.get("summary") or "")
     if summary:

@@ -22,7 +22,7 @@
     ]
   },
   "respectGitignore": true,
-  "alwaysThinkingEnabled": false,
+  "alwaysThinkingEnabled": true,
   "model": "sonnet",
   "enabledPlugins": {
     "pyright-lsp@claude-plugins-official": true,
@@ -32,6 +32,17 @@
     "chrome-devtools-mcp@claude-plugins-official": false
   },
   "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/karson/Patchy_Bot/.claude/hooks/session-start-context.sh"
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Bash",
@@ -70,6 +81,15 @@
           {
             "type": "command",
             "command": "bash /home/karson/Patchy_Bot/.claude/hooks/session-finalizer.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/karson/Patchy_Bot/.claude/hooks/stop-audit-trigger.sh"
           }
         ]
       }

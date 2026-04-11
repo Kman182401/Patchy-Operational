@@ -1766,7 +1766,7 @@ class BotApp:
             lines.append("")
             lines.append(f"<b>Missing (Season {chosen_season}):</b>")
             if not_queued:
-                lines.append(f"  ❌ <code>{_h(' · '.join(not_queued))}</code>")
+                lines.append(f"  ❌ <code>{_h(' · '.join(c[3:] for c in not_queued))}</code>")
             if queued_missing:
                 lines.append(f"  ⬇️ Queued: <code>{_h(' · '.join(queued_missing[:8]))}</code>")
 
@@ -1778,7 +1778,7 @@ class BotApp:
                 codes = other_season_gaps[s]
                 sample = codes[:4]
                 suffix = f" +{len(codes) - 4} more" if len(codes) > 4 else ""
-                lines.append(f"  ❌ Season {s}: <code>{_h(' · '.join(sample))}</code>{_h(suffix)}")
+                lines.append(f"  ❌ Season {s}: <code>{_h(' · '.join(c[3:] for c in sample))}</code>{_h(suffix)}")
 
         summary = str(show.get("summary") or "")
         if summary:
