@@ -14,7 +14,7 @@ updated: 2026-04-11
 Future features and brainstorms for Patchy Bot. These are ideas that haven't been started yet — once one becomes a plan, move it to `02-Work/`.
 
 ## All Ideas
-
+#reference I want to block all duplicate downloads for the whole system so that it’s impossible to accidentally download duplicate 
 ```dataview
 LIST
 FROM #idea

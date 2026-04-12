@@ -11,7 +11,11 @@ updated: 2026-04-11
 
 ## Overview
 
-The Patchy Bot codebase is organized as one Python package called `patchy_bot`, which lives at `telegram-qbt/patchy_bot/`. A package is a folder of related Python files that work together. Each file inside the package is called a module, and each module is responsible for one job. Below is a plain-English tour of every module, grouped by floor of the building.
+The Patchy Bot codebase is organized as one Python package called `patchy_bot`, which lives at `telegram-qbt/patchy_bot/`.
+
+A package is a folder of related Python files that work together. Each file inside the package is called a module, and each module is responsible for one job.
+
+Below is a plain-English tour of every module, grouped by floor of the building.
 
 **Top-level files**
 
@@ -58,54 +62,78 @@ The Patchy Bot codebase is organized as one Python package called `patchy_bot`, 
 >
 > **Top-level (`telegram-qbt/patchy_bot/`)**
 >
-> | Path | Lines | Key exports |
-> |---|---:|---|
-> | `__main__.py` | 92 | `main()` |
-> | `bot.py` | 5023 | `BotApp` (constructs handlers, dispatcher, runners; `build_application()`) |
-> | `config.py` | 200 | `Config` (dataclass, `Config.from_env()`) |
-> | `dispatch.py` | 53 | `CallbackDispatcher` (`register_exact`, `register_prefix`, `dispatch`) |
-> | `types.py` | 96 | `HandlerContext` (dataclass with all clients + shared mutable state) |
-> | `store.py` | 1663 | `Store` (14 tables, ~60 CRUD methods, WAL, `threading.Lock()`) |
-> | `utils.py` | 356 | `now_ts`, `human_size`, `episode_code`, `_h`, `build_requests_session`, parsing helpers |
-> | `health.py` | 210 | `collect_health_report()`, VPN/disk/qBT probes |
-> | `malware.py` | 268 | `scan_search_result()`, `scan_completed_files()`, fake-name + extension checks |
-> | `quality.py` | 463 | `score_torrent()`, `quality_label()`, RTN-style parser, resolution/source/codec scoring |
-> | `plex_organizer.py` | 398 | `organize_completed_download()`, episode/movie file naming, safe move |
-> | `rate_limiter.py` | 67 | `RateLimiter` (`allow`, `prune_stale`) |
-> | `logging_config.py` | 48 | `_JsonFormatter` |
+> - **`__main__.py`** — 92 lines
+>   - Key exports: `main()`
+> - **`bot.py`** — 5023 lines
+>   - Key exports: `BotApp` (constructs handlers, dispatcher, runners; `build_application()`)
+> - **`config.py`** — 200 lines
+>   - Key exports: `Config` (dataclass, `Config.from_env()`)
+> - **`dispatch.py`** — 53 lines
+>   - Key exports: `CallbackDispatcher` (`register_exact`, `register_prefix`, `dispatch`)
+> - **`types.py`** — 96 lines
+>   - Key exports: `HandlerContext` (dataclass with all clients + shared mutable state)
+> - **`store.py`** — 1663 lines
+>   - Key exports: `Store` (14 tables, ~60 CRUD methods, WAL, `threading.Lock()`)
+> - **`utils.py`** — 356 lines
+>   - Key exports: `now_ts`, `human_size`, `episode_code`, `_h`, `build_requests_session`, parsing helpers
+> - **`health.py`** — 210 lines
+>   - Key exports: `collect_health_report()`, VPN/disk/qBT probes
+> - **`malware.py`** — 268 lines
+>   - Key exports: `scan_search_result()`, `scan_completed_files()`, fake-name + extension checks
+> - **`quality.py`** — 463 lines
+>   - Key exports: `score_torrent()`, `quality_label()`, RTN-style parser, resolution/source/codec scoring
+> - **`plex_organizer.py`** — 398 lines
+>   - Key exports: `organize_completed_download()`, episode/movie file naming, safe move
+> - **`rate_limiter.py`** — 67 lines
+>   - Key exports: `RateLimiter` (`allow`, `prune_stale`)
+> - **`logging_config.py`** — 48 lines
+>   - Key exports: `_JsonFormatter`
 >
 > **`handlers/`**
 >
-> | Path | Lines | Key exports |
-> |---|---:|---|
-> | `handlers/__init__.py` | 12 | re-exports |
-> | `handlers/base.py` | 34 | `BaseHandler` |
-> | `handlers/_shared.py` | 207 | shared formatting + reply helpers |
-> | `handlers/commands.py` | 1161 | `cmd_start`, `cmd_help`, `cmd_health`, `cmd_speed`, `cmd_search`, `cmd_schedule`, `cmd_remove`, `cmd_show`, `cmd_add`, `cmd_categories`, `cmd_mkcat`, `cmd_setminseeds`, `cmd_setlimit`, `cmd_profile`, `cmd_active`, `cmd_plugins`, `cmd_unlock`, `cmd_logout` |
-> | `handlers/search.py` | 552 | `on_search_query`, result rendering, filter callbacks |
-> | `handlers/download.py` | 2442 | `on_add_torrent`, progress trackers, completion poller, deferred-hash pending path |
-> | `handlers/schedule.py` | 3522 | TV tracking, schedule runner, `msch:` movie callbacks, season/episode pickers |
-> | `handlers/remove.py` | 2683 | remove menu, plex inventory walker, removal job creation/runner |
-> | `handlers/chat.py` | 239 | LLM chat handler with per-user history |
+> - **`handlers/__init__.py`** — 12 lines
+>   - Key exports: re-exports
+> - **`handlers/base.py`** — 34 lines
+>   - Key exports: `BaseHandler`
+> - **`handlers/_shared.py`** — 207 lines
+>   - Key exports: shared formatting + reply helpers
+> - **`handlers/commands.py`** — 1161 lines
+>   - Key exports: `cmd_start`, `cmd_help`, `cmd_health`, `cmd_speed`, `cmd_search`, `cmd_schedule`, `cmd_remove`, `cmd_show`, `cmd_add`, `cmd_categories`, `cmd_mkcat`, `cmd_setminseeds`, `cmd_setlimit`, `cmd_profile`, `cmd_active`, `cmd_plugins`, `cmd_unlock`, `cmd_logout`
+> - **`handlers/search.py`** — 552 lines
+>   - Key exports: `on_search_query`, result rendering, filter callbacks
+> - **`handlers/download.py`** — 2442 lines
+>   - Key exports: `on_add_torrent`, progress trackers, completion poller, deferred-hash pending path
+> - **`handlers/schedule.py`** — 3522 lines
+>   - Key exports: TV tracking, schedule runner, `msch:` movie callbacks, season/episode pickers
+> - **`handlers/remove.py`** — 2683 lines
+>   - Key exports: remove menu, plex inventory walker, removal job creation/runner
+> - **`handlers/chat.py`** — 239 lines
+>   - Key exports: LLM chat handler with per-user history
 >
 > **`clients/`**
 >
-> | Path | Lines | Key exports |
-> |---|---:|---|
-> | `clients/__init__.py` | 1 | — |
-> | `clients/qbittorrent.py` | 287 | `QBClient` (login, search, add_url, list_categories, create_category, ensure_category, list_active, get_transfer_info, get_preferences, set_preferences, get_torrent, delete_torrent, pause_torrents, resume_torrents, get_torrent_files, list_torrents, list_search_plugins, get_torrent_trackers, reannounce_torrent) |
-> | `clients/plex.py` | 409 | `PlexInventoryClient` (`ready`, `episode_inventory`, `movie_exists`, `resolve_remove_identity`, `refresh_for_path`, `purge_deleted_path`, `refresh_all_by_type`, `verify_remove_identity_absent`) |
-> | `clients/tv_metadata.py` | 339 | `TVMetadataClient` (`search_shows`, `get_show_bundle`, `search_movies`, `get_movie_release_dates`, `get_movie_home_release`, `get_movie_release_status`); also `MovieReleaseStatus` enum and `MovieReleaseDates` dataclass |
-> | `clients/llm.py` | 111 | `PatchyLLMClient` (`ready`, `chat`) |
+> - **`clients/__init__.py`** — 1 line
+>   - Key exports: —
+> - **`clients/qbittorrent.py`** — 287 lines
+>   - Key exports: `QBClient` (login, search, add_url, list_categories, create_category, ensure_category, list_active, get_transfer_info, get_preferences, set_preferences, get_torrent, delete_torrent, pause_torrents, resume_torrents, get_torrent_files, list_torrents, list_search_plugins, get_torrent_trackers, reannounce_torrent)
+> - **`clients/plex.py`** — 409 lines
+>   - Key exports: `PlexInventoryClient` (`ready`, `episode_inventory`, `movie_exists`, `resolve_remove_identity`, `refresh_for_path`, `purge_deleted_path`, `refresh_all_by_type`, `verify_remove_identity_absent`)
+> - **`clients/tv_metadata.py`** — 339 lines
+>   - Key exports: `TVMetadataClient` (`search_shows`, `get_show_bundle`, `search_movies`, `get_movie_release_dates`, `get_movie_home_release`, `get_movie_release_status`); also `MovieReleaseStatus` enum and `MovieReleaseDates` dataclass
+> - **`clients/llm.py`** — 111 lines
+>   - Key exports: `PatchyLLMClient` (`ready`, `chat`)
 >
 > **`ui/`**
 >
-> | Path | Lines | Key exports |
-> |---|---:|---|
-> | `ui/__init__.py` | 1 | — |
-> | `ui/flow.py` | 22 | `set_flow`, `get_flow`, `clear_flow` |
-> | `ui/keyboards.py` | 332 | inline-keyboard builders for command center, search results, schedule, remove, picker, etc. |
-> | `ui/rendering.py` | 333 | message renderers for command center, status lines, schedule list |
-> | `ui/text.py` | 424 | static strings and HTML templates |
+> - **`ui/__init__.py`** — 1 line
+>   - Key exports: —
+> - **`ui/flow.py`** — 22 lines
+>   - Key exports: `set_flow`, `get_flow`, `clear_flow`
+> - **`ui/keyboards.py`** — 332 lines
+>   - Key exports: inline-keyboard builders for command center, search results, schedule, remove, picker, etc.
+> - **`ui/rendering.py`** — 333 lines
+>   - Key exports: message renderers for command center, status lines, schedule list
+> - **`ui/text.py`** — 424 lines
+>   - Key exports: static strings and HTML templates
 >
 > **Total runtime LOC:** ~22,100 across 33 files (excludes `__pycache__`).

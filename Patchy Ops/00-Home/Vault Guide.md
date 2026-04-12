@@ -11,7 +11,9 @@ updated: 2026-04-11
 
 ## Overview
 
-This vault is the human-readable home for everything about Patchy Bot — how the system is built, what work is open, what's been finished, and what conventions to follow. It's designed so that you can read it without being a programmer, while still giving Claude Code (the AI assistant that helps maintain the bot) the technical detail it needs.
+This vault is the human-readable home for everything about Patchy Bot — how the system is built, what work is open, what's been finished, and what conventions to follow.
+
+It's designed so that you can read it without being a programmer, while still giving Claude Code (the AI assistant that helps maintain the bot) the technical detail it needs.
 
 ### Folder layout
 
@@ -29,7 +31,7 @@ This vault is the human-readable home for everything about Patchy Bot — how th
 Every content note has two parts:
 
 1. A plain-English **`## Overview`** section at the top. This is for the human reader — it explains what the note is about in normal language and avoids jargon. Acronyms get defined the first time they appear.
-2. A collapsed **`> [!code]- Claude Code Reference`** callout below it. This holds the technical details — file paths, function names, table columns, callback prefixes — for Claude Code to use when actually doing work. Click the arrow to expand it; leave it collapsed if you just want the human-readable summary.
+2. A collapsed **`> [!code]- Claude Code Reference`** callout below it. This holds the technical details (file paths, function names, table columns, callback prefixes) for Claude Code to use when actually doing work. Click the arrow to expand it; leave it collapsed if you just want the human-readable summary.
 
 The two exceptions are this guide and [[SETUP]] — they're for you only and don't need a code callout.
 
@@ -49,7 +51,9 @@ You can also click the Templater ribbon icon in the left sidebar if you prefer m
 
 ### Tags (the labels that group notes together)
 
-Notes are organized by tags rather than by folder alone, so a Dataview query can pull "all open todos" or "all changelog entries" no matter where the file lives. The tag scheme is:
+Notes are organized by tags rather than by folder alone, so a Dataview query can pull "all open todos" or "all changelog entries" no matter where the file lives.
+
+The tag scheme is:
 
 - **`home`** — landing pages in `00-Home/`
 - **`system/*`** — architecture notes (e.g. `system/modules`, `system/tables`, `system/callbacks`, `system/clients`, `system/state`)
@@ -63,7 +67,9 @@ Each task note also has frontmatter fields `status` (`open` / `in-progress` / `d
 
 ### Maps of Content (MOCs)
 
-A "Map of Content" is an index page that pulls together everything of a certain type. The vault has four:
+A "Map of Content" is an index page that pulls together everything of a certain type.
+
+The vault has four:
 
 - [[System Overview]] — every architecture note in one place
 - [[Work Board]] — every open todo and upgrade

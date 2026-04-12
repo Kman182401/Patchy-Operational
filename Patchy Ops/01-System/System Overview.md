@@ -11,11 +11,32 @@ updated: 2026-04-11
 
 ## Overview
 
-Patchy Bot is a Telegram chat bot that helps a small group of trusted users find, download, and watch movies and TV shows. You talk to it the same way you would text a friend: you tap a button or send a message like "search for Dune", and it finds matching torrents (a torrent is a small recipe file that tells a download program where to grab pieces of a video from other people on the internet), starts downloading the best one, scans it for fakes and viruses, and then files it neatly into a Plex library so you can stream it on your TV. Plex (a media server — think of it as your own personal Netflix that plays files stored on your computer) takes over from there.
+Patchy Bot is a Telegram chat bot that helps a small group of trusted users find, download, and watch movies and TV shows.
 
-The whole system is built like a small team of workers, each with one job. The Telegram interface is the receptionist who takes your request. A search worker hunts for torrents. A download worker hands the chosen torrent to qBittorrent (a download program that handles the actual file transfer) and watches its progress. An organizer worker waits for the download to finish, then renames the file and moves it into the right Plex folder. A schedule worker runs in the background, checking every minute whether any tracked TV episodes have aired or any pre-ordered movies have been released, and kicks off downloads automatically. A safety worker scans every torrent for malware (malicious software) and obvious fakes before letting it in. They all share one notebook — a SQLite database (a lightweight database — think of it as a single-file spreadsheet that the bot reads and writes) — so nothing gets lost when the bot restarts.
+You talk to it the same way you would text a friend: you tap a button or send a message like "search for Dune", and it finds matching torrents (a torrent is a small recipe file that tells a download program where to grab pieces of a video from other people on the internet), starts downloading the best one, scans it for fakes and viruses, and then files it neatly into a Plex library so you can stream it on your TV.
 
-The pieces fit together through a single message loop: Telegram sends an update, the bot parses it, looks up which worker should handle it, runs that worker, and replies. Background runners (loops that wake up on a timer) handle anything that should happen even when no one is chatting, like checking for new TV episodes. See [[Modules]] for the file-by-file map, [[SQLite Tables]] for the shared notebook, [[API Clients]] for the outside services it talks to, [[State & Flows]] for how the bot remembers what each user is doing, and [[Callback Routes]] for how button taps get matched to handlers.
+Plex (a media server — think of it as your own personal Netflix that plays files stored on your computer) takes over from there.
+
+The whole system is built like a small team of workers, each with one job:
+
+- **Telegram interface** — the receptionist who takes your request.
+- **Search worker** — hunts for torrents.
+- **Download worker** — hands the chosen torrent to qBittorrent (a download program that handles the actual file transfer) and watches its progress.
+- **Organizer worker** — waits for the download to finish, then renames the file and moves it into the right Plex folder.
+- **Schedule worker** — runs in the background, checking every minute whether any tracked TV episodes have aired or any pre-ordered movies have been released, and kicks off downloads automatically.
+- **Safety worker** — scans every torrent for malware (malicious software) and obvious fakes before letting it in.
+
+They all share one notebook — a SQLite database (a lightweight database — think of it as a single-file spreadsheet that the bot reads and writes) — so nothing gets lost when the bot restarts.
+
+The pieces fit together through a single message loop: Telegram sends an update, the bot parses it, looks up which worker should handle it, runs that worker, and replies. Background runners (loops that wake up on a timer) handle anything that should happen even when no one is chatting, like checking for new TV episodes.
+
+See also:
+
+- [[Modules]] — the file-by-file map
+- [[SQLite Tables]] — the shared notebook
+- [[API Clients]] — outside services it talks to
+- [[State & Flows]] — how the bot remembers what each user is doing
+- [[Callback Routes]] — how button taps get matched to handlers
 
 ```dataview
 LIST

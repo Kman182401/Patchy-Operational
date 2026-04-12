@@ -173,6 +173,8 @@ class BotApp:
         d.register_prefix("stop:", self._on_cb_stop)
         d.register_prefix("tvpost:", self._on_cb_tvpost)
         d.register_prefix("moviepost:", self._on_cb_moviepost)
+        d.register_prefix("tvpick:", self._on_cb_tv_pick)
+        d.register_prefix("moviepick:", self._on_cb_movie_pick)
 
     # ---------- Telegram command discovery ----------
 
@@ -4092,12 +4094,40 @@ class BotApp:
 
             if mode == "movie" and stage == "await_title":
                 await self._cleanup_private_user_message(msg)
-                self._clear_flow(user_id)
-                await self._run_search(
-                    update=update,
-                    query=text,
-                    media_hint="movies",
-                    nav_user_id=user_id,
+                # Phase A: route through TMDB movie picker before searching.
+                try:
+                    tmdb_results = await asyncio.to_thread(self.tvmeta.search_movies, text)
+                except Exception as exc:
+                    LOG.warning("TMDB movie picker lookup failed for %r: %s", text, exc)
+                    tmdb_results = []
+                if not tmdb_results:
+                    # Graceful fallback — warn user then run raw search.
+                    try:
+                        await self._render_nav_ui(
+                            user_id,
+                            msg,
+                            "<b>⚠️ Couldn't reach TMDB — searching with raw title…</b>",
+                            reply_markup=None,
+                        )
+                    except Exception:
+                        pass
+                    self._clear_flow(user_id)
+                    await self._run_search(
+                        update=update,
+                        query=text,
+                        media_hint="movies",
+                        nav_user_id=user_id,
+                    )
+                    return
+                flow["tmdb_results"] = tmdb_results
+                flow["movie_title"] = text
+                flow["stage"] = "await_movie_pick"
+                self._set_flow(user_id, flow)
+                await self._render_nav_ui(
+                    user_id,
+                    msg,
+                    text_mod.movie_picker_text(tmdb_results),
+                    reply_markup=kb_mod.movie_picker_keyboard(tmdb_results, back_data="menu:movie"),
                 )
                 return
 
@@ -4155,6 +4185,17 @@ class BotApp:
 
             if mode == "tv" and stage == "await_full_season_title":
                 await self._cleanup_private_user_message(msg)
+                # Phase A: route through TVMaze show picker before searching.
+                handled = await self._start_tv_show_picker(
+                    update=update,
+                    user_id=user_id,
+                    anchor_message=msg,
+                    flow=flow,
+                    title=text,
+                )
+                if handled:
+                    return
+                # Graceful fallback — run the legacy path with the raw title.
                 season = flow.get("season")
                 query = self._build_tv_query(text, season, None)
                 tv_flow = dict(flow)
@@ -4165,6 +4206,17 @@ class BotApp:
 
             if mode == "tv" and stage == "await_title":
                 await self._cleanup_private_user_message(msg)
+                # Phase A: route through TVMaze show picker before searching.
+                handled = await self._start_tv_show_picker(
+                    update=update,
+                    user_id=user_id,
+                    anchor_message=msg,
+                    flow=flow,
+                    title=text,
+                )
+                if handled:
+                    return
+                # Graceful fallback — run the legacy path with the raw title.
                 query = self._build_tv_query(text, flow.get("season"), flow.get("episode"))
                 if flow.get("full_series"):
                     query = f"{query} COMPLETE SERIES"
@@ -4828,6 +4880,150 @@ class BotApp:
             reply_markup=markup,
             disable_web_page_preview=True,
             current_ui_message=q.message,
+        )
+
+    async def _start_tv_show_picker(
+        self,
+        *,
+        update: Update,
+        user_id: int,
+        anchor_message: Any,
+        flow: dict[str, Any],
+        title: str,
+    ) -> bool:
+        """Run TVMaze lookup and render the show picker.
+
+        Returns True on success (picker rendered, caller must not fall through).
+        Returns False if the lookup failed or returned no results — the caller
+        should warn the user and fall back to the legacy raw-title path.
+        """
+        try:
+            results = await asyncio.to_thread(self.tvmeta.search_shows, title, 5)
+        except Exception as exc:
+            LOG.warning("TVMaze show picker lookup failed for %r: %s", title, exc)
+            results = []
+        if not results:
+            try:
+                await self._render_tv_ui(
+                    user_id,
+                    anchor_message,
+                    flow,
+                    "<b>⚠️ Couldn't reach TVMaze — searching with raw title…</b>",
+                    reply_markup=None,
+                )
+            except Exception:
+                pass
+            return False
+        # Cap defensively at 5.
+        results = list(results[:5])
+        flow["tvmaze_results"] = results
+        flow["show_title"] = title
+        flow["stage"] = "await_show_pick"
+        self._set_flow(user_id, flow)
+        await self._render_tv_ui(
+            user_id,
+            anchor_message,
+            flow,
+            text_mod.tv_show_picker_text(results),
+            reply_markup=kb_mod.tv_show_picker_keyboard(results, back_data="menu:tv"),
+        )
+        return True
+
+    async def _on_cb_tv_pick(self, *, data: str, q: Any, user_id: int) -> None:
+        """Handle ``tvpick:{index}`` — user picked a TVMaze show from the picker."""
+        try:
+            idx = int(data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            await q.answer("Bad selection", show_alert=False)
+            return
+        flow = self._get_flow(user_id)
+        if not flow or flow.get("mode") != "tv" or flow.get("stage") != "await_show_pick":
+            await q.answer("Selection expired", show_alert=True)
+            return
+        results = list(flow.get("tvmaze_results") or [])
+        if idx < 0 or idx >= len(results):
+            await q.answer("Selection expired", show_alert=True)
+            return
+        picked = results[idx]
+        canonical_name = str(picked.get("name") or flow.get("show_title") or "").strip()
+        if not canonical_name:
+            await q.answer("Invalid show", show_alert=True)
+            return
+
+        # Preserve downstream flow fields; drop picker-only state.
+        season = flow.get("season")
+        episode = flow.get("episode")
+        full_season = bool(flow.get("full_season"))
+        full_series = bool(flow.get("full_series"))
+
+        tv_flow: dict[str, Any] = {
+            "mode": "tv",
+            "stage": "done",
+            "season": season,
+            "episode": episode,
+            "show_title": canonical_name,
+        }
+        if full_season:
+            tv_flow["full_season"] = True
+        if full_series:
+            tv_flow["full_series"] = True
+
+        # Route based on preserved intent.
+        if full_series:
+            # TODO(Phase B): route to full-series confirmation screen.
+            query = f"{canonical_name} COMPLETE SERIES"
+        elif full_season:
+            query = self._build_tv_query(canonical_name, season, None)
+        else:
+            query = self._build_tv_query(canonical_name, season, episode)
+
+        self._clear_flow(user_id)
+        try:
+            await q.answer()
+        except Exception:
+            pass
+        await self._run_search(
+            query=query,
+            media_hint="tv",
+            tv_flow=tv_flow,
+            nav_user_id=user_id,
+            current_tv_ui_message=q.message,
+        )
+
+    async def _on_cb_movie_pick(self, *, data: str, q: Any, user_id: int) -> None:
+        """Handle ``moviepick:{index}`` — user picked a TMDB movie from the picker."""
+        try:
+            idx = int(data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            await q.answer("Bad selection", show_alert=False)
+            return
+        flow = self._get_flow(user_id)
+        if not flow or flow.get("mode") != "movie" or flow.get("stage") != "await_movie_pick":
+            await q.answer("Selection expired", show_alert=True)
+            return
+        results = list(flow.get("tmdb_results") or [])
+        if idx < 0 or idx >= len(results):
+            await q.answer("Selection expired", show_alert=True)
+            return
+        picked = results[idx]
+        title = str(picked.get("title") or "").strip()
+        if not title:
+            await q.answer("Invalid movie", show_alert=True)
+            return
+        year = picked.get("year")
+        query = f"{title} {year}" if year else title
+
+        self._clear_flow(user_id)
+        try:
+            await q.answer()
+        except Exception:
+            pass
+        # Preserve theatrical-detection flow — _run_search runs it for movies.
+        await self._run_search(
+            query=query,
+            media_hint="movies",
+            nav_user_id=user_id,
+            current_nav_ui_message=q.message,
         )
 
     async def _on_cb_moviepost(self, *, data: str, q: Any, user_id: int) -> None:

@@ -164,6 +164,48 @@ def post_add_tv_full_series_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def tv_show_picker_keyboard(results: list[dict[str, object]], back_data: str) -> InlineKeyboardMarkup:
+    """Keyboard for the TVMaze show picker (Phase A).
+
+    Emits one button per result with callback ``tvpick:{index}``. Footer uses
+    the shared nav_footer with Back + Home.
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    for idx, show in enumerate(results):
+        name = str(show.get("name") or "Unknown")
+        year = show.get("year")
+        if year:
+            label = f"📺 {name} ({year})"
+        else:
+            label = f"📺 {name}"
+        if len(label) > 60:
+            label = label[:59] + "…"
+        rows.append([InlineKeyboardButton(label, callback_data=f"tvpick:{idx}")])
+    rows.extend(nav_footer(back_data=back_data, include_home=True))
+    return InlineKeyboardMarkup(rows)
+
+
+def movie_picker_keyboard(results: list[dict[str, object]], back_data: str) -> InlineKeyboardMarkup:
+    """Keyboard for the TMDB movie picker (Phase A).
+
+    Emits one button per result with callback ``moviepick:{index}``. Footer
+    uses the shared nav_footer with Back + Home.
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    for idx, movie in enumerate(results):
+        title = str(movie.get("title") or "Unknown")
+        year = movie.get("year")
+        if year:
+            label = f"🎬 {title} ({year})"
+        else:
+            label = f"🎬 {title}"
+        if len(label) > 60:
+            label = label[:59] + "…"
+        rows.append([InlineKeyboardButton(label, callback_data=f"moviepick:{idx}")])
+    rows.extend(nav_footer(back_data=back_data, include_home=True))
+    return InlineKeyboardMarkup(rows)
+
+
 def tv_followup_same_season_keyboard(sid: str) -> InlineKeyboardMarkup:
     """Yes/No choice for staying in the same season."""
     return InlineKeyboardMarkup(

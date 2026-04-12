@@ -684,7 +684,7 @@ def test_remove_browse_movie_list_compacts_footer_without_changing_item_rows(tmp
 
     assert [[button.text for button in row] for row in keyboard[-2:]] == [
         ["⬅️ Back", "Next ➡️"],
-        ["🧾 Review Selection (0)", "🏠 Home"],
+        ["🏠 Home"],
     ]
 
 
@@ -1797,6 +1797,8 @@ def test_on_callback_remove_cancel_returns_to_command_center() -> None:
         _on_cb_dl_manage = BotApp._on_cb_dl_manage
         _on_cb_tvpost = BotApp._on_cb_tvpost
         _on_cb_moviepost = BotApp._on_cb_moviepost
+        _on_cb_tv_pick = BotApp._on_cb_tv_pick
+        _on_cb_movie_pick = BotApp._on_cb_movie_pick
         _register_callbacks = BotApp._register_callbacks
 
         def __init__(self) -> None:
@@ -1904,6 +1906,8 @@ def test_on_callback_schedule_cancel_returns_to_command_center() -> None:
         _on_cb_dl_manage = BotApp._on_cb_dl_manage
         _on_cb_tvpost = BotApp._on_cb_tvpost
         _on_cb_moviepost = BotApp._on_cb_moviepost
+        _on_cb_tv_pick = BotApp._on_cb_tv_pick
+        _on_cb_movie_pick = BotApp._on_cb_movie_pick
         _register_callbacks = BotApp._register_callbacks
 
         def __init__(self) -> None:
@@ -2062,6 +2066,8 @@ def test_on_callback_remove_clear_returns_to_library_browser() -> None:
         _on_cb_dl_manage = BotApp._on_cb_dl_manage
         _on_cb_tvpost = BotApp._on_cb_tvpost
         _on_cb_moviepost = BotApp._on_cb_moviepost
+        _on_cb_tv_pick = BotApp._on_cb_tv_pick
+        _on_cb_movie_pick = BotApp._on_cb_movie_pick
         _register_callbacks = BotApp._register_callbacks
 
         def __init__(self) -> None:
@@ -2256,6 +2262,8 @@ def test_on_callback_schedule_pickeps_uses_anchor_renderer() -> None:
         _on_cb_dl_manage = BotApp._on_cb_dl_manage
         _on_cb_tvpost = BotApp._on_cb_tvpost
         _on_cb_moviepost = BotApp._on_cb_moviepost
+        _on_cb_tv_pick = BotApp._on_cb_tv_pick
+        _on_cb_movie_pick = BotApp._on_cb_movie_pick
         _register_callbacks = BotApp._register_callbacks
 
         def __init__(self) -> None:
@@ -2363,6 +2371,8 @@ def test_on_callback_schedule_skip_uses_anchor_renderer() -> None:
         _on_cb_dl_manage = BotApp._on_cb_dl_manage
         _on_cb_tvpost = BotApp._on_cb_tvpost
         _on_cb_moviepost = BotApp._on_cb_moviepost
+        _on_cb_tv_pick = BotApp._on_cb_tv_pick
+        _on_cb_movie_pick = BotApp._on_cb_movie_pick
         _register_callbacks = BotApp._register_callbacks
 
         def __init__(self) -> None:

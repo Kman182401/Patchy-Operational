@@ -11,11 +11,15 @@ updated: 2026-04-11
 
 ## Overview
 
-This is the master list of how the user wants Patchy Bot built and changed. **Read it before starting any task.** New preferences get added under "Learned Preferences" with a date — they never get deleted, only struck through if they go obsolete.
+This is the master list of how the user wants Patchy Bot built and changed. **Read it before starting any task.**
+
+New preferences get added under "Learned Preferences" with a date — they never get deleted, only struck through if they go obsolete.
 
 ### Telegram message style
 
-We use **HTML parse mode** for every Telegram message because Telegram supports it natively and it lets us do bold, italic, and code spans without the constant `\_` and `\*` escaping headache that Markdown causes when filenames contain underscores. Any dynamic value (filename, title, error message) that goes into a message has to be passed through `_h()` (a thin wrapper around `html.escape`) so that things like `<` and `&` in titles can't break the message or get interpreted as fake HTML.
+We use **HTML parse mode** for every Telegram message because Telegram supports it natively and it lets us do bold, italic, and code spans without the constant `\_` and `\*` escaping headache that Markdown causes when filenames contain underscores.
+
+Any dynamic value (filename, title, error message) that goes into a message has to be passed through `_h()` (a thin wrapper around `html.escape`) so that things like `<` and `&` in titles can't break the message or get interpreted as fake HTML.
 
 ### Buttons and selection
 

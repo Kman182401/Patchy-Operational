@@ -11,19 +11,39 @@ updated: 2026-04-11
 
 ## Overview
 
-Patchy Bot does not do everything by itself. It talks to four outside services to get its job done. Each one has a small "client" file inside `telegram-qbt/patchy_bot/clients/` whose only job is to translate Patchy's questions into the right web requests and translate the answers back into Python objects the rest of the bot can use. An API (Application Programming Interface) is just a set of agreed-upon URLs and message formats that two programs use to talk to each other — like a drive-thru window: you place a structured order, and you get a structured answer back.
+Patchy Bot does not do everything by itself. It talks to four outside services to get its job done.
+
+Each one has a small "client" file inside `telegram-qbt/patchy_bot/clients/` whose only job is to translate Patchy's questions into the right web requests and translate the answers back into Python objects the rest of the bot can use.
+
+An API (Application Programming Interface) is just a set of agreed-upon URLs and message formats that two programs use to talk to each other — like a drive-thru window: you place a structured order, and you get a structured answer back.
 
 **1. TVMaze + TMDB → `TVMetadataClient` (`clients/tv_metadata.py`)**
-This is the bot's encyclopedia. TVMaze (a free TV show database) is asked things like "find a show called The Bear" or "give me every episode of season 3." TMDB (The Movie Database, also free with a key) is asked about movies and especially about release dates — when did Dune 2 come out in theaters, when does it hit digital, when does the Blu-ray ship? Patchy combines both because TVMaze has the best TV episode data and TMDB has the best movie data. Think of it as keeping two reference books on the same shelf.
+
+This is the bot's encyclopedia. TVMaze (a free TV show database) is asked things like "find a show called The Bear" or "give me every episode of season 3."
+
+TMDB (The Movie Database, also free with a key) is asked about movies and especially about release dates — when did Dune 2 come out in theaters, when does it hit digital, when does the Blu-ray ship?
+
+Patchy combines both because TVMaze has the best TV episode data and TMDB has the best movie data. Think of it as keeping two reference books on the same shelf.
 
 **2. qBittorrent → `QBClient` (`clients/qbittorrent.py`)**
-qBittorrent is the program that actually downloads torrents. It runs as its own service on the same machine and exposes a small web API. `QBClient` is how Patchy says things like "log me in," "search for this movie on your installed plugins," "add this torrent and label it with the right category," "tell me the progress of all active downloads," "pause this one," and "delete that one and remove its files." It is thread-safe — only one Python thread can talk to qBittorrent at a time, which prevents two requests stepping on each other.
+
+qBittorrent is the program that actually downloads torrents. It runs as its own service on the same machine and exposes a small web API.
+
+`QBClient` is how Patchy says things like "log me in," "search for this movie on your installed plugins," "add this torrent and label it with the right category," "tell me the progress of all active downloads," "pause this one," and "delete that one and remove its files."
+
+It is thread-safe — only one Python thread can talk to qBittorrent at a time, which prevents two requests stepping on each other.
 
 **3. Plex → `PlexInventoryClient` (`clients/plex.py`)**
-Plex is the streaming server that plays the finished files on your TV. Patchy never streams through Plex, but it does need to ask Plex two questions: "do you already have this episode/movie?" (so it doesn't download duplicates) and "please rescan this folder, I just added/removed something." Plex's API speaks XML (eXtensible Markup Language — like HTML but for data), so this client parses XML responses into Python dictionaries. Patchy reaches Plex over the local network (sometimes through Tailscale, a private mesh VPN, when away from home).
+
+Plex is the streaming server that plays the finished files on your TV. Patchy never streams through Plex, but it does need to ask Plex two questions: "do you already have this episode/movie?" (so it doesn't download duplicates) and "please rescan this folder, I just added/removed something."
+
+Plex's API speaks XML (eXtensible Markup Language — like HTML but for data), so this client parses XML responses into Python dictionaries. Patchy reaches Plex over the local network (sometimes through Tailscale, a private mesh VPN, when away from home).
 
 **4. OpenAI-compatible LLM → `PatchyLLMClient` (`clients/llm.py`)**
-This is the chatty pirate brain. It points at any chat-completions endpoint that follows OpenAI's API shape (so the actual provider can be swapped without changing code). Patchy uses it for free-form chat with the user — answering questions, joking around in character. If the configured model isn't available, it falls back to a second model and remembers any models that have already failed so it doesn't retry them in the same session.
+
+This is the chatty pirate brain. It points at any chat-completions endpoint that follows OpenAI's API shape (so the actual provider can be swapped without changing code).
+
+Patchy uses it for free-form chat with the user — answering questions, joking around in character. If the configured model isn't available, it falls back to a second model and remembers any models that have already failed so it doesn't retry them in the same session.
 
 > [!code]- Claude Code Reference
 >

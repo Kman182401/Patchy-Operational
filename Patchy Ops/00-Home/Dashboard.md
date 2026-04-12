@@ -11,7 +11,9 @@ updated: 2026-04-11
 
 ## Overview
 
-Welcome to the Patchy Bot vault. Patchy is a Telegram-based assistant that searches for movies and TV shows, hands them off to qBittorrent for downloading, scans the results for malware, and organizes the finished files into a Plex media library. This dashboard is your starting point — it shows what work is open right now, what was finished recently, and how all the pieces of the system fit together.
+Welcome to the Patchy Bot vault. Patchy is a Telegram-based assistant that searches for movies and TV shows, hands them off to qBittorrent for downloading, scans the results for malware, and organizes the finished files into a Plex media library.
+
+This dashboard is your starting point — it shows what work is open right now, what was finished recently, and how all the pieces of the system fit together.
 
 ## Open Work
 
@@ -60,7 +62,13 @@ graph TD
 
 ## Quick Links
 
-[[System Overview]] | [[Work Board]] | [[Preferences]] | [[Ideas Index]] | [[Changelog Index]] | [[Vault Guide]] | [[SETUP]]
+- [[System Overview]]
+- [[Work Board]]
+- [[Preferences]]
+- [[Ideas Index]]
+- [[Changelog Index]]
+- [[Vault Guide]]
+- [[SETUP]]
 
 > [!code]- Claude Code Reference
 > **Runner timing**

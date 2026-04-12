@@ -11,18 +11,26 @@ updated: 2026-04-11
 
 ## Overview
 
-When you tap an inline button in a Telegram chat, Telegram does **not** send the button's label back to the bot. Instead, the button has a hidden short string attached to it called **callback data**, and Telegram sends just that string. The bot then has to look up "what does this string mean?" and run the right code.
+When you tap an inline button in a Telegram chat, Telegram does **not** send the button's label back to the bot. Instead, the button has a hidden short string attached to it called **callback data**, and Telegram sends just that string.
+
+The bot then has to look up "what does this string mean?" and run the right code.
 
 Patchy uses a phone-directory-style lookup to do this. The directory is called the `CallbackDispatcher` and lives in `dispatch.py`. It works in two ways:
 
 - **Exact entries** — like a phone book listing for one specific name. If the callback data is *exactly* `nav:home`, run this function.
 - **Prefix entries** — like an area-code rule. If the callback data *starts with* `sch:`, run the schedule handler. The schedule handler then reads the rest of the string to figure out which sub-action.
 
-When a button tap arrives, the dispatcher first checks the exact list (one fast dictionary lookup). If nothing matches, it walks the prefix list and picks the first one whose prefix matches the start of the data. Importantly, the prefix list is kept sorted **longest first**, so that a more specific prefix like `stop:all:` is tried before the more general `stop:`. Without that ordering, the general one would always win and the specific handler would never run.
+When a button tap arrives, the dispatcher first checks the exact list (one fast dictionary lookup). If nothing matches, it walks the prefix list and picks the first one whose prefix matches the start of the data.
+
+Importantly, the prefix list is kept sorted **longest first**, so that a more specific prefix like `stop:all:` is tried before the more general `stop:`. Without that ordering, the general one would always win and the specific handler would never run.
 
 The format Patchy uses for callback data is colon-delimited segments: `prefix:param1:param2`. For example, `sch:track:42` is "schedule namespace, track sub-action, track id 42." This keeps the strings short (Telegram caps callback data at 64 bytes) and easy to parse.
 
-There are **15 registrations** wired up at startup in `BotApp._build_callback_dispatcher()` (`bot.py:161-175`): **2 exact** matches and **13 prefix** matches. (The phase-B plan estimated 14; the actual count is 15. The extra one is the longest-first split between `stop:all:` and `stop:`, which together with `tvpost:` and `moviepost:` brings the total to 15.) See the table below for the full registry.
+There are **15 registrations** wired up at startup in `BotApp._build_callback_dispatcher()` (`bot.py:161-175`): **2 exact** matches and **13 prefix** matches.
+
+(The phase-B plan estimated 14; the actual count is 15. The extra one is the longest-first split between `stop:all:` and `stop:`, which together with `tvpost:` and `moviepost:` brings the total to 15.)
+
+See the table below for the full registry.
 
 > [!code]- Claude Code Reference
 >
@@ -81,23 +89,51 @@ There are **15 registrations** wired up at startup in `BotApp._build_callback_di
 >
 > ### Routing table
 >
-> | # | Kind | Pattern | Handler (BotApp method) | Owning module |
-> |---:|---|---|---|---|
-> | 1 | exact | `nav:home` | `_on_cb_nav_home` | `bot.py` (delegates to command center renderer) |
-> | 2 | exact | `dl:manage` | `_on_cb_dl_manage` | `handlers/download.py` |
-> | 3 | prefix | `a:` | `_on_cb_add` | `handlers/search.py` (add-from-results) |
-> | 4 | prefix | `d:` | `_on_cb_download` | `handlers/download.py` (download a result) |
-> | 5 | prefix | `p:` | `_on_cb_page` | `handlers/search.py` (results pagination) |
-> | 6 | prefix | `rm:` | `_on_cb_remove` | `handlers/remove.py` |
-> | 7 | prefix | `sch:` | `_on_cb_schedule` | `handlers/schedule.py` (TV) |
-> | 8 | prefix | `msch:` | `_on_cb_movie_schedule` | `handlers/schedule.py` (movies) |
-> | 9 | prefix | `menu:` | `_on_cb_menu` | `bot.py` (top-level menu navigation) |
-> | 10 | prefix | `flow:` | `_on_cb_flow` | `bot.py` (generic flow transitions) |
-> | 11 | prefix | `mwblock:` | `_on_cb_mwblock` | `handlers/download.py` (malware-block dismissal) |
-> | 12 | prefix | `stop:all:` | `_on_cb_stop` | `handlers/download.py` (stop-all variant — must come first) |
-> | 13 | prefix | `stop:` | `_on_cb_stop` | `handlers/download.py` (stop single) |
-> | 14 | prefix | `tvpost:` | `_on_cb_tvpost` | `handlers/download.py` (TV completion notice actions) |
-> | 15 | prefix | `moviepost:` | `_on_cb_moviepost` | `handlers/download.py` (movie completion notice actions) |
+> - **1. exact `nav:home`**
+>   - Handler: `_on_cb_nav_home`
+>   - Module: `bot.py` (delegates to command center renderer)
+> - **2. exact `dl:manage`**
+>   - Handler: `_on_cb_dl_manage`
+>   - Module: `handlers/download.py`
+> - **3. prefix `a:`**
+>   - Handler: `_on_cb_add`
+>   - Module: `handlers/search.py` (add-from-results)
+> - **4. prefix `d:`**
+>   - Handler: `_on_cb_download`
+>   - Module: `handlers/download.py` (download a result)
+> - **5. prefix `p:`**
+>   - Handler: `_on_cb_page`
+>   - Module: `handlers/search.py` (results pagination)
+> - **6. prefix `rm:`**
+>   - Handler: `_on_cb_remove`
+>   - Module: `handlers/remove.py`
+> - **7. prefix `sch:`**
+>   - Handler: `_on_cb_schedule`
+>   - Module: `handlers/schedule.py` (TV)
+> - **8. prefix `msch:`**
+>   - Handler: `_on_cb_movie_schedule`
+>   - Module: `handlers/schedule.py` (movies)
+> - **9. prefix `menu:`**
+>   - Handler: `_on_cb_menu`
+>   - Module: `bot.py` (top-level menu navigation)
+> - **10. prefix `flow:`**
+>   - Handler: `_on_cb_flow`
+>   - Module: `bot.py` (generic flow transitions)
+> - **11. prefix `mwblock:`**
+>   - Handler: `_on_cb_mwblock`
+>   - Module: `handlers/download.py` (malware-block dismissal)
+> - **12. prefix `stop:all:`**
+>   - Handler: `_on_cb_stop`
+>   - Module: `handlers/download.py` (stop-all variant — must come first)
+> - **13. prefix `stop:`**
+>   - Handler: `_on_cb_stop`
+>   - Module: `handlers/download.py` (stop single)
+> - **14. prefix `tvpost:`**
+>   - Handler: `_on_cb_tvpost`
+>   - Module: `handlers/download.py` (TV completion notice actions)
+> - **15. prefix `moviepost:`**
+>   - Handler: `_on_cb_moviepost`
+>   - Module: `handlers/download.py` (movie completion notice actions)
 >
 > **Total:** 2 exact + 13 prefix = **15 registrations**.
 >

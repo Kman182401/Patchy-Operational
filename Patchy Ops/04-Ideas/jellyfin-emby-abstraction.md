@@ -11,11 +11,17 @@ updated: 2026-04-11
 
 ## Overview
 
-Plex is the media library Patchy Bot currently talks to — it's the program that catalogs your movies and TV shows and lets you stream them. But Plex isn't the only one out there. **Jellyfin** and **Emby** are two free, open-source alternatives that do basically the same job. Some people prefer them because they don't require a paid account, don't phone home to a company, or just look and feel different.
+Plex is the media library Patchy Bot currently talks to — it's the program that catalogs your movies and TV shows and lets you stream them. But Plex isn't the only one out there.
 
-Right now Patchy is hard-wired to Plex: a chunk of the code knows exactly how to ask Plex what's in the library, exactly how to tell Plex "rescan this folder," and so on. To support Jellyfin or Emby, we'd need to hide all of that "how we talk to Plex" behind a generic interface — think of it like a **universal remote control**. The bot wouldn't care which media server you're running; it would just press the universal "rescan library" button, and a Plex-shaped or Jellyfin-shaped or Emby-shaped translator behind the scenes would convert that into the right call for whichever server you actually have.
+**Jellyfin** and **Emby** are two free, open-source alternatives that do basically the same job. Some people prefer them because they don't require a paid account, don't phone home to a company, or just look and feel different.
 
-This is a **future idea**, not a planned project. It would touch a lot of files and require designing the abstraction carefully so the three servers (which have different feature sets) can all be served by one interface. There also needs to be enough demand from real users to justify the work.
+Right now Patchy is hard-wired to Plex: a chunk of the code knows exactly how to ask Plex what's in the library, exactly how to tell Plex "rescan this folder," and so on.
+
+To support Jellyfin or Emby, we'd need to hide all of that "how we talk to Plex" behind a generic interface — think of it like a **universal remote control**. The bot wouldn't care which media server you're running; it would just press the universal "rescan library" button, and a Plex-shaped or Jellyfin-shaped or Emby-shaped translator behind the scenes would convert that into the right call for whichever server you actually have.
+
+This is a **future idea**, not a planned project. It would touch a lot of files and require designing the abstraction carefully so the three servers (which have different feature sets) can all be served by one interface.
+
+There also needs to be enough demand from real users to justify the work.
 
 A sister idea exists for swapping qBittorrent for other torrent clients (Transmission, rTorrent) using the same pattern.
 

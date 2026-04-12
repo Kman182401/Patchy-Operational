@@ -413,6 +413,74 @@ def movie_candidate_caption(candidate: dict[str, Any], idx: int, total: int, que
     )
 
 
+def _truncate_plain(text: str, limit: int = 100) -> str:
+    """Collapse whitespace and truncate plain text with an ellipsis."""
+    cleaned = " ".join(str(text or "").split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: max(0, limit - 1)].rstrip() + "…"
+
+
+def tv_show_picker_text(results: list[dict[str, Any]]) -> str:
+    """Build the TVMaze show-picker message body.
+
+    ``results`` is a list of TVMetadataClient.search_shows() dicts. Summaries
+    are already HTML-stripped by the client; we still truncate and escape
+    defensively. All dynamic values are escaped with ``_h()``.
+    """
+    lines: list[str] = ["<b>📺 Pick a show</b>", ""]
+    if not results:
+        lines.append("<i>No matches found.</i>")
+        return "\n".join(lines)
+
+    for idx, show in enumerate(results, start=1):
+        name = str(show.get("name") or "Unknown")
+        year = show.get("year")
+        network = str(show.get("network") or show.get("country") or "")
+        summary = _truncate_plain(str(show.get("summary") or ""), 100)
+
+        header_bits: list[str] = [f"<b>{idx}. {_h(name)}</b>"]
+        if year:
+            header_bits.append(f"(<code>{_h(str(year))}</code>)")
+        if network:
+            header_bits.append(f"• <i>{_h(network)}</i>")
+        lines.append(" ".join(header_bits))
+        if summary:
+            lines.append(f"   {_h(summary)}")
+        lines.append("")
+
+    lines.append("<i>Tap a show to continue.</i>")
+    return "\n".join(lines)
+
+
+def movie_picker_text(results: list[dict[str, Any]]) -> str:
+    """Build the TMDB movie-picker message body.
+
+    ``results`` is a list of TVMetadataClient.search_movies() dicts. Overviews
+    are plain text from TMDB; they still get collapsed, truncated, and escaped.
+    """
+    lines: list[str] = ["<b>🎬 Pick a movie</b>", ""]
+    if not results:
+        lines.append("<i>No matches found.</i>")
+        return "\n".join(lines)
+
+    for idx, movie in enumerate(results, start=1):
+        title = str(movie.get("title") or "Unknown")
+        year = movie.get("year")
+        overview = _truncate_plain(str(movie.get("overview") or ""), 100)
+
+        header_bits: list[str] = [f"<b>{idx}. {_h(title)}</b>"]
+        if year:
+            header_bits.append(f"(<code>{_h(str(year))}</code>)")
+        lines.append(" ".join(header_bits))
+        if overview:
+            lines.append(f"   {_h(overview)}")
+        lines.append("")
+
+    lines.append("<i>Tap a movie to continue.</i>")
+    return "\n".join(lines)
+
+
 def help_text() -> str:
     """Help menu intro — shown with section navigation buttons."""
     return "<b>ℹ️ Help &amp; Quick Start</b>\n━━━━━━━━━━━━━━━━━━━━\n\nTap a topic below to learn more."

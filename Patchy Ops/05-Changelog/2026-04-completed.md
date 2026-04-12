@@ -11,7 +11,14 @@ updated: 2026-04-11
 
 ## Overview
 
-April was a month of hardening. The TV scheduling system had a problem where shows that aired multiple episodes on the same day were only picking up the first one — that's fixed. A big batch of seventeen smaller bugs got cleaned up in one sweep on the 7th, covering everything from VPN reconnect handling to file-move race conditions to the smoothing math that drives the live progress display. The download pipeline got a malware-scanning gate so suspicious files are caught before they reach your library. Movies got their own scheduling system so you can track a film and have it grab itself the moment a non-theater release happens. The command center display also stopped flickering during rapid refreshes. Finally, the Obsidian vault you're reading right now was created and seeded.
+April was a month of hardening. Key highlights:
+
+- **TV scheduling fix** — shows that aired multiple episodes on the same day were only picking up the first one. That's fixed.
+- **Batch cleanup on the 7th** — seventeen smaller bugs knocked out in one sweep, covering everything from VPN reconnect handling to file-move race conditions to the smoothing math that drives the live progress display.
+- **Malware scan gate** — the download pipeline now catches suspicious files before they reach your library.
+- **Movie scheduling system** — you can now track a film and have it grab itself the moment a non-theater release happens.
+- **Command center flicker** — fixed. No more flashing during rapid refreshes.
+- **Obsidian vault** — created and seeded (the vault you're reading right now).
 
 > [!code]- Claude Code Reference
 >

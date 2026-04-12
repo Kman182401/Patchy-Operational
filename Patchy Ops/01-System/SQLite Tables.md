@@ -11,7 +11,9 @@ updated: 2026-04-11
 
 ## Overview
 
-SQLite (a lightweight database — think of it as a single-file spreadsheet that the bot reads and writes) is where Patchy Bot keeps everything that must survive a restart. Inside that file are 14 tables. A table is one sheet in the spreadsheet: it has named columns at the top and rows of data underneath. Patchy's database file lives at `telegram-qbt/patchy_bot.db` and is locked down to owner-only permissions (`0o600`).
+SQLite (a lightweight database — think of it as a single-file spreadsheet that the bot reads and writes) is where Patchy Bot keeps everything that must survive a restart. Inside that file are 14 tables.
+
+A table is one sheet in the spreadsheet: it has named columns at the top and rows of data underneath. Patchy's database file lives at `telegram-qbt/patchy_bot.db` and is locked down to owner-only permissions (`0o600`).
 
 Here is what each of the 14 tables remembers, in plain English:
 

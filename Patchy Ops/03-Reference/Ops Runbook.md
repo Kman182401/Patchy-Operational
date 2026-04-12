@@ -19,7 +19,9 @@ Patchy Bot runs as a systemd service called `telegram-qbt-bot.service`. To see i
 
 ### How to restart it
 
-**Any time you change a Python file under `telegram-qbt/patchy_bot/`, you have to restart the service.** The bot loads the code into memory at startup; it does not hot-reload. Skipping the restart means your change isn't actually live, no matter how good the code is. This is non-negotiable — it's the most common reason "my fix didn't do anything."
+**Any time you change a Python file under `telegram-qbt/patchy_bot/`, you have to restart the service.** The bot loads the code into memory at startup; it does not hot-reload.
+
+Skipping the restart means your change isn't actually live, no matter how good the code is. This is non-negotiable — it's the most common reason "my fix didn't do anything."
 
 ### What's running in the background
 
@@ -51,7 +53,9 @@ In rough order of "fastest to check":
 
 ### Service dependencies
 
-The systemd unit declares it must start `After=network-online.target qbittorrent.service` and `Wants=network-online.target`. Translation: the network has to be up and qBittorrent has to be running before Patchy Bot starts. If qBittorrent dies, the bot keeps running but every download will fail until qBT comes back.
+The systemd unit declares it must start `After=network-online.target qbittorrent.service` and `Wants=network-online.target`.
+
+Translation: the network has to be up and qBittorrent has to be running before Patchy Bot starts. If qBittorrent dies, the bot keeps running but every download will fail until qBT comes back.
 
 ### Filesystem the service can write to
 

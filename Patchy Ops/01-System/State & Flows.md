@@ -11,20 +11,40 @@ updated: 2026-04-11
 
 ## Overview
 
-Patchy Bot is a chat bot, but most of what the user does is more like filling out a form than sending one message. They tap "Search," then they pick "TV," then they type a title, then they pick a season, then they pick an episode, then they confirm a torrent. The bot has to remember which page of that form each user is currently on — otherwise the next button tap would have no meaning.
+Patchy Bot is a chat bot, but most of what the user does is more like filling out a form than sending one message. They tap "Search," then they pick "TV," then they type a title, then they pick a season, then they pick an episode, then they confirm a torrent.
 
-Think of it like a choose-your-own-adventure book. Each user is reading their own copy and is currently on a specific page. When they tap a button, the bot looks up "what page is this user on?" and then runs the right paragraph of the story. When they finish, the bot closes the book for them.
+The bot has to remember which page of that form each user is currently on — otherwise the next button tap would have no meaning.
 
-Patchy stores this "current page" information per user as a small Python dictionary called a **flow**. Each flow has a `mode` (which adventure you're in — `tv`, `movie`, `schedule`, `remove`) and a `stage` (which page of that adventure — `await_title`, `picker`, `confirm`, `dl_confirm`, etc.). Extra fields hold things like the search query, the chosen season, or the list of items the user is selecting.
+Think of it like a choose-your-own-adventure book. Each user is reading their own copy and is currently on a specific page. When they tap a button, the bot looks up "what page is this user on?" and then runs the right paragraph of the story.
 
-Flows live **in memory only**, in `HandlerContext.user_flow`, a Python dict keyed by `user_id`. Nothing about the active flow is written to SQLite — if the bot restarts mid-flow, the user just starts over. Things that *must* survive restarts (active downloads, scheduled tracks, removal jobs) live in the database instead. This split is intentional: chat UI state is cheap to recreate, but a download in progress is not.
+When they finish, the bot closes the book for them.
+
+Patchy stores this "current page" information per user as a small Python dictionary called a **flow**. Each flow has:
+
+- A `mode` (which adventure you're in — `tv`, `movie`, `schedule`, `remove`)
+- A `stage` (which page of that adventure — `await_title`, `picker`, `confirm`, `dl_confirm`, etc.)
+- Extra fields holding things like the search query, the chosen season, or the list of items the user is selecting.
+
+Flows live **in memory only**, in `HandlerContext.user_flow`, a Python dict keyed by `user_id`. Nothing about the active flow is written to SQLite — if the bot restarts mid-flow, the user just starts over.
+
+Things that *must* survive restarts (active downloads, scheduled tracks, removal jobs) live in the database instead. This split is intentional: chat UI state is cheap to recreate, but a download in progress is not.
 
 The three helper functions in `ui/flow.py` are the only API for this:
+
 - `set_flow(ctx, user_id, payload)` — start or replace a flow.
 - `get_flow(ctx, user_id)` — read the current flow, or `None` if the user isn't in one.
 - `clear_flow(ctx, user_id)` — wipe the flow when the user finishes or backs out.
 
-`HandlerContext` is the shared briefcase that every handler is given. Besides the per-user flow dict, it carries the four API clients, the database store, locks for the background runners, the in-memory download queue, the per-user navigation state, and several housekeeping dicts (ephemeral message tracking, batch monitor data, chat history). It's defined as a frozen-shape `@dataclass` in `types.py`.
+`HandlerContext` is the shared briefcase that every handler is given. Besides the per-user flow dict, it carries:
+
+- The four API clients
+- The database store
+- Locks for the background runners
+- The in-memory download queue
+- The per-user navigation state
+- Several housekeeping dicts (ephemeral message tracking, batch monitor data, chat history)
+
+It's defined as a frozen-shape `@dataclass` in `types.py`.
 
 > [!code]- Claude Code Reference
 >
