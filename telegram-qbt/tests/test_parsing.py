@@ -131,14 +131,15 @@ def test_schedule_next_check_ignores_stale_retry_and_uses_future_release_window(
 
     monkeypatch.setattr("patchy_bot.bot.now_ts", lambda: 1_700_000_000)
 
+    air_ts = 1_700_000_000 + (8 * 24 * 3600)
     next_check = BotApp._schedule_next_check_at(
         DummyBot(),
-        1_700_000_000 + (8 * 24 * 3600),
+        air_ts,
         has_actionable_missing=False,
         auto_state={"next_auto_retry_at": 1_699_000_000},
     )
 
-    assert next_check == 1_700_000_000 + 24 * 3600
+    assert next_check == air_ts + BotApp._schedule_release_grace_s(DummyBot())
 
 
 def test_schedule_next_check_uses_future_retry_for_actionable_missing(monkeypatch) -> None:
@@ -1799,6 +1800,7 @@ def test_on_callback_remove_cancel_returns_to_command_center() -> None:
         _on_cb_moviepost = BotApp._on_cb_moviepost
         _on_cb_tv_pick = BotApp._on_cb_tv_pick
         _on_cb_movie_pick = BotApp._on_cb_movie_pick
+        _on_cb_fsd = BotApp._on_cb_fsd
         _register_callbacks = BotApp._register_callbacks
 
         def __init__(self) -> None:
@@ -1908,6 +1910,7 @@ def test_on_callback_schedule_cancel_returns_to_command_center() -> None:
         _on_cb_moviepost = BotApp._on_cb_moviepost
         _on_cb_tv_pick = BotApp._on_cb_tv_pick
         _on_cb_movie_pick = BotApp._on_cb_movie_pick
+        _on_cb_fsd = BotApp._on_cb_fsd
         _register_callbacks = BotApp._register_callbacks
 
         def __init__(self) -> None:
@@ -2068,6 +2071,7 @@ def test_on_callback_remove_clear_returns_to_library_browser() -> None:
         _on_cb_moviepost = BotApp._on_cb_moviepost
         _on_cb_tv_pick = BotApp._on_cb_tv_pick
         _on_cb_movie_pick = BotApp._on_cb_movie_pick
+        _on_cb_fsd = BotApp._on_cb_fsd
         _register_callbacks = BotApp._register_callbacks
 
         def __init__(self) -> None:
@@ -2264,6 +2268,7 @@ def test_on_callback_schedule_pickeps_uses_anchor_renderer() -> None:
         _on_cb_moviepost = BotApp._on_cb_moviepost
         _on_cb_tv_pick = BotApp._on_cb_tv_pick
         _on_cb_movie_pick = BotApp._on_cb_movie_pick
+        _on_cb_fsd = BotApp._on_cb_fsd
         _register_callbacks = BotApp._register_callbacks
 
         def __init__(self) -> None:
@@ -2373,6 +2378,7 @@ def test_on_callback_schedule_skip_uses_anchor_renderer() -> None:
         _on_cb_moviepost = BotApp._on_cb_moviepost
         _on_cb_tv_pick = BotApp._on_cb_tv_pick
         _on_cb_movie_pick = BotApp._on_cb_movie_pick
+        _on_cb_fsd = BotApp._on_cb_fsd
         _register_callbacks = BotApp._register_callbacks
 
         def __init__(self) -> None:
@@ -2960,7 +2966,7 @@ def test_schedule_active_line_missing_shows_search_icon() -> None:
     line = BotApp._schedule_active_line(bot, track)
     assert "🔍" not in line
     assert "The Bear" in line
-    assert "<b>S2 · 2 eps. missing</b>" in line
+    assert "S2 · 2 eps. missing" in line
 
 
 def test_schedule_active_line_up_to_date_shows_checkmark() -> None:
@@ -3009,7 +3015,7 @@ def test_schedule_active_line_uses_dot_separator_not_pipe() -> None:
     assert " · " in line
     assert " | " not in line
     assert "⏰" not in line
-    assert "<b>S1 · 2 eps. left</b>" in line
+    assert "S1 · 2 eps. left" in line
 
 
 def test_schedule_active_line_formats_next_air_as_bold_ep_left_summary() -> None:
@@ -4305,6 +4311,139 @@ def test_schedule_apply_tracking_mode_single_episode_still_works(monkeypatch) ->
     }
     result = schedule_apply_tracking_mode(ctx, track, probe)
     assert result["actionable_missing_codes"] == ["S01E01"]
+
+
+def test_schedule_next_check_known_future_air_date(monkeypatch) -> None:
+    from patchy_bot.handlers.schedule import schedule_next_check_at
+
+    NOW = 1_000_000
+    monkeypatch.setattr("patchy_bot.handlers.schedule.now_ts", lambda: NOW)
+    monkeypatch.setattr("patchy_bot.handlers.schedule.schedule_release_grace_s", lambda: 5400)
+
+    ctx = SimpleNamespace()
+    air = NOW + 3600
+    result = schedule_next_check_at(ctx, air, has_actionable_missing=False, has_unknown_missing=False, auto_state={})
+    assert result == air + 5400
+
+
+def test_schedule_next_check_released_episode(monkeypatch) -> None:
+    from patchy_bot.handlers.schedule import schedule_next_check_at
+
+    NOW = 1_000_000
+    monkeypatch.setattr("patchy_bot.handlers.schedule.now_ts", lambda: NOW)
+    monkeypatch.setattr("patchy_bot.handlers.schedule.schedule_release_grace_s", lambda: 5400)
+
+    ctx = SimpleNamespace()
+    result = schedule_next_check_at(ctx, None, has_actionable_missing=True, has_unknown_missing=False, auto_state={})
+    assert result == NOW + 300
+
+
+def test_schedule_next_check_unknown_air_date_slow_poll(monkeypatch) -> None:
+    from patchy_bot.handlers.schedule import schedule_next_check_at
+
+    NOW = 1_000_000
+    monkeypatch.setattr("patchy_bot.handlers.schedule.now_ts", lambda: NOW)
+    monkeypatch.setattr("patchy_bot.handlers.schedule.schedule_release_grace_s", lambda: 5400)
+
+    ctx = SimpleNamespace()
+    result = schedule_next_check_at(ctx, None, has_actionable_missing=False, has_unknown_missing=True, auto_state={})
+    assert result == NOW + 12 * 3600
+
+
+def test_schedule_next_check_no_schedule_info(monkeypatch) -> None:
+    from patchy_bot.handlers.schedule import schedule_next_check_at
+
+    NOW = 1_000_000
+    monkeypatch.setattr("patchy_bot.handlers.schedule.now_ts", lambda: NOW)
+    monkeypatch.setattr("patchy_bot.handlers.schedule.schedule_release_grace_s", lambda: 5400)
+
+    ctx = SimpleNamespace()
+    result = schedule_next_check_at(ctx, None, has_actionable_missing=False, has_unknown_missing=False, auto_state={})
+    assert result == NOW + 24 * 3600
+
+
+def test_schedule_next_check_backoff_wins_over_air_date(monkeypatch) -> None:
+    from patchy_bot.handlers.schedule import schedule_next_check_at
+
+    NOW = 1_000_000
+    monkeypatch.setattr("patchy_bot.handlers.schedule.now_ts", lambda: NOW)
+    monkeypatch.setattr("patchy_bot.handlers.schedule.schedule_release_grace_s", lambda: 5400)
+
+    ctx = SimpleNamespace()
+    air = NOW + 3600
+    backoff = air + 5400 + 10_000
+    result = schedule_next_check_at(
+        ctx,
+        air,
+        has_actionable_missing=False,
+        has_unknown_missing=False,
+        auto_state={"next_auto_retry_at": backoff},
+    )
+    assert result == backoff
+
+
+def test_schedule_next_check_air_date_past_grace(monkeypatch) -> None:
+    from patchy_bot.handlers.schedule import schedule_next_check_at
+
+    NOW = 1_000_000
+    monkeypatch.setattr("patchy_bot.handlers.schedule.now_ts", lambda: NOW)
+    monkeypatch.setattr("patchy_bot.handlers.schedule.schedule_release_grace_s", lambda: 5400)
+
+    ctx = SimpleNamespace()
+    past_air = NOW - 10_000
+    result = schedule_next_check_at(
+        ctx, past_air, has_actionable_missing=False, has_unknown_missing=False, auto_state={}
+    )
+    assert result == NOW + 300
+
+
+def test_apply_tracking_mode_unknown_air_date_not_actionable(monkeypatch) -> None:
+    from patchy_bot.handlers.schedule import schedule_apply_tracking_mode
+
+    NOW = 1_000_000
+    monkeypatch.setattr("patchy_bot.handlers.schedule.now_ts", lambda: NOW)
+    monkeypatch.setattr("patchy_bot.handlers.schedule.schedule_release_grace_s", lambda: 3600)
+
+    ctx = SimpleNamespace()
+    track = {"auto_state_json": {"enabled": True, "tracking_mode": "upcoming"}}
+    probe = {
+        "all_missing_codes": ["S01E01"],
+        "episode_order": ["S01E01"],
+        "present_codes": [],
+        "pending_codes": [],
+        "episode_air": {"S01E01": None},
+    }
+    result = schedule_apply_tracking_mode(ctx, track, probe)
+    assert result["tracked_missing_codes"] == ["S01E01"]
+    assert result["actionable_missing_codes"] == []
+
+
+def test_apply_tracking_mode_mixed_known_unknown(monkeypatch) -> None:
+    from patchy_bot.handlers.schedule import schedule_apply_tracking_mode
+
+    NOW = 1_000_000
+    monkeypatch.setattr("patchy_bot.handlers.schedule.now_ts", lambda: NOW)
+    monkeypatch.setattr("patchy_bot.handlers.schedule.schedule_release_grace_s", lambda: 3600)
+
+    ctx = SimpleNamespace()
+    track = {
+        "auto_state_json": {
+            "enabled": True,
+            "tracking_mode": "upcoming",
+            "next_code": "S01E01",
+        }
+    }
+    probe = {
+        "all_missing_codes": ["S01E01", "S01E02"],
+        "episode_order": ["S01E01", "S01E02"],
+        "present_codes": [],
+        "pending_codes": [],
+        "episode_air": {"S01E01": NOW - 7200, "S01E02": None},
+    }
+    result = schedule_apply_tracking_mode(ctx, track, probe)
+    assert "S01E01" in result["actionable_missing_codes"]
+    assert "S01E02" not in result["actionable_missing_codes"]
+    assert "S01E02" in result["tracked_missing_codes"]
 
 
 def test_schedule_is_season_complete_last_episode_present() -> None:

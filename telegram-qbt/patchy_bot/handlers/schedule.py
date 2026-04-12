@@ -308,10 +308,13 @@ def schedule_repair_track_state(ctx: HandlerContext, track: dict[str, Any]) -> N
     clean_auto = schedule_sanitize_auto_state(track.get("auto_state_json") or {}, probe=last_probe)
     next_air_ts = int(track.get("next_air_ts") or last_probe.get("next_air_ts") or 0) or None
     if last_probe:
+        last_tracked = list(last_probe.get("tracked_missing_codes") or [])
+        last_actionable = list(last_probe.get("actionable_missing_codes") or [])
         next_check_at = schedule_next_check_at(
             ctx,
             next_air_ts,
-            has_actionable_missing=bool(last_probe.get("actionable_missing_codes")),
+            has_actionable_missing=bool(last_actionable),
+            has_unknown_missing=len(last_tracked) > len(last_actionable),
             auto_state=clean_auto,
         )
     else:
@@ -346,28 +349,37 @@ def schedule_next_check_at(
     next_air_ts: int | None,
     *,
     has_actionable_missing: bool,
+    has_unknown_missing: bool = False,
     auto_state: dict[str, Any] | None = None,
 ) -> int:
     now_value = now_ts()
+    raw_next_retry = int((auto_state or {}).get("next_auto_retry_at") or 0)
     auto_state = schedule_sanitize_auto_state(
         auto_state or {}, probe={"actionable_missing_codes": [1]} if has_actionable_missing else {}
     )
-    next_retry = int(auto_state.get("next_auto_retry_at") or 0)
+    sanitized_retry = int(auto_state.get("next_auto_retry_at") or 0)
+    next_retry = sanitized_retry if sanitized_retry > 0 else raw_next_retry
+
     if has_actionable_missing:
+        base = now_value + 300
         if next_retry > now_value:
-            return max(now_value + 300, next_retry)
-        return now_value + 300
+            base = max(base, next_retry)
+        return base
+
     if next_air_ts:
         release_ready_at = int(next_air_ts) + schedule_release_grace_s()
         if release_ready_at <= now_value:
-            return now_value + 300
-        delta = release_ready_at - now_value
-        if delta > 7 * 24 * 3600:
-            return now_value + 24 * 3600
-        if delta > 24 * 3600:
-            return min(now_value + 6 * 3600, release_ready_at)
-        return max(now_value + 900, release_ready_at)
-    return now_value + 12 * 3600
+            base = now_value + 300
+        else:
+            base = release_ready_at
+        if next_retry > now_value:
+            base = max(base, next_retry)
+        return base
+
+    if has_unknown_missing:
+        return now_value + 12 * 3600
+
+    return now_value + 24 * 3600
 
 
 # ---------------------------------------------------------------------------
@@ -685,7 +697,7 @@ def schedule_apply_tracking_mode(
             first_target_air_ts = air_ts
         if code not in pending_codes:
             tracked_missing.append(code)
-            if air_ts is None or air_ts <= grace_cutoff:
+            if air_ts is not None and air_ts <= grace_cutoff:
                 target_actionable.append(code)
 
     if first_target_code:
@@ -1639,10 +1651,13 @@ async def schedule_refresh_track(
     elif not probe.get("actionable_missing_codes"):
         auto_state["next_auto_retry_at"] = None
     auto_state = schedule_sanitize_auto_state(auto_state, probe=probe)
+    probe_tracked = list(probe.get("tracked_missing_codes") or [])
+    probe_actionable = list(probe.get("actionable_missing_codes") or [])
     next_check = schedule_next_check_at(
         ctx,
         probe.get("next_air_ts"),
-        has_actionable_missing=bool(probe.get("actionable_missing_codes")),
+        has_actionable_missing=bool(probe_actionable),
+        has_unknown_missing=len(probe_tracked) > len(probe_actionable),
         auto_state=auto_state,
     )
 

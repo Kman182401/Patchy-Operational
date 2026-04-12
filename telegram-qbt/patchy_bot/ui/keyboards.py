@@ -285,6 +285,51 @@ def media_picker_keyboard(sid: str, idx: int, *, back_data: str = "") -> InlineK
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Full Series Download (Phase B) — keyboards
+# ---------------------------------------------------------------------------
+
+
+def full_series_confirm_keyboard(to_download: int) -> InlineKeyboardMarkup:
+    """Confirmation keyboard for the full-series download screen.
+
+    If ``to_download`` is zero there is nothing to download, so the download
+    button is omitted and only the nav footer is shown.
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    if int(to_download) > 0:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"⬇️ Download Full Series ({int(to_download)} episodes)",
+                    callback_data="fsd:confirm",
+                )
+            ]
+        )
+    rows.extend(nav_footer(back_data="menu:tv", include_home=True))
+    return InlineKeyboardMarkup(rows)
+
+
+def full_series_progress_keyboard() -> InlineKeyboardMarkup:
+    """Single-row cancel keyboard shown during an active full-series run."""
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🛑 Cancel Full Series", callback_data="fsd:cancel")]])
+
+
+def full_series_complete_keyboard() -> InlineKeyboardMarkup:
+    """Final-screen keyboard shown when a full-series run completes."""
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("📺 Search Again", callback_data="menu:tv")],
+            [InlineKeyboardButton("🏠 Home", callback_data="nav:home")],
+        ]
+    )
+
+
+def full_series_cancelled_keyboard() -> InlineKeyboardMarkup:
+    """Final-screen keyboard shown when a full-series run is cancelled."""
+    return full_series_complete_keyboard()
+
+
 def tracked_list_page_bounds(items: list, page: int, per_page: int = 8) -> tuple[int, int, int, int]:
     """Return (page, total_pages, start, end) for a tracked list slice."""
     total_pages = max(1, math.ceil(max(1, len(items)) / per_page))

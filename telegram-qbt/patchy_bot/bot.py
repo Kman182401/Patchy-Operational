@@ -38,6 +38,7 @@ from .handlers import _shared
 from .handlers import chat as chat_handler
 from .handlers import commands as commands_handler
 from .handlers import download as download_handler
+from .handlers import full_series as full_series_handler
 from .handlers import remove as remove_handler
 from .handlers import schedule as schedule_handler
 from .handlers import search as search_handler
@@ -84,6 +85,8 @@ class BotApp:
         self._chat_history_max_users: int = _chat_max
         self.progress_tasks: dict[tuple[int, str], asyncio.Task] = {}
         self.pending_tracker_tasks: dict[tuple[int, str, str], asyncio.Task] = {}
+        # Per-user full-series download state: {user_id: {"task": Task, "cancelled": Event}}
+        self._full_series_tasks: dict[int, dict[str, Any]] = {}
         self.batch_monitor_messages: dict[int, Any] = {}
         self.batch_monitor_tasks: dict[int, asyncio.Task[Any]] = {}
         self.batch_monitor_data: dict[tuple[int, str], dict[str, Any]] = {}
@@ -175,6 +178,7 @@ class BotApp:
         d.register_prefix("moviepost:", self._on_cb_moviepost)
         d.register_prefix("tvpick:", self._on_cb_tv_pick)
         d.register_prefix("moviepick:", self._on_cb_movie_pick)
+        d.register_prefix("fsd:", self._on_cb_fsd)
 
     # ---------- Telegram command discovery ----------
 
@@ -1283,9 +1287,12 @@ class BotApp:
         clean_auto = self._schedule_sanitize_auto_state(track.get("auto_state_json") or {}, probe=last_probe)
         next_air_ts = int(track.get("next_air_ts") or last_probe.get("next_air_ts") or 0) or None
         if last_probe:
+            last_tracked = list(last_probe.get("tracked_missing_codes") or [])
+            last_actionable = list(last_probe.get("actionable_missing_codes") or [])
             next_check_at = self._schedule_next_check_at(
                 next_air_ts,
-                has_actionable_missing=bool(last_probe.get("actionable_missing_codes")),
+                has_actionable_missing=bool(last_actionable),
+                has_unknown_missing=len(last_tracked) > len(last_actionable),
                 auto_state=clean_auto,
             )
         else:
@@ -1308,28 +1315,41 @@ class BotApp:
         self._set_flow(user_id, {"mode": "schedule", "stage": "await_show", "tracking_mode": "upcoming"})
 
     def _schedule_next_check_at(
-        self, next_air_ts: int | None, *, has_actionable_missing: bool, auto_state: dict[str, Any] | None = None
+        self,
+        next_air_ts: int | None,
+        *,
+        has_actionable_missing: bool,
+        has_unknown_missing: bool = False,
+        auto_state: dict[str, Any] | None = None,
     ) -> int:
         now_value = now_ts()
+        raw_next_retry = int((auto_state or {}).get("next_auto_retry_at") or 0)
         auto_state = self._schedule_sanitize_auto_state(
             auto_state or {}, probe={"actionable_missing_codes": [1]} if has_actionable_missing else {}
         )
-        next_retry = int(auto_state.get("next_auto_retry_at") or 0)
+        sanitized_retry = int(auto_state.get("next_auto_retry_at") or 0)
+        next_retry = sanitized_retry if sanitized_retry > 0 else raw_next_retry
+
         if has_actionable_missing:
+            base = now_value + 300
             if next_retry > now_value:
-                return max(now_value + 300, next_retry)
-            return now_value + 300
+                base = max(base, next_retry)
+            return base
+
         if next_air_ts:
             release_ready_at = int(next_air_ts) + self._schedule_release_grace_s()
             if release_ready_at <= now_value:
-                return now_value + 300
-            delta = release_ready_at - now_value
-            if delta > 7 * 24 * 3600:
-                return now_value + 24 * 3600
-            if delta > 24 * 3600:
-                return min(now_value + 6 * 3600, release_ready_at)
-            return max(now_value + 900, release_ready_at)
-        return now_value + 12 * 3600
+                base = now_value + 300
+            else:
+                base = release_ready_at
+            if next_retry > now_value:
+                base = max(base, next_retry)
+            return base
+
+        if has_unknown_missing:
+            return now_value + 12 * 3600
+
+        return now_value + 24 * 3600
 
     @staticmethod
     def _schedule_show_info(show: dict[str, Any]) -> dict[str, Any]:
@@ -1626,7 +1646,7 @@ class BotApp:
                 first_target_air_ts = air_ts
             if code not in pending_codes:
                 tracked_missing.append(code)
-                if air_ts is None or air_ts <= grace_cutoff:
+                if air_ts is not None and air_ts <= grace_cutoff:
                     target_actionable.append(code)
 
         if first_target_code:
@@ -3258,9 +3278,12 @@ class BotApp:
         store_probe = dict(probe)
         store_probe.pop("_auto_state", None)
 
+        store_tracked = list(store_probe.get("tracked_missing_codes") or [])
+        store_actionable = list(store_probe.get("actionable_missing_codes") or [])
         next_check_at = self._schedule_next_check_at(
             store_probe.get("next_air_ts"),
-            has_actionable_missing=bool(store_probe.get("actionable_missing_codes")),
+            has_actionable_missing=bool(store_actionable),
+            has_unknown_missing=len(store_tracked) > len(store_actionable),
             auto_state=track_auto_state,
         )
         created, track = await asyncio.to_thread(
@@ -4970,9 +4993,98 @@ class BotApp:
 
         # Route based on preserved intent.
         if full_series:
-            # TODO(Phase B): route to full-series confirmation screen.
-            query = f"{canonical_name} COMPLETE SERIES"
-        elif full_season:
+            try:
+                await q.answer()
+            except Exception:
+                pass
+            show_id = int(picked.get("id") or 0)
+            year = picked.get("year")
+            # Show the loading indicator on the current UI message.
+            await self._render_tv_ui(
+                user_id,
+                q.message,
+                tv_flow,
+                text_mod.full_series_loading_text(canonical_name),
+                reply_markup=None,
+                current_ui_message=q.message,
+            )
+            try:
+                bundle = await asyncio.to_thread(self.tvmeta.get_show_bundle, show_id)
+            except Exception as exc:
+                LOG.warning("full_series bundle fetch failed for %r: %s", canonical_name, exc)
+                await self._render_tv_ui(
+                    user_id,
+                    q.message,
+                    tv_flow,
+                    text_mod.full_series_bundle_error_text(canonical_name),
+                    reply_markup=InlineKeyboardMarkup(
+                        [
+                            [InlineKeyboardButton("🔎 Try raw search", callback_data="fsd:fallback")],
+                            [InlineKeyboardButton("🏠 Home", callback_data="nav:home")],
+                        ]
+                    ),
+                    current_ui_message=q.message,
+                )
+                tv_flow["stage"] = "await_fsd_fallback"
+                tv_flow["show_title"] = canonical_name
+                self._set_flow(user_id, tv_flow)
+                return
+            try:
+                present, _src, _deg = await asyncio.to_thread(
+                    schedule_handler.schedule_existing_codes,
+                    self._ctx,
+                    canonical_name,
+                    year,
+                )
+            except Exception:
+                present = set()
+            episodes = list(bundle.get("episodes") or [])
+            total_episodes = len(episodes)
+            in_plex = sum(1 for ep in episodes if str(ep.get("code") or "") in present)
+            to_download = max(0, total_episodes - in_plex)
+            available_seasons = list(bundle.get("available_seasons") or [])
+            total_seasons = len(available_seasons)
+            air_years: list[int] = []
+            for ep in episodes:
+                ad = str(ep.get("airdate") or "")
+                if len(ad) >= 4 and ad[:4].isdigit():
+                    try:
+                        air_years.append(int(ad[:4]))
+                    except ValueError:
+                        pass
+            year_start = min(air_years) if air_years else (int(year) if year else None)
+            year_end = max(air_years) if air_years else year_start
+            tv_flow.update(
+                {
+                    "stage": "await_fsd_confirm",
+                    "show_bundle": bundle,
+                    "show_info": picked,
+                    "show_title": canonical_name,
+                    "show_year": year,
+                    "present_codes": sorted(present),
+                    "full_series_to_download": int(to_download),
+                }
+            )
+            self._set_flow(user_id, tv_flow)
+            await self._render_tv_ui(
+                user_id,
+                q.message,
+                tv_flow,
+                text_mod.full_series_confirm_text(
+                    show_name=canonical_name,
+                    network=str(picked.get("network") or picked.get("country") or ""),
+                    year_start=year_start,
+                    year_end=year_end,
+                    total_seasons=total_seasons,
+                    total_episodes=total_episodes,
+                    in_plex=in_plex,
+                    to_download=to_download,
+                ),
+                reply_markup=kb_mod.full_series_confirm_keyboard(to_download),
+                current_ui_message=q.message,
+            )
+            return
+        if full_season:
             query = self._build_tv_query(canonical_name, season, None)
         else:
             query = self._build_tv_query(canonical_name, season, episode)
@@ -4989,6 +5101,116 @@ class BotApp:
             nav_user_id=user_id,
             current_tv_ui_message=q.message,
         )
+
+    async def _on_cb_fsd(self, *, data: str, q: Any, user_id: int) -> None:
+        """Handle ``fsd:*`` — Full Series Download confirm / cancel / fallback."""
+        suffix = data.split(":", 1)[1] if ":" in data else ""
+        if suffix == "confirm":
+            flow = self._get_flow(user_id)
+            if not flow or flow.get("stage") != "await_fsd_confirm":
+                await q.answer("Selection expired", show_alert=True)
+                return
+            bundle = dict(flow.get("show_bundle") or {})
+            show_name = str(flow.get("show_title") or "")
+            year = flow.get("show_year")
+            if not bundle or not show_name:
+                await q.answer("Bundle missing", show_alert=True)
+                return
+            try:
+                await q.answer()
+            except Exception:
+                pass
+            # Initial status render so the user gets immediate feedback.
+            flow["stage"] = "fsd_downloading"
+            self._set_flow(user_id, flow)
+            try:
+                await q.message.edit_text(
+                    text_mod.full_series_status_text(
+                        full_series_handler.FullSeriesState(
+                            show_name=show_name,
+                            total_seasons=len(list(bundle.get("available_seasons") or [])),
+                            total_episodes=len(list(bundle.get("episodes") or [])),
+                        )
+                    ),
+                    parse_mode="HTML",
+                    reply_markup=kb_mod.full_series_progress_keyboard(),
+                    disable_web_page_preview=True,
+                )
+            except Exception:
+                pass
+            cancelled_event = asyncio.Event()
+            chat_id = int(q.message.chat_id)
+            status_message = q.message
+
+            async def _do_add_fn(uid: int, search_id: str, idx: int, media_type: str) -> Any:
+                return await download_handler.do_add(self._ctx, uid, search_id, idx, media_type)
+
+            task = asyncio.create_task(
+                full_series_handler.run_full_series_download(
+                    self._ctx,
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    show_bundle=bundle,
+                    show_name=show_name,
+                    year=int(year) if year else None,
+                    status_message=status_message,
+                    cancelled=cancelled_event,
+                    do_add_fn=_do_add_fn,
+                )
+            )
+            self._full_series_tasks[user_id] = {
+                "task": task,
+                "cancelled": cancelled_event,
+            }
+
+            def _on_done(_t: asyncio.Task[Any]) -> None:
+                self._full_series_tasks.pop(user_id, None)
+
+            task.add_done_callback(_on_done)
+            return
+
+        if suffix == "cancel":
+            entry = self._full_series_tasks.get(user_id)
+            if not entry:
+                await q.answer("No active full-series download", show_alert=True)
+                return
+            cancelled_event = entry.get("cancelled")
+            if cancelled_event is not None:
+                cancelled_event.set()
+            try:
+                await q.answer("Cancelling…")
+            except Exception:
+                pass
+            return
+
+        if suffix == "fallback":
+            flow = self._get_flow(user_id)
+            show_name = str((flow or {}).get("show_title") or "").strip()
+            tv_flow = {
+                "mode": "tv",
+                "stage": "done",
+                "show_title": show_name,
+                "full_series": True,
+            }
+            self._clear_flow(user_id)
+            try:
+                await q.answer()
+            except Exception:
+                pass
+            query = f"{show_name} COMPLETE SERIES" if show_name else "COMPLETE SERIES"
+            await self._run_search(
+                query=query,
+                media_hint="tv",
+                tv_flow=tv_flow,
+                nav_user_id=user_id,
+                current_tv_ui_message=q.message,
+            )
+            return
+
+        try:
+            await q.answer()
+        except Exception:
+            pass
 
     async def _on_cb_movie_pick(self, *, data: str, q: Any, user_id: int) -> None:
         """Handle ``moviepick:{index}`` — user picked a TMDB movie from the picker."""

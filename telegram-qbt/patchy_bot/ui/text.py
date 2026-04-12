@@ -49,9 +49,8 @@ def tv_track_line(track: dict) -> str:
     next_air_ts = int(track.get("next_air_ts") or probe.get("next_air_ts") or 0)
     if next_air_ts > 0:
         details.append(f"next {_relative_time(next_air_ts)}")
-    next_check_at = int(track.get("next_check_at") or 0)
-    if next_check_at > 0:
-        details.append(f"check {_relative_time(next_check_at)}")
+    elif enabled is not None and enabled and (actionable > 0 or unreleased > 0):
+        details.append("next: unknown")
     if probe.get("metadata_stale"):
         details.append("\u26a0\ufe0f stale data")
     detail_line = " \u00b7 ".join(details[:3])
@@ -479,6 +478,198 @@ def movie_picker_text(results: list[dict[str, Any]]) -> str:
 
     lines.append("<i>Tap a movie to continue.</i>")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Full Series Download (Phase B) — text builders
+# ---------------------------------------------------------------------------
+
+
+def full_series_loading_text(show_name: str) -> str:
+    """Loading indicator shown while bundle + inventory are being fetched."""
+    return f"⏳ Loading <b>{_h(show_name)}</b> metadata…"
+
+
+def full_series_bundle_error_text(show_name: str) -> str:
+    """Error shown when the TVMaze bundle fetch fails."""
+    return (
+        f"<b>⚠️ Couldn't load metadata for {_h(show_name)}</b>\n\n"
+        "<i>The TVMaze lookup failed, so the full-series flow can't continue.\n"
+        "You can try a raw search instead.</i>"
+    )
+
+
+def full_series_confirm_text(
+    show_name: str,
+    network: str | None,
+    year_start: int | None,
+    year_end: int | None,
+    total_seasons: int,
+    total_episodes: int,
+    in_plex: int,
+    to_download: int,
+) -> str:
+    """Render the full-series confirmation screen."""
+    network_str = str(network or "Unknown network")
+    if year_start and year_end and year_start != year_end:
+        year_line = f"{year_start}\u2013{year_end}"
+    elif year_start:
+        year_line = str(year_start)
+    else:
+        year_line = "year unknown"
+    return (
+        "<b>📦 Full Series Download</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"<b>{_h(show_name)}</b>\n"
+        f"{_h(network_str)} · {_h(year_line)}\n"
+        f"{int(total_seasons)} seasons · {int(total_episodes)} episodes\n"
+        f"✅ {int(in_plex)} episodes already in Plex\n"
+        f"{int(to_download)} episodes to download\n\n"
+        "<i>Season packs will be attempted first.\n"
+        "Individual episodes used as fallback.\n"
+        "Downloads are sequential — one at a time.</i>"
+    )
+
+
+def _fs_season_summary_line(entry: dict) -> str:
+    season = int(entry.get("season") or 0)
+    method = str(entry.get("method") or "")
+    reason = str(entry.get("reason") or "")
+    count = int(entry.get("count") or 0)
+    if entry.get("_status") == "completed":
+        if method == "pack":
+            return f"✅ Season {season} · pack ({count} eps)"
+        return f"✅ Season {season} · individual ({count} eps)"
+    if entry.get("_status") == "failed":
+        return f"⚠️ Season {season} · {reason or 'failed'}"
+    if entry.get("_status") == "skipped":
+        if reason == "already_in_plex":
+            return f"✅ Season {season} · already in Plex"
+        if reason == "cancelled":
+            return f"⏸ Season {season} · cancelled"
+        return f"⏸ Season {season} · {reason or 'skipped'}"
+    return f"⏸ Season {season}"
+
+
+def _fs_progress_line(state: object) -> str:
+    # Local import to avoid circular reference (handlers/download imports ui/text too).
+    from ..handlers.download import progress_bar
+
+    pct = float(getattr(state, "current_progress_pct", 0.0) or 0.0)
+    bar = progress_bar(pct, width=18)
+    eta = getattr(state, "current_eta_s", None)
+    eta_str = _format_eta(eta)
+    return f"<code>{bar}</code> {pct:5.1f}%  ETA {eta_str}"
+
+
+def _format_eta(eta_s: int | None) -> str:
+    if eta_s is None:
+        return "—"
+    try:
+        s = int(eta_s)
+    except (TypeError, ValueError):
+        return "—"
+    if s <= 0 or s >= 8_640_000:
+        return "—"
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    h = s // 3600
+    m = (s % 3600) // 60
+    return f"{h}h {m}m"
+
+
+def full_series_status_text(state: object) -> str:
+    """Render the live status message for a full-series download.
+
+    ``state`` is a FullSeriesState instance from handlers.full_series, but we
+    accept ``object`` to avoid a circular import at module load.
+    """
+    show_name = str(getattr(state, "show_name", "") or "Unknown")
+    total_seasons = int(getattr(state, "total_seasons", 0) or 0)
+    completed = list(getattr(state, "completed_seasons", []) or [])
+    failed = list(getattr(state, "failed_seasons", []) or [])
+    skipped = list(getattr(state, "skipped_seasons", []) or [])
+    current_season = getattr(state, "current_season", None)
+    current_name = str(getattr(state, "current_torrent_name", "") or "")
+
+    lines: list[str] = [
+        "<b>📦 Full Series Download</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "",
+        f"<b>{_h(show_name)}</b>",
+        "",
+    ]
+
+    # Each entry gets a status tag so the shared formatter can render it.
+    entries: list[dict] = []
+    for e in completed:
+        entries.append({**e, "_status": "completed"})
+    for e in failed:
+        entries.append({**e, "_status": "failed"})
+    for e in skipped:
+        entries.append({**e, "_status": "skipped"})
+    # Sort by season ascending.
+    entries.sort(key=lambda x: int(x.get("season") or 0))
+    for entry in entries:
+        lines.append(_fs_season_summary_line(entry))
+
+    if current_season is not None:
+        lines.append("")
+        lines.append(f"⏳ Season {int(current_season)} · downloading")
+        if current_name:
+            lines.append(f"<i>{_h(current_name)}</i>")
+        lines.append(_fs_progress_line(state))
+
+    # Waiting seasons (in total_seasons but not yet started / completed / failed).
+    seen_seasons = {int(e.get("season") or 0) for e in completed + failed + skipped}
+    if current_season is not None:
+        seen_seasons.add(int(current_season))
+    waiting = [s for s in range(1, total_seasons + 1) if s not in seen_seasons]
+    if waiting:
+        lines.append("")
+        for s in waiting:
+            lines.append(f"⏸ Season {s} · waiting")
+
+    return "\n".join(lines)
+
+
+def full_series_complete_text(state: object) -> str:
+    """Final summary shown when the full-series run finishes."""
+    show_name = str(getattr(state, "show_name", "") or "Unknown")
+    completed = list(getattr(state, "completed_seasons", []) or [])
+    failed = list(getattr(state, "failed_seasons", []) or [])
+    skipped = list(getattr(state, "skipped_seasons", []) or [])
+
+    total_eps = sum(int(e.get("count") or 0) for e in completed)
+    lines = [
+        "<b>✅ Full Series Complete</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "",
+        f"<b>{_h(show_name)}</b>",
+        "",
+        f"Downloaded {len(completed)} seasons · {total_eps} episodes",
+    ]
+    if failed:
+        lines.append(f"⚠️ {len(failed)} season(s) failed")
+    if skipped:
+        lines.append(f"⏸ {len(skipped)} season(s) skipped")
+    return "\n".join(lines)
+
+
+def full_series_cancelled_text(state: object) -> str:
+    """Summary shown when the user cancels a full-series run."""
+    show_name = str(getattr(state, "show_name", "") or "Unknown")
+    completed = list(getattr(state, "completed_seasons", []) or [])
+    skipped = list(getattr(state, "skipped_seasons", []) or [])
+    return (
+        "<b>🛑 Full Series Cancelled</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"<b>{_h(show_name)}</b>\n\n"
+        f"Completed {len(completed)} seasons before cancel.\n"
+        f"Remaining {len(skipped)} seasons skipped."
+    )
 
 
 def help_text() -> str:

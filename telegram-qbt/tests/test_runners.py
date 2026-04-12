@@ -593,7 +593,14 @@ class _BatchDummyBot:
     async def _schedule_notify_missing(self, track: dict, probe: dict) -> None:
         pass
 
-    def _schedule_next_check_at(self, next_air_ts: Any, *, has_actionable_missing: bool, auto_state: dict) -> int:
+    def _schedule_next_check_at(
+        self,
+        next_air_ts: Any,
+        *,
+        has_actionable_missing: bool,
+        has_unknown_missing: bool = False,
+        auto_state: dict,
+    ) -> int:
         return 9999
 
     def _schedule_retry_interval_s(self) -> int:
