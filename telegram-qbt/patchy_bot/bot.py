@@ -342,6 +342,17 @@ class BotApp:
         for task in self._ctx.background_tasks:
             collect(task)
 
+        # Signal in-flight full-series engines so their finally-block cleanup
+        # runs (deletes the current torrent) before the task is cancelled.
+        for entry in list(self._full_series_tasks.values()):
+            ev = entry.get("cancelled")
+            if ev is not None:
+                try:
+                    ev.set()
+                except Exception:
+                    pass
+            collect(entry.get("task"))
+
         for task in tasks:
             task.cancel()
         if tasks:
@@ -353,6 +364,7 @@ class BotApp:
         self.batch_monitor_messages.clear()
         self.batch_monitor_data.clear()
         self.command_center_refresh_tasks.clear()
+        self._full_series_tasks.clear()
         self._ctx.background_tasks.clear()
 
         # Close HTTP session pools to release file descriptors cleanly
@@ -5106,6 +5118,15 @@ class BotApp:
         """Handle ``fsd:*`` — Full Series Download confirm / cancel / fallback."""
         suffix = data.split(":", 1)[1] if ":" in data else ""
         if suffix == "confirm":
+            # Double-tap guard: reject confirm while a task is already running
+            # for this user. Without this, a second create_task would overwrite
+            # _full_series_tasks[user_id] and orphan the prior cancel handle.
+            existing = self._full_series_tasks.get(user_id)
+            if existing:
+                prior_task = existing.get("task")
+                if prior_task is not None and not prior_task.done():
+                    await q.answer("Already running", show_alert=False)
+                    return
             flow = self._get_flow(user_id)
             if not flow or flow.get("stage") != "await_fsd_confirm":
                 await q.answer("Selection expired", show_alert=True)

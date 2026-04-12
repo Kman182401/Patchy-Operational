@@ -5,5 +5,22 @@
   "foldHeading": true,
   "foldIndent": true,
   "showFrontmatter": true,
-  "defaultViewMode": "preview"
+  "defaultViewMode": "preview",
+  "mobileToolbarCommands": [
+    "editor:undo",
+    "editor:redo",
+    "editor:attach-file",
+    "editor:set-heading",
+    "editor:toggle-bold",
+    "editor:toggle-italics",
+    "editor:toggle-strikethrough",
+    "editor:toggle-highlight",
+    "editor:insert-link",
+    "editor:toggle-bullet-list",
+    "editor:toggle-numbered-list",
+    "editor:toggle-checklist-status",
+    "editor:indent-list",
+    "editor:unindent-list",
+    "editor:configure-toolbar"
+  ]
 }

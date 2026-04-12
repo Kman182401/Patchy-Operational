@@ -588,6 +588,14 @@ def full_series_status_text(state: object) -> str:
     """
     show_name = str(getattr(state, "show_name", "") or "Unknown")
     total_seasons = int(getattr(state, "total_seasons", 0) or 0)
+    raw_available = list(getattr(state, "available_seasons", []) or [])
+    try:
+        available_seasons = sorted({int(s) for s in raw_available if int(s) > 0})
+    except (TypeError, ValueError):
+        available_seasons = []
+    if not available_seasons and total_seasons > 0:
+        # Backwards-compat: older state objects may not expose the list.
+        available_seasons = list(range(1, total_seasons + 1))
     completed = list(getattr(state, "completed_seasons", []) or [])
     failed = list(getattr(state, "failed_seasons", []) or [])
     skipped = list(getattr(state, "skipped_seasons", []) or [])
@@ -622,11 +630,11 @@ def full_series_status_text(state: object) -> str:
             lines.append(f"<i>{_h(current_name)}</i>")
         lines.append(_fs_progress_line(state))
 
-    # Waiting seasons (in total_seasons but not yet started / completed / failed).
+    # Waiting seasons (in available_seasons but not yet started / completed / failed).
     seen_seasons = {int(e.get("season") or 0) for e in completed + failed + skipped}
     if current_season is not None:
         seen_seasons.add(int(current_season))
-    waiting = [s for s in range(1, total_seasons + 1) if s not in seen_seasons]
+    waiting = [s for s in available_seasons if s not in seen_seasons]
     if waiting:
         lines.append("")
         for s in waiting:

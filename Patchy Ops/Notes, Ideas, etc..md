@@ -1,0 +1,4 @@
+- **Main Overall Goal
+	- To create a production grade Patchy system that will have a simple and easy setup process
+		-*With a version that will run on a Pi 4 (2GB/4GB) and a version that can run on a users PC/laptop
+- 

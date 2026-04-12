@@ -28,7 +28,6 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 from ..path_safety import PathSafetyError, safe_delete_file
 from ..types import HandlerContext
@@ -55,6 +54,7 @@ class FullSeriesState:
     show_name: str
     total_seasons: int
     total_episodes: int
+    available_seasons: list[int] = field(default_factory=list)
     completed_seasons: list[dict[str, Any]] = field(default_factory=list)
     failed_seasons: list[dict[str, Any]] = field(default_factory=list)
     skipped_seasons: list[dict[str, Any]] = field(default_factory=list)
@@ -160,13 +160,29 @@ def _delete_partial_season_files(
         return []
 
     want_norm = normalize_title(show_name)
+    want_tokens = want_norm.split() if want_norm else []
     season_prefix = f"S{int(season):02d}E"
     deleted: list[str] = []
+
+    def _dir_matches_show(dir_name: str) -> bool:
+        if not want_tokens:
+            return False
+        dir_tokens = normalize_title(dir_name).split()
+        if len(dir_tokens) < len(want_tokens):
+            return False
+        if dir_tokens[: len(want_tokens)] != want_tokens:
+            return False
+        # Exact match, or followed by a 4-digit year disambiguator (e.g.
+        # "Lost" should match "Lost 2004" but not "Lost World").
+        if len(dir_tokens) == len(want_tokens):
+            return True
+        next_token = dir_tokens[len(want_tokens)]
+        return next_token.isdigit() and len(next_token) == 4
 
     for entry in os.scandir(str(base)):
         if not entry.is_dir(follow_symlinks=False):
             continue
-        if want_norm and want_norm not in normalize_title(entry.name):
+        if not _dir_matches_show(entry.name):
             continue
         for dirpath, dirnames, filenames in os.walk(entry.path, topdown=True, followlinks=False):
             # Do not descend into symlinked directories.
@@ -238,21 +254,29 @@ async def _wait_for_codes(
     """Poll ``schedule_existing_codes`` until ``required`` ⊆ present, or timeout.
 
     Returns True on success, False on timeout or cancellation.
+
+    Single-loop design: every ``QBT_POLL_INTERVAL_S`` tick refreshes qBT
+    progress and re-renders the status message; every ``PLEX_POLL_INTERVAL_S``
+    elapsed (rounded to the tick) we re-check Plex for the required codes.
+    Cancellation is checked both before any I/O and after each sleep.
     """
     elapsed = 0
+    since_plex_check = PLEX_POLL_INTERVAL_S  # force a check on the first iteration
     while elapsed < timeout_s:
         if cancelled.is_set():
             return False
-        try:
-            present, _source, _degraded = await asyncio.to_thread(
-                schedule_handler.schedule_existing_codes, ctx, show_name, year
-            )
-        except Exception:
-            present = set()
-        if required.issubset(present):
-            return True
 
-        # Refresh progress so the status message stays live.
+        if since_plex_check >= PLEX_POLL_INTERVAL_S:
+            since_plex_check = 0
+            try:
+                present, _source, _degraded = await asyncio.to_thread(
+                    schedule_handler.schedule_existing_codes, ctx, show_name, year
+                )
+            except Exception:
+                present = set()
+            if required.issubset(present):
+                return True
+
         await _refresh_state_from_qbt(ctx, state)
         await _render_status(
             status_message,
@@ -260,23 +284,11 @@ async def _wait_for_codes(
             kb_mod.full_series_progress_keyboard(),
         )
 
-        await asyncio.sleep(PLEX_POLL_INTERVAL_S)
-        elapsed += PLEX_POLL_INTERVAL_S
-
-        # In between Plex polls, refresh qBT progress more frequently for UX.
-        for _ in range(PLEX_POLL_INTERVAL_S // QBT_POLL_INTERVAL_S):
-            if cancelled.is_set():
-                return False
-            await _refresh_state_from_qbt(ctx, state)
-            await _render_status(
-                status_message,
-                text_mod.full_series_status_text(state),
-                kb_mod.full_series_progress_keyboard(),
-            )
-            await asyncio.sleep(QBT_POLL_INTERVAL_S)
-            elapsed += QBT_POLL_INTERVAL_S
-            if elapsed >= timeout_s:
-                break
+        await asyncio.sleep(QBT_POLL_INTERVAL_S)
+        if cancelled.is_set():
+            return False
+        elapsed += QBT_POLL_INTERVAL_S
+        since_plex_check += QBT_POLL_INTERVAL_S
     return False
 
 
@@ -584,6 +596,7 @@ async def run_full_series_download(
         show_name=show_name,
         total_seasons=len(available_seasons),
         total_episodes=total_episodes,
+        available_seasons=list(available_seasons),
     )
 
     season_timeout_s = int(getattr(ctx.cfg, "full_series_season_timeout_s", DEFAULT_SEASON_TIMEOUT_S))
@@ -595,91 +608,113 @@ async def run_full_series_download(
         kb_mod.full_series_progress_keyboard(),
     )
 
-    for season in available_seasons:
-        if cancelled.is_set():
-            break
+    engine_exc: BaseException | None = None
+    try:
+        for season in available_seasons:
+            if cancelled.is_set():
+                break
 
-        state.current_season = season
-        state.current_torrent_hash = None
-        state.current_torrent_name = None
-        state.current_progress_pct = 0.0
-        state.current_eta_s = None
+            state.current_season = season
+            state.current_torrent_hash = None
+            state.current_torrent_name = None
+            state.current_progress_pct = 0.0
+            state.current_eta_s = None
 
-        try:
-            present, _source, _degraded = await asyncio.to_thread(
-                schedule_handler.schedule_existing_codes, ctx, show_name, year
-            )
-        except Exception:
-            present = set()
+            try:
+                present, _source, _degraded = await asyncio.to_thread(
+                    schedule_handler.schedule_existing_codes, ctx, show_name, year
+                )
+            except Exception:
+                present = set()
 
-        season_codes = _season_codes_from_bundle(show_bundle, season)
-        if not season_codes:
-            state.skipped_seasons.append({"season": season, "reason": "empty"})
-            continue
+            season_codes = _season_codes_from_bundle(show_bundle, season)
+            if not season_codes:
+                state.skipped_seasons.append({"season": season, "reason": "empty"})
+                continue
 
-        have_in_season = season_codes & present
-        missing_in_season = season_codes - present
+            have_in_season = season_codes & present
+            missing_in_season = season_codes - present
 
-        if not missing_in_season:
-            state.skipped_seasons.append({"season": season, "reason": "already_in_plex"})
-            state.current_season = None
-            await _render_status(
-                status_message,
-                text_mod.full_series_status_text(state),
-                kb_mod.full_series_progress_keyboard(),
-            )
-            continue
+            if not missing_in_season:
+                state.skipped_seasons.append({"season": season, "reason": "already_in_plex"})
+                state.current_season = None
+                await _render_status(
+                    status_message,
+                    text_mod.full_series_status_text(state),
+                    kb_mod.full_series_progress_keyboard(),
+                )
+                continue
 
-        has_partial = bool(have_in_season)
+            has_partial = bool(have_in_season)
 
-        pack_ok = await _drive_season_pack(
-            ctx,
-            user_id=user_id,
-            show_name=show_name,
-            year=year,
-            season=season,
-            season_codes=season_codes,
-            missing_in_season=missing_in_season,
-            has_partial=has_partial,
-            state=state,
-            status_message=status_message,
-            cancelled=cancelled,
-            do_add_fn=do_add_fn,
-            delete_fn=delete_fn,
-            season_timeout_s=season_timeout_s,
-        )
-
-        if cancelled.is_set():
-            break
-
-        if not pack_ok and not any(e.get("season") == season for e in state.failed_seasons):
-            # No pack — fall back to individual episodes.
-            await _drive_season_individual(
+            pack_ok = await _drive_season_pack(
                 ctx,
                 user_id=user_id,
                 show_name=show_name,
                 year=year,
                 season=season,
+                season_codes=season_codes,
                 missing_in_season=missing_in_season,
+                has_partial=has_partial,
                 state=state,
                 status_message=status_message,
                 cancelled=cancelled,
                 do_add_fn=do_add_fn,
-                episode_timeout_s=episode_timeout_s,
+                delete_fn=delete_fn,
+                season_timeout_s=season_timeout_s,
             )
 
-        state.current_season = None
-        state.current_torrent_hash = None
-        state.current_torrent_name = None
-        await _render_status(
-            status_message,
-            text_mod.full_series_status_text(state),
-            kb_mod.full_series_progress_keyboard(),
-        )
+            if cancelled.is_set():
+                break
+
+            # Structural failures (bad cleanup guard, do_add rejection) mean
+            # the individual path can't help either. Timeouts and cleanup IO
+            # errors are recoverable — retry per-episode.
+            structural = {"path_safety_blocked", "add_failed"}
+            season_fail = next(
+                (e for e in state.failed_seasons if e.get("season") == season),
+                None,
+            )
+            should_fallback = not pack_ok and (season_fail is None or season_fail.get("reason") not in structural)
+            if should_fallback:
+                if season_fail is not None:
+                    state.failed_seasons.remove(season_fail)
+                await _drive_season_individual(
+                    ctx,
+                    user_id=user_id,
+                    show_name=show_name,
+                    year=year,
+                    season=season,
+                    missing_in_season=missing_in_season,
+                    state=state,
+                    status_message=status_message,
+                    cancelled=cancelled,
+                    do_add_fn=do_add_fn,
+                    episode_timeout_s=episode_timeout_s,
+                )
+
+            state.current_season = None
+            state.current_torrent_hash = None
+            state.current_torrent_name = None
+            await _render_status(
+                status_message,
+                text_mod.full_series_status_text(state),
+                kb_mod.full_series_progress_keyboard(),
+            )
+    except BaseException as exc:
+        engine_exc = exc
+        raise
+    finally:
+        # Always delete the in-flight torrent if we're exiting abnormally
+        # (cancel OR uncaught exception). Idempotent — no-op if no hash.
+        if (cancelled.is_set() or engine_exc is not None) and state.current_torrent_hash:
+            try:
+                await _cancel_cleanup(ctx, state)
+            except Exception:
+                LOG.warning("full_series: finally cleanup failed", exc_info=True)
 
     was_cancelled = cancelled.is_set()
     if was_cancelled:
-        await _cancel_cleanup(ctx, state)
         # Mark unfinished seasons as skipped (cancelled).
         seen = {
             int(e.get("season") or 0) for e in state.completed_seasons + state.failed_seasons + state.skipped_seasons
@@ -705,9 +740,3 @@ async def run_full_series_download(
         )
 
     return FullSeriesResult(state=state, cancelled=was_cancelled)
-
-
-# Re-export a small ID generator so bot.py can get a unique search_id suffix
-# without pulling uuid itself.
-def fresh_search_id_suffix() -> str:
-    return uuid4().hex

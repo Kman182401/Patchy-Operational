@@ -185,6 +185,9 @@
   },
   "active": "d0538726ebfd62f7",
   "lastOpenFiles": [
+    "Notes, Ideas, etc..md",
+    "Notes.md",
+    "Untitled.md",
     "05-Changelog/2026-04-completed.md.tmp.4059269.1775962380179",
     "04-Ideas/jellyfin-emby-abstraction.md.tmp.4059269.1775962367859",
     "03-Reference/Preferences.md.tmp.4059269.1775962352984",
@@ -195,7 +198,6 @@
     "03-Reference/Coding Conventions.md.tmp.4059269.1775962306647",
     "03-Reference/Coding Conventions.md.tmp.4059269.1775962299842",
     "01-System/System Overview.md.tmp.4059269.1775962281861",
-    "01-System/State & Flows.md.tmp.4059269.1775962260277",
     "04-Ideas/Ideas Index.md",
     "03-Reference/Preferences.md",
     "00-Home/Dashboard.md",
@@ -218,8 +220,6 @@
     "02-Work/Todos/bot-phase2-decomposition.md",
     "02-Work/Work Board.md",
     "01-System/System Overview.md",
-    "01-System/State & Flows.md",
-    "01-System/SQLite Tables.md",
-    "01-System/Modules.md"
+    "01-System/State & Flows.md"
   ]
 }
