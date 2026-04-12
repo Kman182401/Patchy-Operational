@@ -494,7 +494,8 @@ def render_page(
             "mp3": "MP3",
         }
         for a in (q_data.get("audio") or []) if q_data else []:
-            abbr = audio_map.get(a.lower(), a)
+            a_str = str(a)
+            abbr = audio_map.get(a_str.lower(), a_str)
             if abbr not in parts:
                 parts.append(abbr)
         grp = str(q_data.get("group") or "").strip() if q_data else ""
@@ -510,16 +511,18 @@ def render_page(
         lines.append("")
 
     # Show trash-source legend if any result on this page has the ⚠️ flag
-    if any(
-        bool(
-            (
-                json.loads(r.get("quality_json"))
-                if isinstance(r.get("quality_json"), str)
-                else r.get("quality_json") or {}
-            ).get("trash")
-        )
-        for r in view
-    ):
+    def _is_trash_row(r: dict[str, Any]) -> bool:
+        raw = r.get("quality_json")
+        if isinstance(raw, str):
+            try:
+                data = json.loads(raw)
+            except Exception:
+                data = {}
+        else:
+            data = raw or {}
+        return bool(data.get("trash")) if isinstance(data, dict) else False
+
+    if any(_is_trash_row(r) for r in view):
         lines.append(
             "<i>⚠️ = TeleSync / CAM source — recorded in a theater, not a digital release. "
             "Expect lower picture and audio quality.</i>"

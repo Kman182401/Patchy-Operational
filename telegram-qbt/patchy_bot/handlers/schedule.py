@@ -260,7 +260,7 @@ def schedule_get_show_bundle(
             backoff_until=now_ts() + backoff_s,
         )
         stale_bundle = schedule_bundle_from_cache(cached, allow_stale=allow_stale)
-        if stale_bundle is not None:
+        if stale_bundle is not None and cached is not None:
             ctx.store.upsert_schedule_show_cache(
                 int(show_id),
                 dict(cached.get("bundle_json") or {}),
@@ -2549,7 +2549,8 @@ async def on_cb_schedule(bot_app: Any, *, data: str, q: Any, user_id: int) -> No
             show = dict(t.get("show_json") or {})
             name = str(show.get("name") or t.get("show_name") or "Unknown")
             season = int(t.get("season") or 1)
-            return f"{name} S{season:02d}"
+            prefix = "\u23f8\ufe0f " if not t.get("enabled") else ""
+            return f"{prefix}{name} S{season:02d}"
 
         def _cb(t: dict) -> str:
             return f"sch:sel:{t['track_id']}"
@@ -3071,7 +3072,8 @@ async def on_cb_movie_schedule(bot_app: Any, *, data: str, q: Any, user_id: int)
             title = str(t.get("title") or "Unknown")
             year = t.get("year")
             year_str = f" ({year})" if year else ""
-            return f"{title}{year_str}"
+            prefix = "\u23f8\ufe0f " if not t.get("enabled", 1) else ""
+            return f"{prefix}{title}{year_str}"
 
         def _cb(t: dict) -> str:
             return f"msch:sel:{t['track_id']}"
@@ -3278,24 +3280,24 @@ async def on_cb_movie_schedule(bot_app: Any, *, data: str, q: Any, user_id: int)
                 f"viewing. Scheduling anyway — auto-download will fire on next runner tick."
             )
 
-        flow = flow or {"mode": "msch_add", "stage": "title"}
-        flow["tmdb_id"] = tmdb_id
-        flow["title"] = title
-        flow["year"] = year
-        flow["release_status"] = release_info.status.value
-        flow["release_date_type"] = "home_release"
-        flow["release_date_ts"] = home_release_ts or now_ts()
-        flow["home_date_is_inferred"] = home_is_inferred
-        flow["theatrical_ts"] = release_info.theatrical_ts
-        flow["digital_ts"] = release_info.digital_ts
-        flow["physical_ts"] = release_info.physical_ts
-        flow["home_release_ts"] = home_release_ts or None
-        flow["stage"] = "confirm_date"
-        bot_app._set_flow(user_id, flow)
+        flow_dict: dict[str, Any] = dict(flow) if flow else {"mode": "msch_add", "stage": "title"}
+        flow_dict["tmdb_id"] = tmdb_id
+        flow_dict["title"] = title
+        flow_dict["year"] = year
+        flow_dict["release_status"] = release_info.status.value
+        flow_dict["release_date_type"] = "home_release"
+        flow_dict["release_date_ts"] = home_release_ts or now_ts()
+        flow_dict["home_date_is_inferred"] = home_is_inferred
+        flow_dict["theatrical_ts"] = release_info.theatrical_ts
+        flow_dict["digital_ts"] = release_info.digital_ts
+        flow_dict["physical_ts"] = release_info.physical_ts
+        flow_dict["home_release_ts"] = home_release_ts or None
+        flow_dict["stage"] = "confirm_date"
+        bot_app._set_flow(user_id, flow_dict)
         await bot_app._render_schedule_ui(
             user_id,
             q.message,
-            flow,
+            flow_dict,
             "\n\n".join([summary, release_line]),
             reply_markup=InlineKeyboardMarkup(
                 [

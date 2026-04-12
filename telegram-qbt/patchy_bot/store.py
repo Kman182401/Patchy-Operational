@@ -496,7 +496,7 @@ class Store:
                 (now_ts(), user_id, torrent_hash, event_type, severity, detail_json, torrent_name),
             )
             conn.commit()
-            return cur.lastrowid
+            return cur.lastrowid or 0
 
     def get_health_events(
         self,

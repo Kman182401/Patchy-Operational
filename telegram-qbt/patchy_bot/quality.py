@@ -180,9 +180,9 @@ def score_torrent(
         TorrentScore with resolution_tier, format_score, is_rejected, and parsed data.
     """
     ov = scoring_overrides or {}
-    hevc_penalty: int = int(ov.get("hevc_1080p_penalty", -50))
+    hevc_penalty: int = int(ov.get("hevc_1080p_penalty", -50))  # type: ignore[arg-type]
     av1_reject: bool = bool(ov.get("av1_reject", True))
-    pack_max_eps: int = int(ov.get("season_pack_max_episodes", 24))
+    pack_max_eps: int = int(ov.get("season_pack_max_episodes", 24))  # type: ignore[arg-type]
     hq_extra: set[str] = set(ov.get("hq_groups_extra", set()))  # type: ignore[arg-type]
     lq_extra: set[str] = set(ov.get("lq_groups_extra", set()))  # type: ignore[arg-type]
     effective_hq = HQ_GROUPS | hq_extra

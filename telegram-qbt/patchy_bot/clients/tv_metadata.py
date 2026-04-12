@@ -163,7 +163,13 @@ class TVMetadataClient:
                     available_seasons.add(int(season))
                 except Exception:
                     pass
-            ep_number = int(number) if isinstance(number, int) or str(number).isdigit() else None
+            ep_number: int | None
+            if isinstance(number, int):
+                ep_number = number
+            elif number is not None and str(number).isdigit():
+                ep_number = int(str(number))
+            else:
+                ep_number = None
             parsed_episodes.append(
                 {
                     "season": season,

@@ -15,7 +15,7 @@ import subprocess
 import threading
 import time
 from datetime import time as dt_time
-from typing import Any
+from typing import Any, cast
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import TelegramError
@@ -211,9 +211,12 @@ class BotApp:
         loop = asyncio.get_running_loop()
         loop.set_default_executor(concurrent.futures.ThreadPoolExecutor(max_workers=8))
 
+        assert self.app is not None and self.app.job_queue is not None
+        job_queue = self.app.job_queue
+
         # Daily database backup at 3:00 AM local time (if BACKUP_DIR is configured)
         if self.cfg.backup_dir:
-            self.app.job_queue.run_daily(
+            job_queue.run_daily(
                 self._backup_job,
                 time=dt_time(3, 0, 0),
                 name="daily-db-backup",
@@ -221,14 +224,14 @@ class BotApp:
             LOG.info("Database backup scheduled daily at 03:00 → %s", self.cfg.backup_dir)
 
         # Daily health event cleanup at 4:00 AM
-        self.app.job_queue.run_daily(
+        job_queue.run_daily(
             self._health_event_cleanup_job,
             time=dt_time(4, 0, 0),
             name="health-event-cleanup",
         )
 
         # Periodic qBittorrent connectivity check (every 5 minutes)
-        self.app.job_queue.run_repeating(
+        job_queue.run_repeating(
             self._qbt_health_check_job,
             interval=300,
             first=300,
@@ -385,7 +388,7 @@ class BotApp:
     # ---------- Routing + storage ----------
 
     def _targets(self) -> dict[str, dict[str, str]]:
-        return _shared.targets(getattr(self, "_ctx", self))
+        return _shared.targets(cast(HandlerContext, getattr(self, "_ctx", self)))
 
     def _normalize_media_choice(self, value: str | None) -> str | None:
         return _shared.normalize_media_choice(value)
@@ -395,16 +398,18 @@ class BotApp:
         return _shared.norm_path(value)
 
     def _qbt_category_aliases(self, primary_category: str, save_path: str) -> set[str]:
-        return _shared.qbt_category_aliases(getattr(self, "_ctx", self), primary_category, save_path)
+        return _shared.qbt_category_aliases(
+            cast(HandlerContext, getattr(self, "_ctx", self)), primary_category, save_path
+        )
 
     def _storage_status(self) -> tuple[bool, str]:
-        return _shared.storage_status(getattr(self, "_ctx", self))
+        return _shared.storage_status(cast(HandlerContext, getattr(self, "_ctx", self)))
 
     def _qbt_transport_status(self) -> tuple[bool, str]:
-        return _shared.qbt_transport_status(getattr(self, "_ctx", self))
+        return _shared.qbt_transport_status(cast(HandlerContext, getattr(self, "_ctx", self)))
 
     def _ensure_media_categories(self) -> tuple[bool, str]:
-        return _shared.ensure_media_categories(getattr(self, "_ctx", self))
+        return _shared.ensure_media_categories(cast(HandlerContext, getattr(self, "_ctx", self)))
 
     # ---------- Access + session flow ----------
 
@@ -467,17 +472,17 @@ class BotApp:
         flow_mod.clear_flow(self._ctx, user_id)
 
     def _remember_nav_ui_message(self, user_id: int, message: Any) -> None:
-        render_mod.remember_nav_ui_message(getattr(self, "_ctx", self), user_id, message)
+        render_mod.remember_nav_ui_message(cast(HandlerContext, getattr(self, "_ctx", self)), user_id, message)
 
     def _track_ephemeral_message(self, user_id: int, message: Any) -> None:
-        render_mod.track_ephemeral_message(getattr(self, "_ctx", self), user_id, message)
+        render_mod.track_ephemeral_message(cast(HandlerContext, getattr(self, "_ctx", self)), user_id, message)
 
     def _cancel_pending_trackers_for_user(self, user_id: int) -> None:
         """Cancel pending tracker tasks for this user so they don't create monitor messages after home cleanup."""
         render_mod.cancel_pending_trackers_for_user(self._ctx, user_id)
 
     async def _cleanup_ephemeral_messages(self, user_id: int, bot: Any) -> None:
-        await render_mod.cleanup_ephemeral_messages(getattr(self, "_ctx", self), user_id, bot)
+        await render_mod.cleanup_ephemeral_messages(cast(HandlerContext, getattr(self, "_ctx", self)), user_id, bot)
 
     async def _strip_old_keyboard(self, bot: Any, chat_id: int, message_id: int) -> None:
         """Remove the inline keyboard from an old message so only one interactive bubble exists.
@@ -497,7 +502,7 @@ class BotApp:
         disable_web_page_preview: bool = True,
         current_ui_message: Any | None = None,
     ) -> Any:
-        ctx = getattr(self, "_ctx", self)
+        ctx = cast(HandlerContext, getattr(self, "_ctx", self))
         return await render_mod.render_nav_ui(
             ctx,
             user_id,
@@ -509,7 +514,9 @@ class BotApp:
         )
 
     def _remember_flow_ui_message(self, user_id: int, flow: dict[str, Any] | None, message: Any, flow_key: str) -> None:
-        render_mod.remember_flow_ui_message(getattr(self, "_ctx", self), user_id, flow, message, flow_key)
+        render_mod.remember_flow_ui_message(
+            cast(HandlerContext, getattr(self, "_ctx", self)), user_id, flow, message, flow_key
+        )
 
     async def _render_flow_ui(
         self,
@@ -523,7 +530,7 @@ class BotApp:
         disable_web_page_preview: bool = True,
         current_ui_message: Any | None = None,
     ) -> Any:
-        ctx = getattr(self, "_ctx", self)
+        ctx = cast(HandlerContext, getattr(self, "_ctx", self))
         return await render_mod.render_flow_ui(
             ctx,
             user_id,
@@ -547,7 +554,7 @@ class BotApp:
         disable_web_page_preview: bool = True,
         current_ui_message: Any | None = None,
     ) -> Any:
-        ctx = getattr(self, "_ctx", self)
+        ctx = cast(HandlerContext, getattr(self, "_ctx", self))
         return await render_mod.render_remove_ui(
             ctx,
             user_id,
@@ -570,7 +577,7 @@ class BotApp:
         disable_web_page_preview: bool = True,
         current_ui_message: Any | None = None,
     ) -> Any:
-        ctx = getattr(self, "_ctx", self)
+        ctx = cast(HandlerContext, getattr(self, "_ctx", self))
         return await render_mod.render_schedule_ui(
             ctx,
             user_id,
@@ -593,7 +600,7 @@ class BotApp:
         disable_web_page_preview: bool = True,
         current_ui_message: Any | None = None,
     ) -> Any:
-        ctx = getattr(self, "_ctx", self)
+        ctx = cast(HandlerContext, getattr(self, "_ctx", self))
         return await render_mod.render_tv_ui(
             ctx,
             user_id,
@@ -628,6 +635,7 @@ class BotApp:
             ):
                 flow.pop("schedule_ui_message_id", None)
                 flow.pop("schedule_ui_chat_id", None)
+            assert self.app is not None
             try:
                 await self.app.bot.delete_message(chat_id=poster_chat_id, message_id=poster_msg_id)
             except Exception:
@@ -657,6 +665,7 @@ class BotApp:
 
         if urlparse(image_url).hostname not in self._POSTER_ALLOWED_HOSTS:
             return False
+        assert self.app is not None
         try:
             # Strip the old schedule UI message so it doesn't linger
             old_chat = int(flow.get("schedule_ui_chat_id") or 0)
@@ -1259,7 +1268,7 @@ class BotApp:
                 backoff_until=now_ts() + backoff_s,
             )
             stale_bundle = self._schedule_bundle_from_cache(cached, allow_stale=allow_stale)
-            if stale_bundle is not None:
+            if stale_bundle is not None and cached is not None:
                 self.store.upsert_schedule_show_cache(
                     int(show_id),
                     dict(cached.get("bundle_json") or {}),
@@ -2851,7 +2860,7 @@ class BotApp:
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         qbt_category_aliases_fn = getattr(self, "_qbt_category_aliases", lambda *_args, **_kwargs: set())
         return await schedule_handler.schedule_refresh_track(
-            getattr(self, "_ctx", self),
+            cast(HandlerContext, getattr(self, "_ctx", self)),
             track,
             allow_notify=allow_notify,
             qbt_category_aliases_fn=qbt_category_aliases_fn,
@@ -3585,6 +3594,7 @@ class BotApp:
                 current_ui_message=current_nav_ui_message,
             )
         else:
+            assert msg is not None
             status_msg = await msg.reply_text(searching_text, parse_mode=_PM)
 
         # --- Theatrical detection (movies only) ---
@@ -3662,7 +3672,7 @@ class BotApp:
                 media_type=_mt,
             )
             filtered = self._deduplicate_results(filtered)
-            ranked = self._sort_rows(filtered, key=sort_key, order=order)
+            ranked = self._sort_rows(filtered, key=sort_key or "seeds", order=order or "desc")
 
             # Task 4: Full Season — filter to season packs only before slicing
             if isinstance(tv_flow, dict) and tv_flow.get("full_season"):
@@ -3884,8 +3894,8 @@ class BotApp:
                 progress = float(t.get("progress", 0.0)) * 100
                 ds = human_size(int(t.get("dlspeed", 0))) + "/s"
                 us = human_size(int(t.get("upspeed", 0))) + "/s"
-                state_txt = self._state_label(t)
-                eta_txt = self._eta_label(t)
+                state_txt = download_handler.state_label(t)
+                eta_txt = download_handler.eta_label(t)
                 lines.append(
                     f"• <code>{_h(name)}</code>\n  {progress:.1f}% | <b>{state_txt}</b> | ↓ <code>{ds}</code> ↑ <code>{us}</code> | ETA <code>{eta_txt}</code>"
                 )
@@ -3923,8 +3933,8 @@ class BotApp:
                     progress = float(t.get("progress", 0.0)) * 100
                     ds = human_size(int(t.get("dlspeed", 0))) + "/s"
                     us = human_size(int(t.get("upspeed", 0))) + "/s"
-                    state_txt = self._state_label(t)
-                    eta_txt = self._eta_label(t)
+                    state_txt = download_handler.state_label(t)
+                    eta_txt = download_handler.eta_label(t)
                     lines.append(
                         f"• <code>{_h(name)}</code>\n  {progress:.1f}% | <b>{state_txt}</b> | ↓ <code>{ds}</code> ↑ <code>{us}</code> | ETA <code>{eta_txt}</code>"
                     )
@@ -4064,7 +4074,7 @@ class BotApp:
 
     async def on_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         msg = update.effective_message
-        if not msg or not msg.text:
+        if not msg or not msg.text or not update.effective_user:
             return
 
         user_id = update.effective_user.id
@@ -4631,7 +4641,7 @@ class BotApp:
         return await download_handler.resolve_hash_by_name(self._ctx, title, category, wait_s)
 
     def _vpn_ready_for_download(self) -> tuple[bool, str]:
-        return _shared.vpn_ready_for_download(getattr(self, "_ctx", self))
+        return _shared.vpn_ready_for_download(cast(HandlerContext, getattr(self, "_ctx", self)))
 
     async def _do_add(self, user_id: int, search_id: str, idx: int, media_choice: str) -> dict[str, Any]:
         return await download_handler.do_add_full(self._ctx, user_id, search_id, idx, media_choice)
@@ -4695,7 +4705,7 @@ class BotApp:
             return
 
         q = update.callback_query
-        if not q or not q.message:
+        if not q or not q.message or not update.effective_user:
             return
 
         data = q.data or ""

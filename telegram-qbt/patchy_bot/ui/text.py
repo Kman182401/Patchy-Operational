@@ -30,7 +30,7 @@ def tv_track_line(track: dict) -> str:
     season = int(track.get("season") or probe.get("season") or 1)
 
     if enabled is not None and not enabled:
-        return f"<b>{_h(name)}</b>\n   <b>S{season} \u00b7 paused</b>"
+        return f"\u23f8\ufe0f <b>{_h(name)}</b>\n   <b>S{season} \u00b7 paused</b>"
 
     actionable = len(probe.get("actionable_missing_codes") or [])
     pending = len(track.get("pending_json") or probe.get("pending_codes") or [])
@@ -66,7 +66,7 @@ def movie_track_line(track: dict) -> str:
     year_str = f" ({year})" if year else ""
 
     if not enabled:
-        return f"\u23f8 <b>{_h(title)}{_h(year_str)}</b>\n   <i>paused</i>"
+        return f"\u23f8\ufe0f <b>{_h(title)}{_h(year_str)}</b>\n   <i>paused</i>"
 
     if status == "downloading":
         status_line = "\u2b07\ufe0f Downloading"
