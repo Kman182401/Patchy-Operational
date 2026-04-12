@@ -1,0 +1,10 @@
+/* Custom [!code] callout for Claude Code Reference sections */
+.callout[data-callout="code"] {
+  --callout-color: 99, 102, 241; /* indigo */
+  --callout-icon: lucide-terminal;
+}
+
+.callout[data-callout="code"] .callout-content {
+  font-family: var(--font-monospace);
+  font-size: 0.85em;
+}

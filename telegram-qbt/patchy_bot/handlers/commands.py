@@ -385,7 +385,7 @@ async def cmd_search(bot: Any, update: Update, context: ContextTypes.DEFAULT_TYP
     raw = " ".join(context.args or [])
     if not raw:
         await msg.reply_text(
-            "Usage: /search <query> [--min-seeds N] [--min-quality 1080] [--limit N] [--sort ...]",
+            "Usage: /search <query> [--min-seeds N] [--sort seeds|size|name|quality] [--order asc|desc]",
             parse_mode=_PM,
         )
         return
@@ -406,10 +406,8 @@ async def cmd_search(bot: Any, update: Update, context: ContextTypes.DEFAULT_TYP
         min_seeds=args.min_seeds,
         min_size=parse_size_to_bytes(args.min_size),
         max_size=parse_size_to_bytes(args.max_size),
-        min_quality=args.min_quality,
         sort_key=args.sort,
         order=args.order,
-        limit=args.limit,
         media_hint="any",
     )
 
@@ -579,26 +577,32 @@ async def cmd_add(bot: Any, update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return
 
-    pending_msg = await msg.reply_text(f"⏳ Adding result #{idx} to {choice.title()}…", parse_mode=_PM)
+    pending_msg = await msg.reply_text(f"\u23f3 Adding result #{idx} to {choice.title()}\u2026", parse_mode=_PM)
     try:
-        out = await bot._do_add(user.id, sid, idx, choice)
-        await pending_msg.edit_text(out["summary"], parse_mode=_PM)
-
-        if out.get("hash"):
-            tracker_msg = await msg.reply_text(
-                "<b>📡 Live Monitor Attached</b>\n<i>Tracking download progress…</i>",
-                reply_markup=bot._stop_download_keyboard(out["hash"]),
-                parse_mode=_PM,
-            )
-            bot._start_progress_tracker(user.id, out["hash"], tracker_msg, out["name"])
-        else:
-            bot._start_pending_progress_tracker(user.id, out["name"], out["category"], msg)
-            await msg.reply_text(
-                "⏳ Waiting for qBittorrent to assign hash… live monitor will auto-attach.", parse_mode=_PM
-            )
-        await msg.reply_text("What's next?", reply_markup=bot._command_center_keyboard(), parse_mode=_PM)
+        result = await download_handler.do_add(bot._ctx, user.id, sid, idx, choice)
     except Exception as e:
         await pending_msg.edit_text(f"Add failed: {_h(str(e))}", parse_mode=_PM)
+        return
+
+    interim_msg = await download_handler.send_download_starting_message(
+        bot._ctx,
+        user.id,
+        pending_msg,
+        result,
+    )
+
+    task = asyncio.create_task(
+        download_handler.do_add_background(
+            bot._ctx,
+            user.id,
+            result,
+            interim_msg,
+        ),
+        name=f"do_add_bg:{user.id}:{result.name[:40]}",
+    )
+    bot._ctx.background_tasks.add(task)
+    task.add_done_callback(bot._ctx.background_tasks.discard)
+    await msg.reply_text("What's next?", reply_markup=bot._command_center_keyboard(), parse_mode=_PM)
 
 
 async def cmd_categories(bot: Any, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -727,8 +731,7 @@ async def cmd_profile(bot: Any, update: Update, context: ContextTypes.DEFAULT_TY
         "━━━━━━━━━━━━━━━━━━━━",
         f"• min_seeds: <code>{d['default_min_seeds']}</code>",
         f"• sort/order: <code>{d['default_sort']} {d['default_order']}</code>",
-        f"• limit: <code>{d['default_limit']}</code>",
-        f"• quality default: <code>{bot.cfg.default_min_quality}p+</code>",
+        f"• quality: <code>1080p preferred</code> (auto-fallback)",
         f"• movies → <code>{_h(bot.cfg.movies_category)}</code> @ <code>{_h(bot.cfg.movies_path)}</code>",
         f"• tv → <code>{_h(bot.cfg.tv_category)}</code> @ <code>{_h(bot.cfg.tv_path)}</code>",
         f"• storage status: <b>{'ready' if ok else 'not ready'}</b> (<code>{_h(reason)}</code>)",
@@ -1013,7 +1016,9 @@ async def on_cb_menu(bot_app: Any, *, data: str, q: Any, user_id: int) -> None:
                 "<i>Example: Severance</i>"
             )
             kb = InlineKeyboardMarkup(bot_app._nav_footer(back_data="nav:home", include_home=False))
-            await bot_app._render_schedule_ui(user_id, q.message, flow, text, reply_markup=kb, current_ui_message=q.message)
+            await bot_app._render_schedule_ui(
+                user_id, q.message, flow, text, reply_markup=kb, current_ui_message=q.message
+            )
         return
 
     if data == "menu:remove":
@@ -1042,8 +1047,7 @@ async def on_cb_menu(bot_app: Any, *, data: str, q: Any, user_id: int) -> None:
             "Current profile:",
             f"\u2022 min_seeds: {d['default_min_seeds']}",
             f"\u2022 sort/order: {d['default_sort']} {d['default_order']}",
-            f"\u2022 limit: {d['default_limit']}",
-            f"\u2022 quality default: {ctx.cfg.default_min_quality}p+",
+            f"\u2022 quality: 1080p preferred (auto-fallback)",
             f"\u2022 movies -> {ctx.cfg.movies_category} @ {ctx.cfg.movies_path}",
             f"\u2022 tv -> {ctx.cfg.tv_category} @ {ctx.cfg.tv_path}",
             f"\u2022 storage status: {'ready' if ok else 'not ready'} ({reason})",

@@ -81,6 +81,10 @@ class HandlerContext:
     active_download_hash: str | None = None  # hash of the currently-downloading torrent
     download_queue_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
+    # ---- Pending scans: torrents added but not yet resumed (shown in CC) ----
+    # Key: hash (lowercase) or torrent name. Value: {"name": str, "added_at": float}
+    pending_scans: dict[str, dict[str, Any]] = field(default_factory=dict)
+
     # ---- Fire-and-forget background tasks (auto-delete notices, etc.) ----
     background_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
 

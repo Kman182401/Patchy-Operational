@@ -89,6 +89,85 @@ async def _wait_for_file_inspection(
     raise RuntimeError("file inspection did not complete before timeout")
 
 
+async def _concurrent_file_scan(
+    ctx: HandlerContext,
+    user_id: int,
+    torrent_hash: str,
+    result: "DoAddResult",
+    interim_msg: Any,
+) -> None:
+    """Run file-list inspection + heuristic scan concurrently with active download.
+
+    If the scan detects suspicious content, pauses the torrent and sends a
+    Keep/Delete prompt as a **new message** (the progress tracker already owns
+    interim_msg).  Otherwise completes silently — ClamAV completion gate is
+    the safety net.
+    """
+    inspection_timeout = (
+        ctx.cfg.file_inspection_timeout_s * 3 if result.is_magnet else ctx.cfg.file_inspection_timeout_s
+    )
+    try:
+        files = await _wait_for_file_inspection(ctx, torrent_hash, timeout_s=inspection_timeout)
+    except Exception as exc:
+        LOG.warning(
+            "Concurrent scan: inspection timeout for %s (magnet=%s): %s",
+            torrent_hash,
+            result.is_magnet,
+            exc,
+        )
+        return  # ClamAV completion gate is the safety net
+
+    malware_scan = scan_download(
+        name=result.name,
+        size_bytes=result.size,
+        quality_tier=quality_tier(result.name),
+        media_type=result.media_type,
+        files=files,
+        uploader=result.uploader,
+    )
+    if not malware_scan.is_blocked:
+        return  # Clean — download continues
+
+    # --- Blocked: pause torrent and prompt user ---
+    try:
+        await asyncio.to_thread(ctx.qbt.pause_torrents, torrent_hash)
+    except Exception:
+        LOG.warning("Failed to pause blocked torrent %s", torrent_hash, exc_info=True)
+    try:
+        ctx.store.log_malware_block(
+            torrent_hash=torrent_hash,
+            torrent_name=result.name,
+            stage="download",
+            reasons=malware_scan.reasons,
+        )
+    except Exception:
+        pass
+    reasons_text = "\n".join(f"\u2022 {r}" for r in malware_scan.reasons)
+    warn_text = (
+        "\u26a0\ufe0f <b>Security Hold</b>\n\n"
+        f"<code>{_h(result.name)}</code>\n\n"
+        f"Suspicious content detected during download:\n{reasons_text}\n\n"
+        "Torrent is <b>paused</b>. Choose an action:"
+    )
+    warn_kb = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("\u2705 Keep & Resume", callback_data=f"mwblock:keep:{torrent_hash}"),
+                InlineKeyboardButton("\U0001f5d1 Delete", callback_data=f"mwblock:delete:{torrent_hash}"),
+            ],
+        ]
+    )
+    # Send as NEW message — progress tracker already owns interim_msg.
+    try:
+        chat_id = getattr(interim_msg, "chat_id", None) or getattr(getattr(interim_msg, "chat", None), "id", None)
+        bot = getattr(interim_msg, "get_bot", lambda: None)()
+        if bot and chat_id:
+            sent = await bot.send_message(chat_id=chat_id, text=warn_text, reply_markup=warn_kb, parse_mode=_PM)
+            track_ephemeral_message(ctx, user_id, sent)
+    except Exception:
+        LOG.warning("Failed to send concurrent scan block alert", exc_info=True)
+
+
 def _sanitize_quarantine_name(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._ -]+", "_", value).strip(" ._")
     return cleaned or "quarantine-item"
@@ -116,6 +195,26 @@ _CLAMD_CACHE_TTL = 60.0
 # Avoids repeating expensive checks when adding multiple episodes in a batch.
 _preflight_cache: dict[str, tuple[Any, float]] = {}
 _PREFLIGHT_CACHE_TTL = 30.0
+
+
+@dataclass(frozen=True, slots=True)
+class DoAddResult:
+    """Fast-phase result from do_add() — returned before hash resolution / inspection."""
+
+    name: str
+    size: int
+    hash: str | None
+    category: str
+    save_path: str
+    url: str
+    is_magnet: bool
+    idx: int
+    target_label: str
+    resp: str
+    media_type: str
+    uploader: str | None
+    inspection_note: str = ""
+    queued: bool = False
 
 
 def _clamd_available() -> bool:
@@ -1699,8 +1798,12 @@ async def do_add(
     search_id: str,
     idx: int,
     media_choice: str,
-) -> dict[str, Any]:
-    """Add a torrent to qBittorrent with pre-flight safety checks."""
+) -> DoAddResult:
+    """Fast phase: pre-flight checks + qbt.add_url.  Returns in ~1-2s.
+
+    The slow work (hash resolution, file inspection, malware scan, queue
+    management) is deferred to :func:`do_add_background`.
+    """
     payload = ctx.store.get_search(user_id, search_id)
     if not payload:
         raise RuntimeError("Search result not found")
@@ -1805,7 +1908,7 @@ async def do_add(
         except Exception:
             pass
         raise RuntimeError(free_reason)
-    # --- Malware / fake-content gate ---
+    # --- Malware / fake-content gate (pre-add, metadata only) ---
     _torrent_name = str(row.get("name") or "")
     _torrent_size = int(row.get("size") or 0)
     _torrent_hash_key = str(row.get("hash") or row.get("fileHash") or _torrent_name)
@@ -1844,37 +1947,260 @@ async def do_add(
     except TimeoutError:
         raise RuntimeError("qBittorrent add_url timed out (15s). The torrent may still be added \u2014 check /active.")
 
+    return DoAddResult(
+        name=_torrent_name,
+        size=_torrent_size,
+        hash=torrent_hash,
+        category=str(target["category"]),
+        save_path=str(target["path"]),
+        url=url,
+        is_magnet=is_magnet,
+        idx=idx,
+        target_label=str(target["label"]),
+        resp=str(resp),
+        media_type=_media_type,
+        uploader=_uploader,
+    )
+
+
+async def send_download_starting_message(
+    ctx: HandlerContext,
+    user_id: int,
+    msg: Any,
+    result: DoAddResult,
+) -> Any:
+    """Send the interim '⬇️ Download Starting' confirmation and return the sent message."""
+    # ETA note based on torrent type
+    if result.hash and not result.is_magnet:
+        eta_note = "\u23f3 Download starting shortly\u2026"
+    elif result.hash and result.is_magnet:
+        eta_note = "\u23f3 Starting download\u2026 magnet metadata may take 10-60s to resolve."
+    elif not result.hash and not result.is_magnet:
+        eta_note = "\u23f3 Resolving torrent hash (~5s)\u2026"
+    else:
+        eta_note = "\u23f3 Resolving magnet link\u2026 metadata may take 10-60s."
+
+    text = (
+        f"\u2b07\ufe0f <b>Download Starting</b>\n"
+        f"<code>{_h(result.name)}</code>\n"
+        f"Library: {_h(result.target_label)} \u00b7 {_h(result.category)}\n\n"
+        f"{eta_note}\n"
+        "\U0001f6e1\ufe0f <i>Security scan runs alongside download \u00b7 "
+        "Full ClamAV scan after completion</i>"
+    )
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("\U0001f3e0 Home", callback_data="nav:home")]])
+    edit_text = getattr(msg, "edit_text", None)
+    if callable(edit_text) and asyncio.iscoroutinefunction(edit_text):
+        await msg.edit_text(text, reply_markup=kb, parse_mode=_PM)
+        sent = msg
+    else:
+        sent = await msg.reply_text(text, reply_markup=kb, parse_mode=_PM)
+    track_ephemeral_message(ctx, user_id, sent)
+    return sent
+
+
+def _clear_pending_scan(ctx: HandlerContext, name: str, torrent_hash: str | None) -> None:
+    """Remove a pending_scans entry by hash or name (best-effort)."""
+    if torrent_hash:
+        ctx.pending_scans.pop(torrent_hash.lower(), None)
+    # Also try by name key (used when hash was unknown at registration time)
+    ctx.pending_scans.pop(name.lower(), None)
+
+
+async def do_add_background(
+    ctx: HandlerContext,
+    user_id: int,
+    result: DoAddResult,
+    interim_msg: Any,
+    *,
+    header: str | None = None,
+    post_add_rows: list[list[Any]] | None = None,
+    start_tracker: bool = True,
+) -> None:
+    """Background phase: hash resolution, queue+resume, tracker, concurrent file scan.
+
+    Optimised pipeline — resumes the torrent immediately after hash resolution
+    so downloads start in ~2-5s.  File-list heuristic scan runs concurrently
+    while the download is active; ClamAV completion gate is the final safety net.
+
+    Fire-and-forget — all exceptions are caught and logged.
+    """
+    completed_normally = False
+    try:
+        torrent_hash = result.hash
+
+        # --- Hash resolution (up to 20s) ---
+        if not torrent_hash:
+            torrent_hash = await resolve_hash_by_name(ctx, result.name, result.category, wait_s=20)
+        if not torrent_hash:
+            try:
+                ctx.store.log_health_event(
+                    user_id,
+                    None,
+                    "hash_resolve_fail",
+                    "warning",
+                    json.dumps({"name": result.name, "category": result.category}),
+                    result.name,
+                )
+            except Exception:
+                pass
+            # Clean up pending_scans entry
+            _clear_pending_scan(ctx, result.name, None)
+            try:
+                await interim_msg.edit_text(
+                    f"\u26a0\ufe0f Could not resolve torrent hash for:\n<code>{_h(result.name)}</code>\n\n"
+                    "<i>A live monitor will auto-attach if the hash appears later.</i>",
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("\U0001f3e0 Home", callback_data="nav:home")]]
+                    ),
+                    parse_mode=_PM,
+                )
+            except Exception:
+                pass
+            if start_tracker:
+                start_pending_progress_tracker(
+                    ctx,
+                    user_id,
+                    result.name,
+                    result.category,
+                    interim_msg,
+                    header=header,
+                    post_add_rows=post_add_rows,
+                )
+            completed_normally = True
+            return
+
+        # --- Sequential download queue + RESUME (moved before file inspection) ---
+        queued = False
+        async with ctx.download_queue_lock:
+            if ctx.active_download_hash is None:
+                ctx.active_download_hash = torrent_hash.lower()
+                await asyncio.to_thread(ctx.qbt.resume_torrents, torrent_hash)
+            else:
+                await ctx.download_queue.put({"hash": torrent_hash.lower(), "name": result.name})
+                queued = True
+
+        # Torrent is now resumed / queued — clear pending_scans (CC picks it up from qBT)
+        _clear_pending_scan(ctx, result.name, torrent_hash)
+
+        queue_note = ""
+        if queued:
+            queue_note = (
+                f"\n\U0001f4cb <b>Queued</b> \u2014 position {ctx.download_queue.qsize()} in queue. "
+                "Will start automatically when the current download finishes."
+            )
+
+        summary = (
+            f"\u2705 Added #{result.idx}: {_h(result.name)}\n"
+            f"Library: {_h(result.target_label)}\n"
+            f"Category: {_h(result.category)}\n"
+            f"Path: {_h(result.save_path)}\n"
+            f"qBittorrent: {_h(result.resp)}"
+            f"{queue_note}"
+        )
+
+        # --- Attach progress tracker IMMEDIATELY ---
+        if start_tracker:
+            stop_kb = stop_download_keyboard(torrent_hash, post_add_rows=post_add_rows)
+            combined_text = (
+                summary + "\n\n<b>\U0001f4e1 Live Monitor Attached</b>\n<i>Tracking download progress\u2026</i>"
+            )
+            try:
+                await interim_msg.edit_text(combined_text, reply_markup=stop_kb, parse_mode=_PM)
+            except Exception:
+                LOG.warning("Failed to edit interim msg for tracker attach", exc_info=True)
+            start_progress_tracker(
+                ctx,
+                user_id,
+                torrent_hash,
+                interim_msg,
+                result.name,
+                header=summary,
+                post_add_rows=post_add_rows,
+            )
+        else:
+            # Schedule callers handle their own tracker — just edit the message.
+            try:
+                await interim_msg.edit_text(summary, parse_mode=_PM)
+            except Exception:
+                pass
+
+        # --- Fire concurrent file-list scan (runs while download is active) ---
+        scan_task = asyncio.create_task(
+            _concurrent_file_scan(ctx, user_id, torrent_hash, result, interim_msg),
+            name=f"concurrent_scan:{torrent_hash[:12]}",
+        )
+        ctx.background_tasks.add(scan_task)
+        scan_task.add_done_callback(ctx.background_tasks.discard)
+
+        completed_normally = True
+    except Exception:
+        LOG.error("do_add_background failed for %s", result.name, exc_info=True)
+    finally:
+        # Safety-net cleanup of pending_scans in case of early exception
+        _clear_pending_scan(ctx, result.name, result.hash)
+        if not completed_normally:
+            try:
+                await interim_msg.edit_text(
+                    f"\u26a0\ufe0f Background checks failed for:\n<code>{_h(result.name)}</code>\n\n"
+                    "<i>The torrent was added but safety checks did not complete. Check /active.</i>",
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("\U0001f3e0 Home", callback_data="nav:home")]]
+                    ),
+                    parse_mode=_PM,
+                )
+            except Exception:
+                pass
+
+
+async def do_add_full(
+    ctx: HandlerContext,
+    user_id: int,
+    search_id: str,
+    idx: int,
+    media_choice: str,
+) -> dict[str, Any]:
+    """Full synchronous add pipeline (fast + slow).  Backward compat for schedule callers.
+
+    Identical to the old do_add() behaviour: blocks until hash resolution,
+    file inspection, malware scan, and queue management are all done.
+    """
+    result = await do_add(ctx, user_id, search_id, idx, media_choice)
+
+    torrent_hash = result.hash
     if not torrent_hash:
-        torrent_hash = await resolve_hash_by_name(ctx, _torrent_name, target["category"], wait_s=20)
+        torrent_hash = await resolve_hash_by_name(ctx, result.name, result.category, wait_s=20)
 
     inspection_note = ""
     if not torrent_hash:
         raise RuntimeError("Download blocked — qBittorrent did not assign a torrent hash for inspection.")
 
-    # Magnets need metadata from peers before file list is available — allow more time.
-    inspection_timeout = ctx.cfg.file_inspection_timeout_s * 3 if is_magnet else ctx.cfg.file_inspection_timeout_s
+    inspection_timeout = (
+        ctx.cfg.file_inspection_timeout_s * 3 if result.is_magnet else ctx.cfg.file_inspection_timeout_s
+    )
     try:
-        files = await _wait_for_file_inspection(
-            ctx,
-            torrent_hash,
-            timeout_s=inspection_timeout,
-        )
+        files = await _wait_for_file_inspection(ctx, torrent_hash, timeout_s=inspection_timeout)
     except Exception as exc:
         inspection_note = (
             "\n\u26a0\ufe0f File inspection did not complete in time. "
             "Continuing with completion-time ClamAV scanning only."
         )
-        LOG.warning("Continuing after inspection failure for %s (magnet=%s): %s", torrent_hash, is_magnet, exc)
-    else:
-        malware_scan = scan_download(
-            name=_torrent_name,
-            size_bytes=_torrent_size,
-            quality_tier=quality_tier(_torrent_name),
-            media_type=_media_type,
-            files=files,
-            uploader=_uploader,
+        LOG.warning(
+            "Continuing after inspection failure for %s (magnet=%s): %s",
+            torrent_hash,
+            result.is_magnet,
+            exc,
         )
-        if malware_scan.is_blocked:
+    else:
+        malware_scan_result = scan_download(
+            name=result.name,
+            size_bytes=result.size,
+            quality_tier=quality_tier(result.name),
+            media_type=result.media_type,
+            files=files,
+            uploader=result.uploader,
+        )
+        if malware_scan_result.is_blocked:
             try:
                 await asyncio.to_thread(ctx.qbt.delete_torrent, torrent_hash, delete_files=True)
             except Exception:
@@ -1882,58 +2208,127 @@ async def do_add(
             try:
                 ctx.store.log_malware_block(
                     torrent_hash=torrent_hash,
-                    torrent_name=_torrent_name,
+                    torrent_name=result.name,
                     stage="download",
-                    reasons=malware_scan.reasons,
+                    reasons=malware_scan_result.reasons,
                 )
             except Exception:
                 pass
-            reasons_text = "\n".join(f"• {r}" for r in malware_scan.reasons)
+            reasons_text = "\n".join(f"• {r}" for r in malware_scan_result.reasons)
             raise RuntimeError(f"Download blocked — suspicious content detected:\n{reasons_text}")
 
-    # --- Sequential download queue ---
-    # Only one torrent downloads at a time.  If the slot is free, resume
-    # immediately; otherwise keep paused and enqueue for later.
     queued = False
     async with ctx.download_queue_lock:
         if ctx.active_download_hash is None:
             ctx.active_download_hash = torrent_hash.lower()
             await asyncio.to_thread(ctx.qbt.resume_torrents, torrent_hash)
         else:
-            # Slot occupied — stay paused, enqueue for later resumption.
-            await ctx.download_queue.put(
-                {
-                    "hash": torrent_hash.lower(),
-                    "name": str(row["name"]),
-                }
-            )
+            await ctx.download_queue.put({"hash": torrent_hash.lower(), "name": result.name})
             queued = True
 
     queue_note = ""
     if queued:
         queue_note = (
-            f"\n\U0001f4cb <b>Queued</b> — position {ctx.download_queue.qsize()} in queue. "
+            f"\n\U0001f4cb <b>Queued</b> \u2014 position {ctx.download_queue.qsize()} in queue. "
             "Will start automatically when the current download finishes."
         )
 
     summary = (
-        f"\u2705 Added #{idx}: {_h(str(row['name']))}\n"
-        f"Library: {_h(str(target['label']))}\n"
-        f"Category: {_h(str(target['category']))}\n"
-        f"Path: {_h(str(target['path']))}\n"
-        f"qBittorrent: {_h(str(resp))}"
+        f"\u2705 Added #{idx}: {_h(result.name)}\n"
+        f"Library: {_h(result.target_label)}\n"
+        f"Category: {_h(result.category)}\n"
+        f"Path: {_h(result.save_path)}\n"
+        f"qBittorrent: {_h(result.resp)}"
         f"{inspection_note}"
         f"{queue_note}"
     )
 
     return {
         "summary": summary,
-        "name": str(row["name"]),
-        "category": str(target["category"]),
+        "name": result.name,
+        "category": result.category,
         "hash": torrent_hash,
-        "path": str(target["path"]),
+        "path": result.save_path,
         "queued": queued,
     }
+
+
+async def on_cb_mwblock(ctx: HandlerContext, *, data: str, q: Any, user_id: int) -> None:
+    """Handle ``mwblock:keep:{hash}`` and ``mwblock:delete:{hash}`` callbacks."""
+    parts = data.split(":", 2)
+    if len(parts) < 3:
+        await q.answer("Invalid action", show_alert=True)
+        return
+    action = parts[1]
+    torrent_hash = parts[2]
+    if not re.fullmatch(r"[a-f0-9]{40}", torrent_hash.lower()):
+        await q.answer("Invalid hash", show_alert=True)
+        return
+    torrent_hash = torrent_hash.lower()
+
+    if action == "keep":
+        try:
+            await asyncio.to_thread(ctx.qbt.resume_torrents, torrent_hash)
+        except Exception:
+            LOG.warning("mwblock:keep — torrent %s may no longer exist", torrent_hash, exc_info=True)
+            await q.answer("Torrent no longer exists", show_alert=True)
+            return
+        try:
+            ctx.store.log_health_event(
+                user_id,
+                torrent_hash,
+                "malware_override_keep",
+                "info",
+                json.dumps({"action": "keep"}),
+                torrent_hash,
+            )
+        except Exception:
+            pass
+        stop_kb = stop_download_keyboard(torrent_hash)
+        try:
+            await q.message.edit_text(
+                "\u2705 <b>Resumed</b> \u2014 monitoring will continue.",
+                reply_markup=stop_kb,
+                parse_mode=_PM,
+            )
+        except Exception:
+            pass
+        start_progress_tracker(ctx, user_id, torrent_hash, q.message, "Download")
+        await q.answer("Torrent resumed")
+
+    elif action == "delete":
+        try:
+            await asyncio.to_thread(ctx.qbt.delete_torrent, torrent_hash, delete_files=True)
+        except Exception:
+            LOG.warning("mwblock:delete — torrent %s may no longer exist", torrent_hash, exc_info=True)
+        # Clean up download queue entry if present
+        async with ctx.download_queue_lock:
+            if ctx.active_download_hash == torrent_hash:
+                ctx.active_download_hash = None
+        try:
+            ctx.store.log_health_event(
+                user_id,
+                torrent_hash,
+                "malware_override_delete",
+                "info",
+                json.dumps({"action": "delete"}),
+                torrent_hash,
+            )
+        except Exception:
+            pass
+        try:
+            await q.message.edit_text(
+                "\U0001f5d1 <b>Torrent deleted.</b>",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("\U0001f3e0 Home", callback_data="nav:home")]]
+                ),
+                parse_mode=_PM,
+            )
+        except Exception:
+            pass
+        await q.answer("Torrent deleted")
+    else:
+        await q.answer("Unknown action", show_alert=True)
 
 
 async def on_cb_stop(ctx: HandlerContext, *, data: str, q: Any, user_id: int) -> None:

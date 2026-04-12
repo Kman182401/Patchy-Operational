@@ -13,6 +13,7 @@ import re
 import secrets
 import subprocess
 import threading
+import time
 from datetime import time as dt_time
 from typing import Any
 
@@ -60,6 +61,7 @@ from .utils import (
     human_size,
     normalize_title,
     now_ts,
+    quality_tier,
 )
 
 LOG = logging.getLogger("qbtg")
@@ -166,6 +168,7 @@ class BotApp:
         d.register_prefix("menu:", self._on_cb_menu)
         d.register_prefix("flow:", self._on_cb_flow)
         d.register_exact("dl:manage", self._on_cb_dl_manage)
+        d.register_prefix("mwblock:", self._on_cb_mwblock)
         d.register_prefix("stop:all:", self._on_cb_stop)
         d.register_prefix("stop:", self._on_cb_stop)
         d.register_prefix("tvpost:", self._on_cb_tvpost)
@@ -743,7 +746,23 @@ class BotApp:
     def _active_download_tuples_from(self, items: list) -> list[tuple[str, str]]:
         """Return ``(hash, clean_name)`` for each active download (up to 10) from a pre-fetched list."""
         active = [t for t in items if str(t.get("state") or "") in _ACTIVE_DL_STATES]
+        active_hashes = {str(t.get("hash") or "").lower() for t in active}
         result: list[tuple[str, str]] = []
+        # Include pending scans not yet visible in qBT
+        now = time.time()
+        stale_keys: list[str] = []
+        for key, entry in list(self._ctx.pending_scans.items()):
+            if key in active_hashes:
+                stale_keys.append(key)
+                continue
+            if now - entry.get("added_at", 0) > 120:
+                stale_keys.append(key)
+                continue
+            name = entry.get("name", "Unknown")
+            result.append((key, self._clean_download_name(name, "")))
+        for key in stale_keys:
+            self._ctx.pending_scans.pop(key, None)
+        # Then qBT active downloads
         for t in active[:10]:
             h = str(t.get("hash") or "")
             raw_name = str(t.get("name") or "Unknown")
@@ -751,7 +770,7 @@ class BotApp:
             clean_name = self._clean_download_name(raw_name, category)
             if h:
                 result.append((h, clean_name))
-        return result
+        return result[:10]
 
     def _active_download_tuples(self) -> list[tuple[str, str]]:
         """Return ``(hash, clean_name)`` for each active download (up to 10)."""
@@ -845,9 +864,30 @@ class BotApp:
     def _active_downloads_section_from(self, items: list) -> str:
         """Build the Active Downloads text block from a pre-fetched torrent list."""
         active = [t for t in items if str(t.get("state") or "") in _ACTIVE_DL_STATES]
-        if not active:
+        active_hashes = {str(t.get("hash") or "").lower() for t in active}
+        # Collect pending scans not yet visible in qBT
+        now = time.time()
+        pending_entries: list[dict[str, Any]] = []
+        stale_keys: list[str] = []
+        for key, entry in list(self._ctx.pending_scans.items()):
+            if key in active_hashes:
+                stale_keys.append(key)
+                continue
+            if now - entry.get("added_at", 0) > 120:
+                stale_keys.append(key)
+                continue
+            pending_entries.append(entry)
+        for key in stale_keys:
+            self._ctx.pending_scans.pop(key, None)
+        if not active and not pending_entries:
             return ""
         lines = ["\n<b>Active Downloads</b>"]
+        # Show pending scans first (newest additions)
+        for entry in pending_entries[:3]:
+            name = entry.get("name", "Unknown")
+            clean_name = self._clean_download_name(name, "")
+            lines.append(f"<code>[{'░' * 14}]  0.0%</code>  {_h(clean_name)} \u23f3")
+        # Then qBT active downloads
         for t in active[:5]:
             raw_name = str(t.get("name") or "Unknown")
             category = str(t.get("category") or "")
@@ -2184,7 +2224,7 @@ class BotApp:
     # ------------------------------------------------------------------
 
     async def _check_movie_tracks(self) -> None:
-        """Check pending and downloading movie tracks."""
+        """Check pending, downloading, and title-only movie tracks."""
         pending = await asyncio.to_thread(self.store.get_pending_movie_tracks)
         for track in pending:
             try:
@@ -2193,6 +2233,14 @@ class BotApp:
                 await self._check_pending_movie_track(track)
             except Exception:
                 LOG.warning("Movie track check failed for %s", track.get("track_id"), exc_info=True)
+
+        # Title-only tracks — separate loop, no release gate
+        title_only_tracks = await asyncio.to_thread(self.store.get_title_only_tracks)
+        for track in title_only_tracks:
+            try:
+                await self._check_title_only_track(track)
+            except Exception:
+                LOG.warning("Title-only track check failed for %s", track.get("track_id"), exc_info=True)
 
         downloading = await asyncio.to_thread(self.store.get_downloading_movie_tracks)
         for track in downloading:
@@ -2492,6 +2540,195 @@ class BotApp:
             status="downloading",
             torrent_hash=torrent_hash,
         )
+
+    async def _check_title_only_track(self, track: dict[str, Any]) -> None:
+        """Search for a torrent matching a title-only movie track.
+
+        This is separate from _check_pending_movie_track — title-only tracks
+        bypass the release gate and require user confirmation before download.
+        """
+        track_id = str(track.get("track_id") or "")
+        title = str(track.get("title") or "")
+        search_query = str(track.get("search_query") or title)
+
+        # Skip if already notifying (pending user confirmation)
+        if track.get("pending_torrent_hash"):
+            LOG.debug("title_only_track %s: already notifying, skipping", track_id)
+            return
+
+        # Respect next_check_ts
+        next_check = track.get("next_check_ts")
+        if next_check and int(next_check) > now_ts():
+            return
+
+        LOG.debug("title_only_track %s: checking '%s'", track_id, search_query)
+
+        try:
+            raw_rows = await asyncio.to_thread(
+                self.qbt.search,
+                search_query,
+                plugin="enabled",
+                search_cat="movies",
+                timeout_s=self.cfg.search_timeout_s,
+                poll_interval_s=self.cfg.poll_interval_s,
+                early_exit_min_results=max(self.cfg.search_early_exit_min_results, 12),
+                early_exit_idle_s=self.cfg.search_early_exit_idle_s,
+                early_exit_max_wait_s=self.cfg.search_early_exit_max_wait_s,
+            )
+        except Exception as e:
+            LOG.warning("Title-only search failed for %s: %s", track_id, e)
+            await asyncio.to_thread(
+                self.store.update_movie_track_next_check,
+                track_id,
+                now_ts() + 3600,
+            )
+            return
+
+        # Filter through quality + malware gates
+        qualifying: list[dict[str, Any]] = []
+        for row in raw_rows:
+            name = str(row.get("fileName") or row.get("name") or "")
+            size = int(row.get("fileSize") or row.get("size") or 0)
+            seeds = int(row.get("nbSeeders") or row.get("seeders") or 0)
+
+            # Malware scan FIRST (before quality)
+            from .malware import scan_search_result
+
+            malware_scan = scan_search_result(
+                name=name,
+                size_bytes=size,
+                quality_tier=quality_tier(name),
+                media_type="movie",
+            )
+            if malware_scan.is_blocked:
+                continue
+
+            ts = score_torrent(name, size, seeds, media_type="movie")
+            if ts.is_rejected:
+                continue
+            if ts.resolution_tier < 3:  # 1080p+ gate
+                continue
+
+            # Verify we have a usable hash
+            rh = str(row.get("fileHash") or row.get("hash") or "").strip().lower()
+            if not re.fullmatch(r"[a-f0-9]{40}", rh):
+                continue
+
+            # Full candidate inspection (URL validation + malware re-check)
+            try:
+                url, torrent_hash, dl_scan = download_handler.scan_download_candidate(row, media_type="movie", files=[])
+            except Exception:
+                continue
+            if dl_scan.is_blocked or not torrent_hash:
+                continue
+
+            row["_scan_hash"] = torrent_hash
+            row["_scan_url"] = url
+            row["_seeds"] = seeds
+            row["_size"] = size
+            qualifying.append(row)
+
+        count = len(qualifying)
+        LOG.debug("title_only_track %s: checked, found %d qualifying results", track_id, count)
+
+        if not qualifying:
+            await asyncio.to_thread(
+                self.store.update_movie_track_next_check,
+                track_id,
+                now_ts() + 3600,  # retry in 1 hour
+            )
+            return
+
+        # Take the top result (highest seed count after quality filter)
+        best = max(qualifying, key=lambda r: int(r.get("_seeds") or 0))
+        best_name = str(best.get("fileName") or best.get("name") or "")
+        best_hash = str(best.get("_scan_hash") or "")
+        best_size = int(best.get("_size") or 0)
+        best_seeds = int(best.get("_seeds") or 0)
+
+        # Attempt to fetch poster
+        poster_url: str | None = None
+        try:
+            results = await asyncio.to_thread(self._ctx.tvmeta.search_movies, title, 1)
+            if results:
+                raw_poster = results[0].get("poster_url") or ""
+                if raw_poster:
+                    # Use w342 for better notification quality
+                    poster_url = raw_poster.replace("/w185", "/w342")
+        except Exception:
+            pass  # poster is optional
+
+        # SAFETY: no auto-download for title-only tracks — store pending and notify
+        await asyncio.to_thread(
+            self.store.set_movie_track_pending_torrent,
+            track_id,
+            best_hash,
+            best_name,
+            best_size,
+            best_seeds,
+            poster_url,
+        )
+        await asyncio.to_thread(
+            self.store.update_movie_track_status,
+            track_id,
+            status="notifying",
+            next_check_ts=now_ts() + 86400,  # don't re-check for 24h while pending
+        )
+        LOG.info("[TitleOnlyTrack] %s: found qualifying result '%s', notifying user", title, best_name)
+
+        await self._send_title_only_notification(track, best_name, best_hash, best_size, best_seeds, poster_url)
+
+    async def _send_title_only_notification(
+        self,
+        track: dict[str, Any],
+        torrent_name: str,
+        torrent_hash: str,
+        torrent_size: int,
+        torrent_seeds: int,
+        poster_url: str | None,
+    ) -> None:
+        """Send a Telegram notification when a title-only track finds a qualifying result."""
+        user_id = int(track.get("user_id") or 0)
+        track_id = str(track.get("track_id") or "")
+        title = str(track.get("title") or "")
+
+        message_text = (
+            f"🎯 Found a release for <b>{_h(title)}</b>\n\n"
+            f"📁 <b>{_h(torrent_name)}</b>\n"
+            f"📦 Size: {human_size(torrent_size)}\n"
+            f"🌱 Seeds: {torrent_seeds}\n"
+            f"🎬 Quality: 1080p+\n\n"
+            "Do you want to download this?"
+        )
+
+        kb = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("✅ Confirm Download", callback_data=f"msch:dl_confirm:{track_id}")],
+                [InlineKeyboardButton("❌ Deny & Cancel Tracking", callback_data=f"msch:dl_deny:{track_id}")],
+            ]
+        )
+
+        if not self.app:
+            return
+
+        try:
+            if poster_url:
+                await self.app.bot.send_photo(
+                    chat_id=user_id,
+                    photo=poster_url,
+                    caption=message_text,
+                    reply_markup=kb,
+                    parse_mode=_PM,
+                )
+            else:
+                await self.app.bot.send_message(
+                    chat_id=user_id,
+                    text=message_text,
+                    reply_markup=kb,
+                    parse_mode=_PM,
+                )
+        except Exception as exc:
+            LOG.warning("Title-only notification failed for %s: %s", track_id, exc)
 
     async def _check_downloading_movie_track(self, track: dict[str, Any]) -> None:
         """Check if a downloading movie has appeared in Plex."""
@@ -3226,10 +3463,8 @@ class BotApp:
         min_seeds: int | None = None,
         min_size: int | None = None,
         max_size: int | None = None,
-        min_quality: int | None = None,
         sort_key: str | None = None,
         order: str | None = None,
-        limit: int | None = None,
         media_hint: str = "any",
         tv_flow: dict[str, Any] | None = None,
         current_tv_ui_message: Any | None = None,
@@ -3251,11 +3486,10 @@ class BotApp:
             return
         defaults = self.store.get_defaults(user_id, self.cfg)
         min_seeds = int(min_seeds if min_seeds is not None else defaults["default_min_seeds"])
-        min_quality = int(min_quality if min_quality is not None else self.cfg.default_min_quality)
+        min_quality = 0  # quality floor disabled; prioritize_results() handles 1080p preference
         sort_key = (sort_key or defaults["default_sort"] or "seeds").lower()
         order = (order or defaults["default_order"] or "desc").lower()
-        limit = int(limit if limit is not None else defaults["default_limit"])
-        limit = max(1, min(50, limit))
+        limit = 1  # single best result; prioritize_results() guarantees at most one
 
         searching_text = f"<b>🔎 Searching for {_h(query)}…</b>\n<i>Querying qBittorrent search plugins…</i>"
         if isinstance(tv_flow, dict):
@@ -3354,7 +3588,6 @@ class BotApp:
             )
             filtered = self._deduplicate_results(filtered)
             ranked = self._sort_rows(filtered, key=sort_key, order=order)
-            ranked = search_handler.prioritize_results(ranked)
 
             # Task 4: Full Season — filter to season packs only before slicing
             if isinstance(tv_flow, dict) and tv_flow.get("full_season"):
@@ -3389,12 +3622,25 @@ class BotApp:
                     if wanted_code in extract_episode_codes(str(r.get("fileName") or r.get("name") or ""))
                 ]
 
+            ranked = search_handler.prioritize_results(ranked)
             final_rows = ranked[:limit]
 
             if not final_rows:
                 kwargs: dict[str, Any] = {"parse_mode": _PM}
                 if isinstance(tv_flow, dict):
                     kwargs["reply_markup"] = InlineKeyboardMarkup(self._nav_footer(back_data="menu:tv"))
+                elif media_hint == "movies":
+                    # Title-only tracking — movie search with no results
+                    import urllib.parse
+
+                    _truncated = query[:35]
+                    _encoded = urllib.parse.quote(_truncated, safe="")
+                    _cb_data = f"msch:title_track:{_encoded}"
+                    kb_rows: list[list[InlineKeyboardButton]] = [
+                        [InlineKeyboardButton("🎯 Track by Title", callback_data=_cb_data)],
+                    ]
+                    kb_rows.extend(self._nav_footer())
+                    kwargs["reply_markup"] = InlineKeyboardMarkup(kb_rows)
                 await status_msg.edit_text(
                     "<b>📭 No Results</b>\n<i>No matches found. Try a broader title or lower quality filter.</i>",
                     **kwargs,
@@ -4263,7 +4509,7 @@ class BotApp:
         return _shared.vpn_ready_for_download(getattr(self, "_ctx", self))
 
     async def _do_add(self, user_id: int, search_id: str, idx: int, media_choice: str) -> dict[str, Any]:
-        return await download_handler.do_add(self._ctx, user_id, search_id, idx, media_choice)
+        return await download_handler.do_add_full(self._ctx, user_id, search_id, idx, media_choice)
 
     async def cmd_add(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await commands_handler.cmd_add(self, update, context)
@@ -4405,64 +4651,52 @@ class BotApp:
         rendered = await self._render_nav_ui(
             user_id,
             q.message,
-            f"⏳ Adding result #{idx} to {choice_label}…",
+            f"\u23f3 Adding result #{idx} to {choice_label}\u2026",
             reply_markup=InlineKeyboardMarkup(self._nav_footer(back_data=f"p:{sid}:{page}")),
             current_ui_message=q.message,
         )
+        # --- Fast phase (~1-2s): pre-flight checks + qbt.add_url ---
         try:
-            out = await self._do_add(user_id, sid, idx, choice)
+            result = await download_handler.do_add(self._ctx, user_id, sid, idx, choice)
         except Exception as e:
             await self._render_nav_ui(
                 user_id,
                 rendered,
-                f"<b>⚠️ Add Failed</b>\n<i>{_h(str(e))}</i>",
+                f"<b>\u26a0\ufe0f Add Failed</b>\n<i>{_h(str(e))}</i>",
                 reply_markup=InlineKeyboardMarkup(self._nav_footer(back_data=f"p:{sid}:{page}")),
                 current_ui_message=rendered,
             )
             return
-        summary = str(out["summary"])
 
-        # Build post-add keyboard based on search origin context
+        # Register in pending_scans for immediate CC visibility
+        scan_key = (result.hash or result.name).lower()
+        self._ctx.pending_scans[scan_key] = {"name": result.name, "added_at": time.time()}
+
+        # Immediate feedback — user sees confirmation within 1-2s
+        interim_msg = await download_handler.send_download_starting_message(
+            self._ctx,
+            user_id,
+            rendered,
+            result,
+        )
+
+        # Build post-add keyboard for the background phase
         post_kb = await self._build_post_add_keyboard(user_id, sid, choice)
         post_add_rows = self._extract_post_add_rows(post_kb)
 
-        if out.get("hash"):
-            # Combined message: confirmation + live monitor placeholder
-            combined_text = summary + "\n\n<b>📡 Live Monitor Attached</b>\n<i>Tracking download progress…</i>"
-            stop_kb = self._stop_download_keyboard(out["hash"], post_add_rows=post_add_rows)
-            rendered = await self._render_nav_ui(
+        # --- Background phase (fire-and-forget): hash resolve, inspection, malware, queue, tracker ---
+        task = asyncio.create_task(
+            download_handler.do_add_background(
+                self._ctx,
                 user_id,
-                rendered,
-                combined_text,
-                reply_markup=stop_kb,
-                current_ui_message=rendered,
-            )
-            self._start_progress_tracker(
-                user_id,
-                out["hash"],
-                rendered,
-                out["name"],
-                header=summary,
+                result,
+                interim_msg,
                 post_add_rows=post_add_rows,
-            )
-        else:
-            pending_header = summary
-            summary += "\n\n<i>Waiting for qBittorrent to assign a hash. A live monitor will attach automatically.</i>"
-            rendered = await self._render_nav_ui(
-                user_id,
-                rendered,
-                summary,
-                reply_markup=post_kb,
-                current_ui_message=rendered,
-            )
-            self._start_pending_progress_tracker(
-                user_id,
-                out["name"],
-                out["category"],
-                rendered,
-                header=pending_header,
-                post_add_rows=post_add_rows,
-            )
+            ),
+            name=f"do_add_bg:{user_id}:{result.name[:40]}",
+        )
+        self._ctx.background_tasks.add(task)
+        task.add_done_callback(self._ctx.background_tasks.discard)
 
     async def _build_post_add_keyboard(self, user_id: int, sid: str, choice: str) -> InlineKeyboardMarkup | None:
         """Build the post-add follow-up keyboard based on search origin context."""
@@ -4734,6 +4968,9 @@ class BotApp:
         text = "\n".join(lines)
         kb = kb_mod.manage_downloads_keyboard(dl_tuples)
         await self._render_nav_ui(user_id, q.message, text, reply_markup=kb, current_ui_message=q.message)
+
+    async def _on_cb_mwblock(self, *, data: str, q: Any, user_id: int) -> None:
+        await download_handler.on_cb_mwblock(self._ctx, data=data, q=q, user_id=user_id)
 
     async def _on_cb_stop(self, *, data: str, q: Any, user_id: int) -> None:
         await download_handler.on_cb_stop(self._ctx, data=data, q=q, user_id=user_id)

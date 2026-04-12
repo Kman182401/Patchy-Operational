@@ -202,7 +202,7 @@ class Store:
                 CREATE TABLE IF NOT EXISTS movie_tracks (
                     track_id     TEXT PRIMARY KEY,
                     user_id      INTEGER NOT NULL,
-                    tmdb_id      INTEGER NOT NULL,
+                    tmdb_id      INTEGER,
                     title        TEXT NOT NULL,
                     year         INTEGER,
                     release_date_type TEXT NOT NULL,
@@ -216,7 +216,12 @@ class Store:
                     notified     INTEGER NOT NULL DEFAULT 0,
                     enabled      INTEGER NOT NULL DEFAULT 1,
                     home_date_is_inferred INTEGER NOT NULL DEFAULT 1,
-                    created_ts   INTEGER NOT NULL
+                    created_ts   INTEGER NOT NULL,
+                    pending_torrent_hash  TEXT,
+                    pending_torrent_name  TEXT,
+                    pending_torrent_size  INTEGER,
+                    pending_torrent_seeds INTEGER,
+                    poster_url            TEXT
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_movie_tracks_user ON movie_tracks(user_id, status);
@@ -302,14 +307,84 @@ class Store:
                 conn.execute("ALTER TABLE movie_tracks ADD COLUMN plex_check_failures INTEGER NOT NULL DEFAULT 0")
             except Exception:
                 pass
+        # ---- title-only track columns ----
+        if "pending_torrent_hash" not in mt_cols:
+            conn.execute("ALTER TABLE movie_tracks ADD COLUMN pending_torrent_hash TEXT")
+        if "pending_torrent_name" not in mt_cols:
+            conn.execute("ALTER TABLE movie_tracks ADD COLUMN pending_torrent_name TEXT")
+        if "pending_torrent_size" not in mt_cols:
+            conn.execute("ALTER TABLE movie_tracks ADD COLUMN pending_torrent_size INTEGER")
+        if "pending_torrent_seeds" not in mt_cols:
+            conn.execute("ALTER TABLE movie_tracks ADD COLUMN pending_torrent_seeds INTEGER")
+        if "poster_url" not in mt_cols:
+            conn.execute("ALTER TABLE movie_tracks ADD COLUMN poster_url TEXT")
 
-        # ---- unique constraint: one track per (user_id, tmdb_id) ----
-        # Deduplicate first so the index creation succeeds on existing installs
+        # ---- relax tmdb_id NOT NULL for title-only tracks ----
+        tmdb_col_info = [c for c in conn.execute("PRAGMA table_info(movie_tracks)").fetchall() if c[1] == "tmdb_id"]
+        if tmdb_col_info and tmdb_col_info[0][3] == 1:  # notnull flag is 1
+            # SQLite cannot ALTER COLUMN — recreate the table with tmdb_id nullable
+            all_cols = [c[1] for c in conn.execute("PRAGMA table_info(movie_tracks)").fetchall()]
+            col_list = ", ".join(all_cols)
+            conn.execute("ALTER TABLE movie_tracks RENAME TO _movie_tracks_old")
+            # Drop old indexes that reference the old table
+            conn.execute("DROP INDEX IF EXISTS idx_movie_tracks_user")
+            conn.execute("DROP INDEX IF EXISTS idx_movie_tracks_pending")
+            conn.execute("DROP INDEX IF EXISTS idx_movie_tracks_user_tmdb")
+            # Build new CREATE TABLE with tmdb_id nullable (mirror current schema)
+            conn.execute(
+                """CREATE TABLE movie_tracks (
+                    track_id     TEXT PRIMARY KEY,
+                    user_id      INTEGER NOT NULL,
+                    tmdb_id      INTEGER,
+                    title        TEXT NOT NULL,
+                    year         INTEGER,
+                    release_date_type TEXT NOT NULL,
+                    release_date_ts   INTEGER NOT NULL,
+                    search_query TEXT NOT NULL,
+                    status       TEXT NOT NULL DEFAULT 'pending',
+                    torrent_hash TEXT,
+                    last_checked_ts INTEGER,
+                    next_check_ts   INTEGER,
+                    error_text   TEXT,
+                    notified     INTEGER NOT NULL DEFAULT 0,
+                    enabled      INTEGER NOT NULL DEFAULT 1,
+                    home_date_is_inferred INTEGER NOT NULL DEFAULT 1,
+                    created_ts   INTEGER NOT NULL,
+                    theatrical_ts INTEGER,
+                    digital_ts INTEGER,
+                    physical_ts INTEGER,
+                    home_release_ts INTEGER,
+                    digital_estimated INTEGER DEFAULT 0,
+                    release_status TEXT DEFAULT 'unknown',
+                    last_release_check_ts INTEGER,
+                    plex_check_failures INTEGER NOT NULL DEFAULT 0,
+                    pending_torrent_hash TEXT,
+                    pending_torrent_name TEXT,
+                    pending_torrent_size INTEGER,
+                    pending_torrent_seeds INTEGER,
+                    poster_url TEXT
+                )"""
+            )
+            conn.execute(f"INSERT INTO movie_tracks({col_list}) SELECT {col_list} FROM _movie_tracks_old")
+            conn.execute("DROP TABLE _movie_tracks_old")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_movie_tracks_user ON movie_tracks(user_id, status)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_movie_tracks_pending "
+                "ON movie_tracks(status, release_date_ts, next_check_ts)"
+            )
+
+        # ---- unique constraint: one track per (user_id, tmdb_id) for TMDB tracks ----
+        # Deduplicate non-NULL tmdb_id rows; NULL tmdb_ids (title-only) are always unique
         conn.execute(
-            "DELETE FROM movie_tracks WHERE rowid NOT IN "
-            "(SELECT MIN(rowid) FROM movie_tracks GROUP BY user_id, tmdb_id)"
+            "DELETE FROM movie_tracks WHERE tmdb_id IS NOT NULL AND rowid NOT IN "
+            "(SELECT MIN(rowid) FROM movie_tracks WHERE tmdb_id IS NOT NULL GROUP BY user_id, tmdb_id)"
         )
-        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_movie_tracks_user_tmdb ON movie_tracks(user_id, tmdb_id)")
+        # Partial unique index — only enforced when tmdb_id is not NULL
+        conn.execute("DROP INDEX IF EXISTS idx_movie_tracks_user_tmdb")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_movie_tracks_user_tmdb "
+            "ON movie_tracks(user_id, tmdb_id) WHERE tmdb_id IS NOT NULL"
+        )
 
         conn.execute("PRAGMA optimize;")
         conn.commit()
@@ -1287,7 +1362,7 @@ class Store:
     def create_movie_track(
         self,
         user_id: int,
-        tmdb_id: int,
+        tmdb_id: int | None,
         title: str,
         year: int | None,
         release_date_type: str,
@@ -1295,7 +1370,10 @@ class Store:
         search_query: str,
         home_date_is_inferred: bool = True,
     ) -> str:
-        """Create a movie track and return its track_id."""
+        """Create a movie track and return its track_id.
+
+        *tmdb_id* may be None for title-only tracks (no TMDB match).
+        """
         with self._lock:
             if self._closed:
                 raise RuntimeError("Store is closed")
@@ -1308,7 +1386,7 @@ class Store:
                 (
                     track_id,
                     int(user_id),
-                    int(tmdb_id),
+                    int(tmdb_id) if tmdb_id is not None else None,
                     str(title),
                     year,
                     str(release_date_type),
@@ -1520,3 +1598,66 @@ class Store:
                 (cutoff,),
             ).fetchall()
             return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # movie_tracks — title-only tracking helpers
+    # ------------------------------------------------------------------
+
+    def set_movie_track_pending_torrent(
+        self,
+        track_id: str,
+        torrent_hash: str,
+        torrent_name: str,
+        torrent_size: int,
+        torrent_seeds: int,
+        poster_url: str | None,
+    ) -> None:
+        """Store a found torrent awaiting user confirmation."""
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
+            conn.execute(
+                "UPDATE movie_tracks SET pending_torrent_hash = ?, pending_torrent_name = ?, "
+                "pending_torrent_size = ?, pending_torrent_seeds = ?, poster_url = ? "
+                "WHERE track_id = ?",
+                (str(torrent_hash), str(torrent_name), int(torrent_size), int(torrent_seeds), poster_url, track_id),
+            )
+            conn.commit()
+
+    def clear_movie_track_pending_torrent(self, track_id: str) -> None:
+        """Clear the pending torrent fields (after confirm or deny)."""
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
+            conn.execute(
+                "UPDATE movie_tracks SET pending_torrent_hash = NULL, pending_torrent_name = NULL, "
+                "pending_torrent_size = NULL, pending_torrent_seeds = NULL, poster_url = NULL "
+                "WHERE track_id = ?",
+                (track_id,),
+            )
+            conn.commit()
+
+    def get_title_only_tracks(self) -> list[dict[str, Any]]:
+        """Return all movie_tracks where release_status='title_only' and status='pending'."""
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
+            rows = conn.execute(
+                "SELECT * FROM movie_tracks WHERE release_status = 'title_only' AND status = 'pending' AND enabled = 1",
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def movie_track_exists_for_title(self, user_id: int, title: str) -> bool:
+        """Check if a title-only track already exists for a user (case-insensitive)."""
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
+            row = conn.execute(
+                "SELECT 1 FROM movie_tracks WHERE user_id = ? AND tmdb_id IS NULL AND lower(title) = lower(?)",
+                (int(user_id), str(title)),
+            ).fetchone()
+            return row is not None

@@ -11,7 +11,7 @@ Functions
 - ``apply_filters``        -- filter search result rows
 - ``deduplicate_results``  -- deduplicate by info hash, keep best seeder
 - ``sort_rows``            -- sort result rows by key
-- ``prioritize_results``   -- pin best 4K at #1, then 1080p only
+- ``prioritize_results``   -- pick single best 1080p result, fallback to any
 - ``parse_tv_filter``      -- parse "S1E2" style filter text
 - ``build_tv_query``       -- build TV search query string
 - ``strip_patchy_name``    -- strip bot name prefix from text
@@ -50,10 +50,8 @@ def build_search_parser() -> argparse.ArgumentParser:
     p.add_argument("--min-seeds", type=int)
     p.add_argument("--min-size")
     p.add_argument("--max-size")
-    p.add_argument("--min-quality", type=int, choices=[0, 480, 720, 1080, 2160])
     p.add_argument("--sort", choices=["seeds", "size", "name", "leechers", "quality"])
     p.add_argument("--order", choices=["asc", "desc"])
-    p.add_argument("--limit", type=int)
     p.add_argument("query", nargs="+")
     return p
 
@@ -197,26 +195,14 @@ def sort_rows(rows: list[dict[str, Any]], key: str, order: str) -> list[dict[str
 
 
 def prioritize_results(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Rank results: best 4K first, then 1080p, then 720p and below.
+    """Pick the single best search result, preferring 1080p.
 
-    Separates results into above-1080p, exactly-1080p, and below-1080p buckets.
-    At most one above-1080p result (the highest-seeded) is kept and
-    placed first.  All remaining slots are filled with 1080p results
-    then lower-resolution results, each group sorted by seed count descending.
+    Selects the highest-seeded non-trash 1080p result. Falls back to
+    the best result at any resolution if no 1080p results exist.
+    Returns a one-element list, or empty if *rows* is empty.
     """
-    above: list[dict[str, Any]] = []
-    at_1080: list[dict[str, Any]] = []
-    below: list[dict[str, Any]] = []
-
-    for r in rows:
-        name = str(r.get("name") or r.get("fileName") or "")
-        tier = quality_tier(name)
-        if tier > 1080:
-            above.append(r)
-        elif tier == 1080:
-            at_1080.append(r)
-        else:
-            below.append(r)
+    if not rows:
+        return []
 
     def _seeds(x: dict[str, Any]) -> int:
         return int(x.get("nbSeeders") or x.get("seeders") or 0)
@@ -227,21 +213,21 @@ def prioritize_results(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             return bool(getattr(ts, "parsed", None) and ts.parsed.trash)
         return False
 
-    # Within each bucket: non-trash first (sorted by seeds desc),
-    # then trash sources last (sorted by seeds desc).
-    def _sort_key(x: dict[str, Any]) -> tuple[int, int]:
-        return (1 if _is_trash(x) else 0, -_seeds(x))
+    def _sort_key(x: dict[str, Any]) -> tuple[int, int, int]:
+        return (
+            1 if _is_trash(x) else 0,
+            -_seeds(x),
+            -getattr(x.get("_quality_score"), "format_score", 0),
+        )
 
-    above.sort(key=_sort_key)
-    at_1080.sort(key=_sort_key)
-    below.sort(key=_sort_key)
+    at_1080 = [r for r in rows if quality_tier(str(r.get("fileName") or r.get("name") or "")) == 1080]
 
-    result: list[dict[str, Any]] = []
-    if above:
-        result.append(above[0])
-    result.extend(at_1080)
-    result.extend(below)
-    return result
+    if at_1080:
+        at_1080.sort(key=_sort_key)
+        return [at_1080[0]]
+
+    all_sorted = sorted(rows, key=_sort_key)
+    return [all_sorted[0]]
 
 
 # ---------------------------------------------------------------------------

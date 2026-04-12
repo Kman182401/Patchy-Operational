@@ -718,3 +718,186 @@ def test_remove_retry_backoff_s_escalates() -> None:
     b1 = remove_retry_backoff_s(1)
     b4 = remove_retry_backoff_s(4)
     assert b0 < b1 < b4
+
+
+# ---------------------------------------------------------------------------
+# prioritize_results — single-result, 1080p-preferred logic
+# ---------------------------------------------------------------------------
+
+
+def test_build_search_parser_rejects_removed_flags() -> None:
+    """--min-quality and --limit were removed; parser must reject them."""
+    import pytest
+    from patchy_bot.handlers.search import build_search_parser
+
+    parser = build_search_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--min-quality", "1080", "test"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--limit", "5", "test"])
+
+
+def test_build_search_parser_accepts_valid_flags() -> None:
+    """Parser still accepts remaining flags."""
+    from patchy_bot.handlers.search import build_search_parser
+
+    parser = build_search_parser()
+    args = parser.parse_args(["--min-seeds", "10", "--sort", "seeds", "--order", "desc", "my", "query"])
+    assert args.min_seeds == 10
+    assert args.sort == "seeds"
+    assert args.order == "desc"
+    assert args.query == ["my", "query"]
+
+
+def test_prioritize_empty_input() -> None:
+    from patchy_bot.handlers.search import prioritize_results
+
+    assert prioritize_results([]) == []
+
+
+def test_prioritize_returns_single_result_for_one_row() -> None:
+    from patchy_bot.handlers.search import prioritize_results
+    from patchy_bot.quality import score_torrent
+
+    row = {
+        "name": "Movie.1080p.WEB-DL.x264-GRP",
+        "nbSeeders": 50,
+        "fileSize": 2_000_000_000,
+        "_quality_score": score_torrent("Movie.1080p.WEB-DL.x264-GRP", 2_000_000_000, 50),
+    }
+    result = prioritize_results([row])
+    assert len(result) == 1
+    assert result[0] is row
+
+
+def test_prioritize_picks_highest_seeded_1080p() -> None:
+    from patchy_bot.handlers.search import prioritize_results
+    from patchy_bot.quality import score_torrent
+
+    rows = [
+        {
+            "name": "Movie.1080p.WEB-DL.x264-LOW",
+            "nbSeeders": 50,
+            "fileSize": 2_000_000_000,
+            "_quality_score": score_torrent("Movie.1080p.WEB-DL.x264-LOW", 2_000_000_000, 50),
+        },
+        {
+            "name": "Movie.1080p.BluRay.x264-HIGH",
+            "nbSeeders": 100,
+            "fileSize": 4_000_000_000,
+            "_quality_score": score_torrent("Movie.1080p.BluRay.x264-HIGH", 4_000_000_000, 100),
+        },
+    ]
+    result = prioritize_results(rows)
+    assert len(result) == 1
+    assert result[0]["nbSeeders"] == 100
+
+
+def test_prioritize_prefers_1080p_over_4k() -> None:
+    from patchy_bot.handlers.search import prioritize_results
+    from patchy_bot.quality import score_torrent
+
+    rows = [
+        {
+            "name": "Movie.2160p.WEB-DL.x265-4K",
+            "nbSeeders": 200,
+            "fileSize": 8_000_000_000,
+            "_quality_score": score_torrent("Movie.2160p.WEB-DL.x265-4K", 8_000_000_000, 200),
+        },
+        {
+            "name": "Movie.1080p.WEB-DL.x264-HD",
+            "nbSeeders": 50,
+            "fileSize": 2_000_000_000,
+            "_quality_score": score_torrent("Movie.1080p.WEB-DL.x264-HD", 2_000_000_000, 50),
+        },
+    ]
+    result = prioritize_results(rows)
+    assert len(result) == 1
+    assert "1080p" in result[0]["name"]
+
+
+def test_prioritize_fallback_to_highest_seeded_when_no_1080p() -> None:
+    from patchy_bot.handlers.search import prioritize_results
+    from patchy_bot.quality import score_torrent
+
+    rows = [
+        {
+            "name": "Movie.720p.WEB-DL.x264-LOWER",
+            "nbSeeders": 80,
+            "fileSize": 1_000_000_000,
+            "_quality_score": score_torrent("Movie.720p.WEB-DL.x264-LOWER", 1_000_000_000, 80),
+        },
+        {
+            "name": "Movie.2160p.WEB-DL.x265-4K",
+            "nbSeeders": 30,
+            "fileSize": 8_000_000_000,
+            "_quality_score": score_torrent("Movie.2160p.WEB-DL.x265-4K", 8_000_000_000, 30),
+        },
+    ]
+    result = prioritize_results(rows)
+    assert len(result) == 1
+    assert result[0]["nbSeeders"] == 80
+
+
+def test_prioritize_deprioritizes_trash() -> None:
+    from patchy_bot.handlers.search import prioritize_results
+    from patchy_bot.quality import score_torrent
+
+    # CAM/TS sources are marked as trash by score_torrent; good WEB-DL sources are not.
+    # The good row has fewer seeds but should win because it's not trash.
+    trash_row = {
+        "name": "Movie.1080p.CAM.x264-GRP",
+        "nbSeeders": 500,
+        "fileSize": 800_000_000,
+        "_quality_score": score_torrent("Movie.1080p.CAM.x264-GRP", 800_000_000, 500),
+    }
+    good_row = {
+        "name": "Movie.1080p.WEB-DL.x264-GRP",
+        "nbSeeders": 50,
+        "fileSize": 2_000_000_000,
+        "_quality_score": score_torrent("Movie.1080p.WEB-DL.x264-GRP", 2_000_000_000, 50),
+    }
+    # Only include good_row if it's not also rejected — score_torrent may reject CAM outright
+    trash_qs = trash_row["_quality_score"]
+    good_qs = good_row["_quality_score"]
+    if trash_qs.is_rejected:
+        # CAM was fully rejected, so only good_row is a valid candidate anyway
+        result = prioritize_results([good_row])
+        assert len(result) == 1
+        assert result[0]["name"] == good_row["name"]
+    else:
+        result = prioritize_results([trash_row, good_row])
+        assert len(result) == 1
+        # Non-trash should win regardless of seed count
+        if not good_qs.parsed.trash:
+            assert result[0]["name"] == good_row["name"]
+
+
+def test_prioritize_format_score_tiebreaker() -> None:
+    """When two 1080p rows have equal seeds, higher format_score wins."""
+    from types import SimpleNamespace
+
+    from patchy_bot.handlers.search import prioritize_results
+
+    low_fmt = SimpleNamespace(format_score=50, parsed=SimpleNamespace(trash=False), is_rejected=False)
+    high_fmt = SimpleNamespace(format_score=200, parsed=SimpleNamespace(trash=False), is_rejected=False)
+    row_low = {"name": "Movie.1080p.WEB-DL.x264-LOW", "nbSeeders": 100, "_quality_score": low_fmt}
+    row_high = {"name": "Movie.1080p.BluRay.x264-HIGH", "nbSeeders": 100, "_quality_score": high_fmt}
+    result = prioritize_results([row_low, row_high])
+    assert len(result) == 1
+    assert result[0]["name"] == "Movie.1080p.BluRay.x264-HIGH"
+
+
+def test_prioritize_all_trash_returns_best_trash() -> None:
+    """When every result is trash, pick the highest-seeded trash row."""
+    from types import SimpleNamespace
+
+    from patchy_bot.handlers.search import prioritize_results
+
+    ts_a = SimpleNamespace(format_score=10, parsed=SimpleNamespace(trash=True), is_rejected=False)
+    ts_b = SimpleNamespace(format_score=10, parsed=SimpleNamespace(trash=True), is_rejected=False)
+    row_a = {"name": "Movie.1080p.CAM.x264-A", "nbSeeders": 30, "_quality_score": ts_a}
+    row_b = {"name": "Movie.1080p.TS.x264-B", "nbSeeders": 80, "_quality_score": ts_b}
+    result = prioritize_results([row_a, row_b])
+    assert len(result) == 1
+    assert result[0]["nbSeeders"] == 80

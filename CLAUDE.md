@@ -32,3 +32,25 @@
 - Keep instructions that are workflow-specific, command-specific, or operationally detailed out of this file.
 - Treat `.claude/memory/MEMORY.md` as an index, not a narrative log.
 - Preserve path safety and media-type validation when moving or deleting files.
+
+## Obsidian Project Vault
+
+An Obsidian vault lives at `docs/obsidian/` containing project architecture documentation, task tracking, user preferences, and a changelog.
+
+**Key files:**
+- `Dashboard.md` — system overview, status counts, priority queue, current focus
+- `Preferences.md` — user likes/dislikes/conventions (READ before every task, UPDATE when you learn new preferences)
+- `Architecture/` — module map, SQLite tables, callback routes, clients, state model
+- `Tasks/` — open bugs (Fixes/), feature work (Todos/), improvements (Upgrades/)
+- `Ideas/` — future possibilities (read-only unless asked)
+- `Changelog/` — completed work log (append after completing tasks)
+- `_templates/task-template.md` — frontmatter format for new task notes
+
+**Rules:**
+- Before starting any task, check `Preferences.md` for relevant conventions
+- After completing a task that was tracked in the vault, update its status to `done` and add a Changelog entry
+- After completing a task that changes architecture (new modules, tables, callbacks), update the relevant Architecture doc
+- When you learn something the user prefers or dislikes, add it to `Preferences.md` under "Learned Preferences"
+- After any vault modifications, update Dashboard.md counts and priority queue
+- Use the `vault-manager` subagent for complex vault operations
+- New task notes must use the template frontmatter format from `_templates/task-template.md`

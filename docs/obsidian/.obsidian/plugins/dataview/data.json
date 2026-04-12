@@ -1,0 +1,6 @@
+{
+  "enableDataviewJs": false,
+  "enableInlineDataview": true,
+  "taskCompletionTracking": true,
+  "taskCompletionText": "completion"
+}

@@ -16,8 +16,10 @@ from patchy_bot.handlers._shared import (
 )
 import patchy_bot.handlers.download as _dl_mod
 from patchy_bot.handlers.download import (
+    DoAddResult,
     completion_poller_job,
     do_add,
+    do_add_full,
     on_cb_stop,
     render_progress_text,
     resolve_hash_by_name,
@@ -210,7 +212,7 @@ class TestDoAddTimeouts:
 
     @pytest.mark.asyncio
     async def test_do_add_success(self, mock_ctx, monkeypatch):
-        """do_add returns a dict with required keys when all pre-flights pass."""
+        """do_add returns a DoAddResult with required fields when all pre-flights pass."""
         torrent_hash = "f" * 40
         search_id = _save_search_with_hash(mock_ctx.store, 12345, torrent_hash)
 
@@ -230,13 +232,15 @@ class TestDoAddTimeouts:
 
         result = await do_add(mock_ctx, 12345, search_id, 1, "movies")
 
-        assert isinstance(result, dict)
-        for key in ("summary", "name", "hash", "category", "path"):
-            assert key in result, f"Missing key: {key}"
-        assert result["hash"] == torrent_hash
+        assert isinstance(result, DoAddResult)
+        assert result.hash == torrent_hash
+        assert result.name == "Test.Movie.2024.1080p"
+        assert result.category == "Movies"
+        assert result.save_path
 
     @pytest.mark.asyncio
-    async def test_do_add_direct_torrent_blocks_suspicious_file_list(self, mock_ctx, monkeypatch):
+    async def test_do_add_full_blocks_suspicious_file_list(self, mock_ctx, monkeypatch):
+        """do_add_full raises RuntimeError when post-add file inspection finds malware."""
         rows = [
             {
                 "name": "Bad.Movie.2024.1080p",
@@ -258,12 +262,13 @@ class TestDoAddTimeouts:
         monkeypatch.setattr("patchy_bot.handlers.download.resolve_hash_by_name", _fake_resolve)
 
         with pytest.raises(RuntimeError, match="suspicious content detected"):
-            await do_add(mock_ctx, 12345, search_id, 1, "movies")
+            await do_add_full(mock_ctx, 12345, search_id, 1, "movies")
 
         mock_ctx.qbt.delete_torrent.assert_called_once_with("a" * 40, delete_files=True)
 
     @pytest.mark.asyncio
-    async def test_do_add_direct_torrent_resumes_after_clean_file_inspection(self, mock_ctx, monkeypatch):
+    async def test_do_add_full_resumes_after_clean_file_inspection(self, mock_ctx, monkeypatch):
+        """do_add_full resumes torrent after clean inspection and returns compat dict."""
         rows = [
             {
                 "name": "Clean.Movie.2024.1080p",
@@ -285,8 +290,9 @@ class TestDoAddTimeouts:
 
         monkeypatch.setattr("patchy_bot.handlers.download.resolve_hash_by_name", _fake_resolve)
 
-        result = await do_add(mock_ctx, 12345, search_id, 1, "movies")
+        result = await do_add_full(mock_ctx, 12345, search_id, 1, "movies")
 
+        assert isinstance(result, dict)
         assert result["hash"] == "b" * 40
         mock_ctx.qbt.resume_torrents.assert_called_once_with("b" * 40)
 
@@ -1223,3 +1229,312 @@ class TestAutoDeleteTaskTracking:
 
         # The done callback should have discarded it from the set
         assert len(ctx.background_tasks) == 0
+
+
+# ---------------------------------------------------------------------------
+# Split pipeline tests: do_add (fast), do_add_background, mwblock callback
+# ---------------------------------------------------------------------------
+
+
+def _make_fast_result(
+    *,
+    torrent_hash: str | None = "a" * 40,
+    name: str = "Test.Movie.2024.1080p",
+    size: int = 2_000_000_000,
+    category: str = "Movies",
+    save_path: str = "/tmp/Movies",
+    url: str = "https://tracker.invalid/download/test.torrent",
+    is_magnet: bool = False,
+) -> DoAddResult:
+    """Build a DoAddResult for background-phase tests."""
+    return DoAddResult(
+        name=name,
+        size=size,
+        hash=torrent_hash,
+        category=category,
+        save_path=save_path,
+        url=url,
+        is_magnet=is_magnet,
+        idx=1,
+        target_label="Movies",
+        resp="Ok.",
+        media_type="movie",
+        uploader=None,
+    )
+
+
+class TestDoAddFastPhase:
+    """Tests for the fast phase of do_add (returns DoAddResult quickly)."""
+
+    @pytest.mark.asyncio
+    async def test_returns_do_add_result(self, mock_ctx, monkeypatch):
+        """do_add returns a DoAddResult dataclass."""
+        search_id = _save_search_with_hash(mock_ctx.store, 12345, "a" * 40)
+        monkeypatch.setattr("patchy_bot.handlers.download.ensure_media_categories", lambda ctx: (True, "ok"))
+        monkeypatch.setattr("patchy_bot.handlers.download.qbt_transport_status", lambda ctx: (True, "ok"))
+        monkeypatch.setattr("patchy_bot.handlers.download.vpn_ready_for_download", lambda ctx: (True, "ok"))
+        mock_ctx.qbt.add_url = MagicMock(return_value="Ok.")
+
+        result = await do_add(mock_ctx, 12345, search_id, 1, "movies")
+
+        assert isinstance(result, DoAddResult)
+        assert result.name == "Test.Movie.2024.1080p"
+        assert result.category == "Movies"
+        assert result.resp == "Ok."
+        # Hash-based rows generate magnet URLs
+        assert result.is_magnet is True
+
+    @pytest.mark.asyncio
+    async def test_hash_from_search_row(self, mock_ctx, monkeypatch):
+        """do_add extracts hash from search result row when present."""
+        torrent_hash = "b" * 40
+        search_id = _save_search_with_hash(mock_ctx.store, 12345, torrent_hash)
+        monkeypatch.setattr("patchy_bot.handlers.download.ensure_media_categories", lambda ctx: (True, "ok"))
+        monkeypatch.setattr("patchy_bot.handlers.download.qbt_transport_status", lambda ctx: (True, "ok"))
+        monkeypatch.setattr("patchy_bot.handlers.download.vpn_ready_for_download", lambda ctx: (True, "ok"))
+        mock_ctx.qbt.add_url = MagicMock(return_value="Ok.")
+
+        result = await do_add(mock_ctx, 12345, search_id, 1, "movies")
+
+        assert result.hash == torrent_hash
+
+    @pytest.mark.asyncio
+    async def test_no_hash_returns_none(self, mock_ctx, monkeypatch):
+        """do_add returns hash=None when the search row has no extractable hash."""
+        rows = [
+            {
+                "name": "No.Hash.Movie.2024.1080p",
+                "size": 2_000_000_000,
+                "seeds": 10,
+                "url": "https://tracker.invalid/download/nohash.torrent",
+            }
+        ]
+        search_id = mock_ctx.store.save_search(12345, "No Hash", {"sort": "quality"}, rows)
+        monkeypatch.setattr("patchy_bot.handlers.download.ensure_media_categories", lambda ctx: (True, "ok"))
+        monkeypatch.setattr("patchy_bot.handlers.download.qbt_transport_status", lambda ctx: (True, "ok"))
+        monkeypatch.setattr("patchy_bot.handlers.download.vpn_ready_for_download", lambda ctx: (True, "ok"))
+        mock_ctx.qbt.add_url = MagicMock(return_value="Ok.")
+
+        result = await do_add(mock_ctx, 12345, search_id, 1, "movies")
+
+        assert result.hash is None
+        assert result.is_magnet is False
+
+    @pytest.mark.asyncio
+    async def test_does_not_call_resolve_hash(self, mock_ctx, monkeypatch):
+        """Fast phase never calls resolve_hash_by_name (that's background work)."""
+        search_id = _save_search_with_hash(mock_ctx.store, 12345, "c" * 40)
+        monkeypatch.setattr("patchy_bot.handlers.download.ensure_media_categories", lambda ctx: (True, "ok"))
+        monkeypatch.setattr("patchy_bot.handlers.download.qbt_transport_status", lambda ctx: (True, "ok"))
+        monkeypatch.setattr("patchy_bot.handlers.download.vpn_ready_for_download", lambda ctx: (True, "ok"))
+        mock_ctx.qbt.add_url = MagicMock(return_value="Ok.")
+
+        resolve_called = False
+        _orig_resolve = _dl_mod.resolve_hash_by_name
+
+        async def _tracking_resolve(*args, **kwargs):
+            nonlocal resolve_called
+            resolve_called = True
+            return await _orig_resolve(*args, **kwargs)
+
+        monkeypatch.setattr("patchy_bot.handlers.download.resolve_hash_by_name", _tracking_resolve)
+
+        await do_add(mock_ctx, 12345, search_id, 1, "movies")
+
+        assert not resolve_called, "Fast phase should not call resolve_hash_by_name"
+
+
+class TestDoAddBackground:
+    """Tests for the background phase of do_add_background."""
+
+    @pytest.mark.asyncio
+    async def test_resolves_hash_when_missing(self, mock_ctx, monkeypatch):
+        """Background phase calls resolve_hash_by_name when hash is None."""
+        from patchy_bot.handlers.download import do_add_background
+
+        result = _make_fast_result(torrent_hash=None)
+        msg = MagicMock()
+        msg.edit_text = AsyncMock()
+
+        resolved_hash = "d" * 40
+
+        async def _fake_resolve(ctx, title, category, wait_s=20):
+            return resolved_hash
+
+        monkeypatch.setattr("patchy_bot.handlers.download.resolve_hash_by_name", _fake_resolve)
+        mock_ctx.qbt.get_torrent_files = MagicMock(return_value=[{"name": "Test.Movie.mkv"}])
+        mock_ctx.qbt.resume_torrents = MagicMock()
+
+        await do_add_background(mock_ctx, 12345, result, msg, start_tracker=False)
+
+        mock_ctx.qbt.resume_torrents.assert_called_once_with(resolved_hash)
+
+    @pytest.mark.asyncio
+    async def test_malware_block_pauses_torrent(self, mock_ctx, monkeypatch):
+        """Concurrent file scan pauses torrent and sends warning on malware detection."""
+        from patchy_bot.handlers.download import _concurrent_file_scan
+
+        result = _make_fast_result()
+        msg = MagicMock()
+        msg.chat_id = 12345
+        bot_mock = MagicMock()
+        sent_msg = MagicMock()
+        bot_mock.send_message = AsyncMock(return_value=sent_msg)
+        msg.get_bot = MagicMock(return_value=bot_mock)
+
+        mock_ctx.qbt.get_torrent_files = MagicMock(return_value=[{"name": "Bad.Movie.mkv"}, {"name": "setup.exe"}])
+        mock_ctx.qbt.pause_torrents = MagicMock()
+
+        await _concurrent_file_scan(mock_ctx, 12345, "a" * 40, result, msg)
+
+        mock_ctx.qbt.pause_torrents.assert_called_once_with("a" * 40)
+        # Should send NEW message with security warning (not edit interim)
+        bot_mock.send_message.assert_called_once()
+        call_text = bot_mock.send_message.call_args[1]["text"]
+        assert "Security Hold" in call_text
+
+    @pytest.mark.asyncio
+    async def test_clean_scan_starts_queue(self, mock_ctx, monkeypatch):
+        """Background phase resumes torrent after clean malware scan."""
+        from patchy_bot.handlers.download import do_add_background
+
+        result = _make_fast_result()
+        msg = MagicMock()
+        msg.edit_text = AsyncMock()
+
+        mock_ctx.qbt.get_torrent_files = MagicMock(return_value=[{"name": "Clean.Movie.2024.1080p.mkv"}])
+        mock_ctx.qbt.resume_torrents = MagicMock()
+
+        await do_add_background(mock_ctx, 12345, result, msg, start_tracker=False)
+
+        mock_ctx.qbt.resume_torrents.assert_called_once_with("a" * 40)
+
+    @pytest.mark.asyncio
+    async def test_hash_timeout_notifies_user(self, mock_ctx, monkeypatch):
+        """Background phase edits message when hash resolution returns None."""
+        from patchy_bot.handlers.download import do_add_background
+
+        result = _make_fast_result(torrent_hash=None)
+        msg = MagicMock()
+        msg.edit_text = AsyncMock()
+
+        async def _fail_resolve(ctx, title, category, wait_s=20):
+            return None
+
+        monkeypatch.setattr("patchy_bot.handlers.download.resolve_hash_by_name", _fail_resolve)
+
+        await do_add_background(mock_ctx, 12345, result, msg, start_tracker=False)
+
+        msg.edit_text.assert_called()
+        call_text = msg.edit_text.call_args[0][0]
+        assert "Could not resolve torrent hash" in call_text
+
+    @pytest.mark.asyncio
+    async def test_exception_handling(self, mock_ctx, monkeypatch):
+        """Background phase logs exceptions without raising."""
+        from patchy_bot.handlers.download import do_add_background
+
+        result = _make_fast_result()
+        msg = MagicMock()
+        msg.edit_text = AsyncMock()
+
+        # Force an unhandled exception in the background phase
+        async def _explode(ctx, title, timeout_s):
+            raise ValueError("test explosion")
+
+        monkeypatch.setattr("patchy_bot.handlers.download._wait_for_file_inspection", _explode)
+
+        # Should NOT raise — it's fire-and-forget
+        await do_add_background(mock_ctx, 12345, result, msg, start_tracker=False)
+
+        # The finally block should have edited the message with an error state
+        msg.edit_text.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_queued_when_slot_occupied(self, mock_ctx, monkeypatch):
+        """Background phase enqueues torrent when download slot is occupied."""
+        from patchy_bot.handlers.download import do_add_background
+
+        result = _make_fast_result()
+        msg = MagicMock()
+        msg.edit_text = AsyncMock()
+
+        mock_ctx.qbt.get_torrent_files = MagicMock(return_value=[{"name": "Clean.Movie.mkv"}])
+        mock_ctx.qbt.resume_torrents = MagicMock()
+        mock_ctx.active_download_hash = "z" * 40  # Slot occupied
+
+        await do_add_background(mock_ctx, 12345, result, msg, start_tracker=False)
+
+        # Should NOT resume — slot was occupied
+        mock_ctx.qbt.resume_torrents.assert_not_called()
+        # Should be queued
+        assert not mock_ctx.download_queue.empty()
+        queued_item = mock_ctx.download_queue.get_nowait()
+        assert queued_item["hash"] == ("a" * 40).lower()
+
+        # Reset for cleanup
+        mock_ctx.active_download_hash = None
+
+
+class TestMwblockCallback:
+    """Tests for the mwblock: callback handler."""
+
+    @pytest.mark.asyncio
+    async def test_keep_resumes_torrent(self, mock_ctx, mock_callback_query):
+        """mwblock:keep resumes the paused torrent."""
+        from patchy_bot.handlers.download import on_cb_mwblock
+
+        torrent_hash = "a" * 40
+        mock_ctx.qbt.resume_torrents = MagicMock()
+
+        await on_cb_mwblock(mock_ctx, data=f"mwblock:keep:{torrent_hash}", q=mock_callback_query, user_id=12345)
+
+        mock_ctx.qbt.resume_torrents.assert_called_once_with(torrent_hash)
+        mock_callback_query.answer.assert_called_with("Torrent resumed")
+
+    @pytest.mark.asyncio
+    async def test_delete_removes_torrent(self, mock_ctx, mock_callback_query):
+        """mwblock:delete deletes the torrent with files."""
+        from patchy_bot.handlers.download import on_cb_mwblock
+
+        torrent_hash = "b" * 40
+        mock_ctx.qbt.delete_torrent = MagicMock()
+
+        await on_cb_mwblock(mock_ctx, data=f"mwblock:delete:{torrent_hash}", q=mock_callback_query, user_id=12345)
+
+        mock_ctx.qbt.delete_torrent.assert_called_once_with(torrent_hash, delete_files=True)
+        mock_callback_query.answer.assert_called_with("Torrent deleted")
+
+    @pytest.mark.asyncio
+    async def test_delete_clears_active_hash(self, mock_ctx, mock_callback_query):
+        """mwblock:delete clears active_download_hash if it matches."""
+        from patchy_bot.handlers.download import on_cb_mwblock
+
+        torrent_hash = "c" * 40
+        mock_ctx.active_download_hash = torrent_hash
+        mock_ctx.qbt.delete_torrent = MagicMock()
+
+        await on_cb_mwblock(mock_ctx, data=f"mwblock:delete:{torrent_hash}", q=mock_callback_query, user_id=12345)
+
+        assert mock_ctx.active_download_hash is None
+
+    @pytest.mark.asyncio
+    async def test_missing_torrent_graceful(self, mock_ctx, mock_callback_query):
+        """mwblock:keep handles gracefully when torrent no longer exists."""
+        from patchy_bot.handlers.download import on_cb_mwblock
+
+        torrent_hash = "d" * 40
+        mock_ctx.qbt.resume_torrents = MagicMock(side_effect=Exception("not found"))
+
+        await on_cb_mwblock(mock_ctx, data=f"mwblock:keep:{torrent_hash}", q=mock_callback_query, user_id=12345)
+
+        mock_callback_query.answer.assert_called_with("Torrent no longer exists", show_alert=True)
+
+    @pytest.mark.asyncio
+    async def test_invalid_hash_rejected(self, mock_ctx, mock_callback_query):
+        """mwblock: rejects callback data with invalid hash."""
+        from patchy_bot.handlers.download import on_cb_mwblock
+
+        await on_cb_mwblock(mock_ctx, data="mwblock:keep:not_a_hash", q=mock_callback_query, user_id=12345)
+
+        mock_callback_query.answer.assert_called_with("Invalid hash", show_alert=True)

@@ -506,7 +506,8 @@ class TestReleaseGateStore:
 
     def test_home_date_is_inferred_column_exists(self, store: Store) -> None:
         cols = {
-            row[1] for row in store._conn.execute("PRAGMA table_info(movie_tracks)").fetchall()  # type: ignore[attr-defined]
+            row[1]
+            for row in store._conn.execute("PRAGMA table_info(movie_tracks)").fetchall()  # type: ignore[attr-defined]
         }
         assert "home_date_is_inferred" in cols
 
@@ -863,7 +864,9 @@ def _make_bot(mock_config, mock_store, mock_qbt, mock_tvmeta, mock_plex):
 async def test_inferred_date_replaced_by_confirmed(mock_config, mock_store, mock_qbt, mock_tvmeta, mock_plex):
     bot = _make_bot(mock_config, mock_store, mock_qbt, mock_tvmeta, mock_plex)
     tid = mock_store.create_movie_track(12345, 321, "Future Film", 2026, "home_release", now_ts(), "Future Film 2026")
-    mock_store.update_movie_release_dates(tid, 1_700_000_000, 1_704_000_000, None, 1_704_000_000, True, "waiting_home", True)
+    mock_store.update_movie_release_dates(
+        tid, 1_700_000_000, 1_704_000_000, None, 1_704_000_000, True, "waiting_home", True
+    )
     mock_store._conn.execute("UPDATE movie_tracks SET last_release_check_ts = 0 WHERE track_id = ?", (tid,))  # type: ignore[attr-defined]
     mock_store._conn.commit()  # type: ignore[attr-defined]
     track = mock_store.get_movie_track(tid)
@@ -890,7 +893,9 @@ async def test_inferred_date_replaced_by_confirmed(mock_config, mock_store, mock
 async def test_inferred_date_unchanged_when_none_available(mock_config, mock_store, mock_qbt, mock_tvmeta, mock_plex):
     bot = _make_bot(mock_config, mock_store, mock_qbt, mock_tvmeta, mock_plex)
     tid = mock_store.create_movie_track(12345, 654, "Waiting Film", 2026, "home_release", now_ts(), "Waiting Film 2026")
-    mock_store.update_movie_release_dates(tid, 1_700_000_000, 1_704_000_000, None, 1_704_000_000, True, "waiting_home", True)
+    mock_store.update_movie_release_dates(
+        tid, 1_700_000_000, 1_704_000_000, None, 1_704_000_000, True, "waiting_home", True
+    )
     mock_store._conn.execute("UPDATE movie_tracks SET last_release_check_ts = 0 WHERE track_id = ?", (tid,))  # type: ignore[attr-defined]
     mock_store._conn.commit()  # type: ignore[attr-defined]
     track = mock_store.get_movie_track(tid)
@@ -916,7 +921,9 @@ async def test_inferred_date_unchanged_when_none_available(mock_config, mock_sto
 @pytest.mark.asyncio
 async def test_auto_remove_when_in_plex(mock_config, mock_store, mock_qbt, mock_tvmeta, mock_plex):
     bot = _make_bot(mock_config, mock_store, mock_qbt, mock_tvmeta, mock_plex)
-    tid = mock_store.create_movie_track(12345, 777, "Already In Plex", 2024, "home_release", now_ts(), "Already In Plex 2024")
+    tid = mock_store.create_movie_track(
+        12345, 777, "Already In Plex", 2024, "home_release", now_ts(), "Already In Plex 2024"
+    )
     mock_store.update_movie_release_dates(tid, 1_700_000_000, None, None, 1_704_000_000, True, "waiting_home", True)
     track = mock_store.get_movie_track(tid)
     assert track is not None
@@ -927,3 +934,226 @@ async def test_auto_remove_when_in_plex(mock_config, mock_store, mock_qbt, mock_
 
     assert removed is True
     assert mock_store.get_movie_track(tid) is None
+
+
+# ---------------------------------------------------------------------------
+# Title-only tracking tests
+# ---------------------------------------------------------------------------
+
+
+class TestTitleOnlyTracking:
+    """Tests for title-only movie tracking (no TMDB ID)."""
+
+    def test_title_track_callback_creates_row(self, store: Store) -> None:
+        """msch:title_track creates a row with tmdb_id=None and release_status='title_only'."""
+        tid = store.create_movie_track(100, None, "Scary Movie 6", None, "title_only", 0, "Scary Movie 6", False)
+        store.update_movie_release_dates(tid, None, None, None, None, False, "title_only", False)
+        track = store.get_movie_track(tid)
+        assert track is not None
+        assert track["tmdb_id"] is None
+        assert track["release_date_type"] == "title_only"
+        assert track["release_status"] == "title_only"
+        assert track["status"] == "pending"
+
+    def test_title_track_duplicate_rejected(self, store: Store) -> None:
+        """Second title-only track for same title (case-insensitive) is detected."""
+        store.create_movie_track(100, None, "Scary Movie 6", None, "title_only", 0, "Scary Movie 6", False)
+        assert store.movie_track_exists_for_title(100, "scary movie 6") is True
+        assert store.movie_track_exists_for_title(100, "SCARY MOVIE 6") is True
+        assert store.movie_track_exists_for_title(200, "Scary Movie 6") is False  # different user
+
+    def test_title_only_runner_no_results_sets_next_check(self, store: Store) -> None:
+        """Runner tick with 0 qualifying results sets next_check_ts to ~1hr from now."""
+        tid = store.create_movie_track(100, None, "Obscure Film", None, "title_only", 0, "Obscure Film", False)
+        store.update_movie_release_dates(tid, None, None, None, None, False, "title_only", False)
+        tracks = store.get_title_only_tracks()
+        assert len(tracks) == 1
+        # Simulate runner setting next_check_ts after no results
+        store.update_movie_track_next_check(tid, now_ts() + 3600)
+        track = store.get_movie_track(tid)
+        assert track is not None
+        assert track["next_check_ts"] is not None
+        assert track["next_check_ts"] > now_ts()
+
+    def test_pending_torrent_storage(self, store: Store) -> None:
+        """set_movie_track_pending_torrent stores fields correctly."""
+        tid = store.create_movie_track(100, None, "Test Movie", None, "title_only", 0, "Test Movie", False)
+        store.set_movie_track_pending_torrent(
+            tid, "abc123", "Test.Movie.1080p", 4_000_000_000, 50, "https://img/poster.jpg"
+        )
+        track = store.get_movie_track(tid)
+        assert track is not None
+        assert track["pending_torrent_hash"] == "abc123"
+        assert track["pending_torrent_name"] == "Test.Movie.1080p"
+        assert track["pending_torrent_size"] == 4_000_000_000
+        assert track["pending_torrent_seeds"] == 50
+        assert track["poster_url"] == "https://img/poster.jpg"
+
+    def test_clear_pending_torrent(self, store: Store) -> None:
+        """clear_movie_track_pending_torrent nulls all pending fields."""
+        tid = store.create_movie_track(100, None, "Test Movie", None, "title_only", 0, "Test Movie", False)
+        store.set_movie_track_pending_torrent(tid, "abc123", "Name", 1000, 10, None)
+        store.clear_movie_track_pending_torrent(tid)
+        track = store.get_movie_track(tid)
+        assert track is not None
+        assert track["pending_torrent_hash"] is None
+        assert track["pending_torrent_name"] is None
+
+    def test_get_title_only_tracks(self, store: Store) -> None:
+        """get_title_only_tracks returns only title_only+pending tracks."""
+        tid1 = store.create_movie_track(100, None, "Film A", None, "title_only", 0, "Film A", False)
+        store.update_movie_release_dates(tid1, None, None, None, None, False, "title_only", False)
+        # Non-title-only track should not appear
+        tid2 = store.create_movie_track(100, 999, "Film B", 2024, "theatrical", now_ts() - 86400, "Film B 2024")
+        tracks = store.get_title_only_tracks()
+        assert len(tracks) == 1
+        assert tracks[0]["title"] == "Film A"
+
+    def test_multiple_title_only_tracks_per_user(self, store: Store) -> None:
+        """Multiple title-only tracks for the same user should all be stored."""
+        tid1 = store.create_movie_track(100, None, "Film A", None, "title_only", 0, "Film A", False)
+        tid2 = store.create_movie_track(100, None, "Film B", None, "title_only", 0, "Film B", False)
+        store.update_movie_release_dates(tid1, None, None, None, None, False, "title_only", False)
+        store.update_movie_release_dates(tid2, None, None, None, None, False, "title_only", False)
+        tracks = store.get_title_only_tracks()
+        assert len(tracks) == 2
+
+
+class TestTitleOnlyCallbacks:
+    """Tests for msch:title_track, msch:dl_confirm, and msch:dl_deny callbacks."""
+
+    @pytest.mark.asyncio
+    async def test_title_track_callback_flow(self, fake_app: FakeBotApp, query: MagicMock) -> None:
+        """msch:title_track:<encoded_query> creates a title-only track."""
+
+        async def passthrough(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        import urllib.parse
+
+        encoded = urllib.parse.quote("Scary Movie 6", safe="")
+
+        with patch("patchy_bot.handlers.schedule.asyncio.to_thread", side_effect=passthrough):
+            await on_cb_movie_schedule(fake_app, data=f"msch:title_track:{encoded}", q=query, user_id=USER_ID)
+
+        # Verify track was created in store
+        tracks = fake_app.store.get_movie_tracks_for_user(USER_ID)
+        title_only = [t for t in tracks if t["tmdb_id"] is None]
+        assert len(title_only) == 1
+        assert title_only[0]["title"] == "Scary Movie 6"
+        assert title_only[0]["release_date_type"] == "title_only"
+        # Verify confirmation message rendered
+        assert any("Now tracking" in str(args) for _, args, _ in fake_app.render_calls)
+
+    @pytest.mark.asyncio
+    async def test_title_track_duplicate_shows_message(self, fake_app: FakeBotApp, query: MagicMock) -> None:
+        """Second msch:title_track for same title shows 'already tracking'."""
+
+        async def passthrough(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        import urllib.parse
+
+        encoded = urllib.parse.quote("Scary Movie 6", safe="")
+
+        with patch("patchy_bot.handlers.schedule.asyncio.to_thread", side_effect=passthrough):
+            # First create
+            await on_cb_movie_schedule(fake_app, data=f"msch:title_track:{encoded}", q=query, user_id=USER_ID)
+            # Reset render calls
+            fake_app.render_calls.clear()
+            # Second attempt — should show "already tracking"
+            await on_cb_movie_schedule(fake_app, data=f"msch:title_track:{encoded}", q=query, user_id=USER_ID)
+
+        assert any("Already tracking" in str(args) for _, args, _ in fake_app.render_calls)
+
+    @pytest.mark.asyncio
+    async def test_dl_confirm_calls_add_url(self, fake_app: FakeBotApp, query: MagicMock) -> None:
+        """msch:dl_confirm invokes qbt.add_url with correct hash and Movies category."""
+
+        async def passthrough(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        # Create a title-only track in notifying state
+        tid = fake_app.store.create_movie_track(USER_ID, None, "Test Film", None, "title_only", 0, "Test Film", False)
+        fake_app.store.update_movie_release_dates(tid, None, None, None, None, False, "title_only", False)
+        fake_app.store.update_movie_track_status(tid, status="notifying")
+        fake_app.store.set_movie_track_pending_torrent(tid, "deadbeef" * 5, "Test.Film.1080p", 4_000_000_000, 50, None)
+
+        with patch("patchy_bot.handlers.schedule.asyncio.to_thread", side_effect=passthrough):
+            await on_cb_movie_schedule(fake_app, data=f"msch:dl_confirm:{tid}", q=query, user_id=USER_ID)
+
+        # Verify qbt.add_url was called
+        fake_app.qbt.add_url.assert_called_once()
+        call_args = fake_app.qbt.add_url.call_args
+        assert "deadbeef" * 5 in str(call_args)
+        # Track should be in downloading state with pending cleared
+        track = fake_app.store.get_movie_track(tid)
+        assert track is not None
+        assert track["status"] == "downloading"
+        assert track["pending_torrent_hash"] is None
+
+    @pytest.mark.asyncio
+    async def test_dl_confirm_expired_shows_error(self, fake_app: FakeBotApp, query: MagicMock) -> None:
+        """Track not in 'notifying' state returns error message."""
+
+        async def passthrough(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        # Create a track in 'pending' state (not 'notifying')
+        tid = fake_app.store.create_movie_track(USER_ID, None, "Test Film", None, "title_only", 0, "Test Film", False)
+
+        with patch("patchy_bot.handlers.schedule.asyncio.to_thread", side_effect=passthrough):
+            await on_cb_movie_schedule(fake_app, data=f"msch:dl_confirm:{tid}", q=query, user_id=USER_ID)
+
+        assert any("expired" in str(args).lower() for _, args, _ in fake_app.render_calls)
+
+    @pytest.mark.asyncio
+    async def test_dl_deny_deletes_track(self, fake_app: FakeBotApp, query: MagicMock) -> None:
+        """msch:dl_deny deletes the track from store."""
+
+        async def passthrough(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        tid = fake_app.store.create_movie_track(
+            USER_ID, None, "Denied Film", None, "title_only", 0, "Denied Film", False
+        )
+
+        with patch("patchy_bot.handlers.schedule.asyncio.to_thread", side_effect=passthrough):
+            await on_cb_movie_schedule(fake_app, data=f"msch:dl_deny:{tid}", q=query, user_id=USER_ID)
+
+        assert fake_app.store.get_movie_track(tid) is None
+        assert any("cancelled" in str(args).lower() for _, args, _ in fake_app.render_calls)
+
+
+class TestTitleOnlyRunnerQuality:
+    """Tests verifying quality gates in title-only runner path."""
+
+    def test_cam_result_rejected_by_score_torrent(self) -> None:
+        """CAM source must be rejected by score_torrent."""
+        from patchy_bot.quality import score_torrent
+
+        ts = score_torrent("Movie.2024.CAM.x264-GROUP", 2_000_000_000, 50, media_type="movie")
+        assert ts.is_rejected is True
+
+    def test_ts_result_rejected_by_score_torrent(self) -> None:
+        """TeleSync source must be rejected by score_torrent."""
+        from patchy_bot.quality import score_torrent
+
+        ts = score_torrent("Movie.2024.TS.x264-GROUP", 2_000_000_000, 50, media_type="movie")
+        assert ts.is_rejected is True
+
+    def test_720p_below_resolution_gate(self) -> None:
+        """720p result must not qualify (1080p+ gate)."""
+        from patchy_bot.quality import score_torrent
+
+        ts = score_torrent("Movie.2024.720p.WEB-DL.x264-GROUP", 2_000_000_000, 50, media_type="movie")
+        # 720p is tier 2, which is < 3 (1080p) — runner filters this
+        assert ts.resolution_tier < 3
+
+    def test_1080p_qualifies(self) -> None:
+        """1080p WEB-DL should pass quality gate."""
+        from patchy_bot.quality import score_torrent
+
+        ts = score_torrent("Movie.2024.1080p.WEB-DL.DDP5.1.H264-NTG", 4_000_000_000, 50, media_type="movie")
+        assert ts.is_rejected is False
+        assert ts.resolution_tier >= 3

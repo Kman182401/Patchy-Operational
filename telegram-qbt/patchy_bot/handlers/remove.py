@@ -729,13 +729,11 @@ def remove_candidate_keyboard(
                 if season_number <= 0:
                     continue
                 label = remove_display_name(season_item, single_season_show=single_season_show)
-                rows.append(
-                    [InlineKeyboardButton(label[:56], callback_data=f"rm:showseason:{idx}:{season_number}")]
-                )
+                rows.append([InlineKeyboardButton(label[:56], callback_data=f"rm:showseason:{idx}:{season_number}")])
             continue
         rows.append([InlineKeyboardButton(remove_toggle_label(candidate, chosen), callback_data=f"rm:pick:{idx}")])
-    rows.append([InlineKeyboardButton(f"\U0001f9fe Review Selection ({len(chosen)})", callback_data="rm:review")])
     if chosen:
+        rows.append([InlineKeyboardButton(f"\U0001f9fe Review Selection ({len(chosen)})", callback_data="rm:review")])
         rows.append([InlineKeyboardButton("\U0001f9f9 Clear Selection", callback_data="rm:clear")])
     rows.append([InlineKeyboardButton("\U0001f3e0 Home", callback_data="nav:home")])
     rows.extend(nav_footer(include_home=False))
@@ -761,8 +759,10 @@ def remove_show_action_keyboard(series_selected: bool, selected_count: int) -> I
                 InlineKeyboardButton("\U0001f4c2 Browse Seasons", callback_data="rm:seasons"),
             ]
         )
-    rows.append([InlineKeyboardButton(f"\U0001f9fe Review Selection ({selected_count})", callback_data="rm:review")])
     if selected_count > 0:
+        rows.append(
+            [InlineKeyboardButton(f"\U0001f9fe Review Selection ({selected_count})", callback_data="rm:review")]
+        )
         rows.append([InlineKeyboardButton("\U0001f9f9 Clear Selection", callback_data="rm:clear")])
     rows.append(
         [
@@ -783,9 +783,11 @@ def remove_season_action_keyboard(selected: bool, selected_count: int) -> Inline
             ),
             InlineKeyboardButton("\U0001f39e Browse Episodes", callback_data="rm:episodes"),
         ],
-        [InlineKeyboardButton(f"\U0001f9fe Review Selection ({selected_count})", callback_data="rm:review")],
     ]
     if selected_count > 0:
+        rows.append(
+            [InlineKeyboardButton(f"\U0001f9fe Review Selection ({selected_count})", callback_data="rm:review")]
+        )
         rows.append([InlineKeyboardButton("\U0001f9f9 Clear Selection", callback_data="rm:clear")])
     rows.append([InlineKeyboardButton("\u2b05\ufe0f Back to Series", callback_data="rm:back:show")])
     rows.append([InlineKeyboardButton("\U0001f3e0 Home", callback_data="nav:home")])
@@ -852,25 +854,27 @@ def remove_paginated_keyboard(
         nav_row.append(InlineKeyboardButton("Next \u27a1\ufe0f", callback_data=f"{nav_prefix}:{page + 1}"))
     if nav_row:
         rows.append(nav_row)
-    review_button = InlineKeyboardButton(f"\U0001f9fe Review Selection ({len(chosen)})", callback_data="rm:review")
-    clear_button = InlineKeyboardButton("\U0001f9f9 Clear Selection", callback_data="rm:clear")
     back_button = InlineKeyboardButton("\u2b05\ufe0f Back", callback_data=back_callback) if back_callback else None
     home_button = InlineKeyboardButton("\U0001f3e0 Home", callback_data="nav:home")
 
-    if compact_browse_footer and not chosen:
+    if chosen:
+        review_button = InlineKeyboardButton(f"\U0001f9fe Review Selection ({len(chosen)})", callback_data="rm:review")
+        clear_button = InlineKeyboardButton("\U0001f9f9 Clear Selection", callback_data="rm:clear")
+        rows.append([review_button])
+        rows.append([clear_button])
+        if back_button is not None:
+            rows.append([back_button])
+        rows.append([home_button])
+    elif compact_browse_footer:
         if len(nav_row) == 1 and back_button is not None:
             rows[-1] = [back_button, nav_row[0]]
-            rows.append([review_button, home_button])
+            rows.append([home_button])
         else:
-            rows.append([review_button])
             if back_button is not None:
                 rows.append([back_button, home_button])
             else:
                 rows.append([home_button])
     else:
-        rows.append([review_button])
-        if chosen:
-            rows.append([clear_button])
         if back_button is not None:
             rows.append([back_button])
         rows.append([home_button])
@@ -997,7 +1001,9 @@ def remove_merge_show_children(children: list[dict[str, Any]]) -> list[dict[str,
             if bool(child.get("is_virtual")):
                 existing = virtual_buckets.get(season_number)
                 if existing is None:
-                    child["group_items"] = [remove_enrich_candidate(dict(item)) for item in child.get("group_items") or []]
+                    child["group_items"] = [
+                        remove_enrich_candidate(dict(item)) for item in child.get("group_items") or []
+                    ]
                     child["size_bytes"] = sum(int(item.get("size_bytes") or 0) for item in child["group_items"])
                     virtual_buckets[season_number] = child
                     continue
@@ -1153,7 +1159,9 @@ def remove_season_children(season_candidate: dict[str, Any]) -> list[dict[str, A
             )
         except OSError:
             continue
-    extra_items = [remove_enrich_candidate(dict(item)) for item in list(season_candidate.get("extra_episode_items") or [])]
+    extra_items = [
+        remove_enrich_candidate(dict(item)) for item in list(season_candidate.get("extra_episode_items") or [])
+    ]
     if extra_items:
         seen_paths = {remove_selected_path(item) for item in items}
         for item in extra_items:
@@ -1244,13 +1252,16 @@ def remove_show_group_children(group_items: list[dict[str, Any]]) -> list[dict[s
                         "root_path": str(item.get("root_path") or ""),
                     },
                     show_name=show_name,
-                    season_number=remove_parse_episode_season_number(str(item.get("source_name") or item.get("name") or "")),
+                    season_number=remove_parse_episode_season_number(
+                        str(item.get("source_name") or item.get("name") or "")
+                    ),
                     episode_items=[
                         {
                             **item,
                             "name": format_remove_episode_label(
                                 str(item.get("source_name") or item.get("name") or ""),
-                                int(item.get("season_number") or 0) or remove_parse_episode_season_number(
+                                int(item.get("season_number") or 0)
+                                or remove_parse_episode_season_number(
                                     str(item.get("source_name") or item.get("name") or "")
                                 ),
                             ),
@@ -1935,7 +1946,8 @@ async def on_cb_remove(bot_app: Any, *, data: str, q: Any, user_id: int) -> None
             (
                 remove_enrich_candidate(dict(item))
                 for item in season_items
-                if str(item.get("remove_kind") or "") == "season" and int(item.get("season_number") or 0) == season_number
+                if str(item.get("remove_kind") or "") == "season"
+                and int(item.get("season_number") or 0) == season_number
             ),
             None,
         )
@@ -1948,7 +1960,9 @@ async def on_cb_remove(bot_app: Any, *, data: str, q: Any, user_id: int) -> None
         flow["show_idx"] = idx
         flow["season_parent_stage"] = "season_detail"
         bot_app._set_flow(user_id, flow)
-        await render_remove_season_detail(bot_app, user_id, q.message, flow, season_candidate, current_ui_message=q.message)
+        await render_remove_season_detail(
+            bot_app, user_id, q.message, flow, season_candidate, current_ui_message=q.message
+        )
         return
 
     if data == "rm:series":

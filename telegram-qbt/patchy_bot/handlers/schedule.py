@@ -2830,6 +2830,159 @@ async def on_cb_movie_schedule(bot_app: Any, *, data: str, q: Any, user_id: int)
         return
 
     # ------------------------------------------------------------------
+    # msch:title_track:{encoded_query} — create a title-only movie track
+    # ------------------------------------------------------------------
+    if data.startswith("msch:title_track:"):
+        import urllib.parse
+
+        raw_title = urllib.parse.unquote(data.split(":", 2)[2])
+
+        # Duplicate guard (case-insensitive)
+        already = await asyncio.to_thread(ctx.store.movie_track_exists_for_title, user_id, raw_title)
+        if already:
+            bot_app._clear_flow(user_id)
+            await bot_app._render_nav_ui(
+                user_id,
+                q.message,
+                f"Already tracking <b>{_h(raw_title)}</b> by title.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("\U0001f3ac My Movies", callback_data="msch:list")]]
+                    + bot_app._nav_footer(include_home=True)
+                ),
+                current_ui_message=q.message,
+            )
+            return
+
+        track_id = await asyncio.to_thread(
+            ctx.store.create_movie_track,
+            user_id,
+            None,  # tmdb_id — unknown
+            raw_title,
+            None,  # year
+            "title_only",
+            0,  # release_date_ts — no date gate
+            raw_title,  # search_query
+            False,  # home_date_is_inferred
+        )
+        await asyncio.to_thread(
+            ctx.store.update_movie_release_dates,
+            track_id,
+            None,  # theatrical_ts
+            None,  # digital_ts
+            None,  # physical_ts
+            None,  # home_release_ts
+            False,  # digital_estimated
+            "title_only",  # release_status
+            False,  # home_date_is_inferred
+        )
+        bot_app._clear_flow(user_id)
+        await bot_app._render_nav_ui(
+            user_id,
+            q.message,
+            (
+                f"🎯 Now tracking <b>{_h(raw_title)}</b> by title.\n\n"
+                "Patchy will search for a 1080p+ release every hour.\n"
+                "You'll get a notification when a quality copy is found — "
+                "you can confirm or deny the download at that point."
+            ),
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("\U0001f3ac My Movies", callback_data="msch:list")]]
+                + bot_app._nav_footer(include_home=True)
+            ),
+            current_ui_message=q.message,
+        )
+        return
+
+    # ------------------------------------------------------------------
+    # msch:dl_confirm:{track_id} — confirm download for title-only track
+    # ------------------------------------------------------------------
+    if data.startswith("msch:dl_confirm:"):
+        track_id = data.split(":", 2)[2]
+        track = await asyncio.to_thread(ctx.store.get_movie_track, track_id)
+        if (
+            not track
+            or int(track.get("user_id") or 0) != user_id
+            or track.get("status") != "notifying"
+            or not track.get("pending_torrent_hash")
+        ):
+            await bot_app._render_nav_ui(
+                user_id,
+                q.message,
+                "This confirmation has expired. Please search again.",
+                reply_markup=InlineKeyboardMarkup(bot_app._nav_footer(include_home=True)),
+                current_ui_message=q.message,
+            )
+            return
+
+        title = str(track.get("title") or "")
+        pending_url = str(track.get("pending_torrent_hash") or "")
+        try:
+            await asyncio.to_thread(
+                ctx.qbt.add_url,
+                f"magnet:?xt=urn:btih:{pending_url}",
+                category=ctx.cfg.movies_category,
+                savepath=ctx.cfg.movies_path,
+            )
+        except Exception as exc:
+            await bot_app._render_nav_ui(
+                user_id,
+                q.message,
+                f"Download failed: {_h(str(exc))}",
+                reply_markup=InlineKeyboardMarkup(bot_app._nav_footer(include_home=True)),
+                current_ui_message=q.message,
+            )
+            return
+
+        await asyncio.to_thread(
+            ctx.store.update_movie_track_status,
+            track_id,
+            status="downloading",
+            torrent_hash=pending_url,
+        )
+        await asyncio.to_thread(ctx.store.clear_movie_track_pending_torrent, track_id)
+        await bot_app._render_nav_ui(
+            user_id,
+            q.message,
+            (f"✅ Download started for <b>{_h(title)}</b>.\nPatchy will notify you when it's complete."),
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("\U0001f3ac My Movies", callback_data="msch:list")]]
+                + bot_app._nav_footer(include_home=True)
+            ),
+            current_ui_message=q.message,
+        )
+        return
+
+    # ------------------------------------------------------------------
+    # msch:dl_deny:{track_id} — deny and cancel title-only track
+    # ------------------------------------------------------------------
+    if data.startswith("msch:dl_deny:"):
+        track_id = data.split(":", 2)[2]
+        track = await asyncio.to_thread(ctx.store.get_movie_track, track_id)
+        if track and int(track.get("user_id") or 0) == user_id:
+            title = str(track.get("title") or "Unknown")
+            await asyncio.to_thread(ctx.store.delete_movie_track, track_id)
+            await bot_app._render_nav_ui(
+                user_id,
+                q.message,
+                (
+                    f"❌ Tracking for <b>{_h(title)}</b> has been cancelled.\n"
+                    "The torrent was not downloaded.\n"
+                    "Use /search to find it manually when you're ready."
+                ),
+                reply_markup=InlineKeyboardMarkup(bot_app._nav_footer(include_home=True)),
+                current_ui_message=q.message,
+            )
+        else:
+            await bot_app._render_nav_ui(
+                user_id,
+                q.message,
+                "Track not found.",
+                reply_markup=InlineKeyboardMarkup(bot_app._nav_footer(include_home=True)),
+                current_ui_message=q.message,
+            )
+        return
+
+    # ------------------------------------------------------------------
     # msch:add — start the add-movie flow
     # ------------------------------------------------------------------
     if data == "msch:add":

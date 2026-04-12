@@ -1792,6 +1792,7 @@ def test_on_callback_remove_cancel_returns_to_command_center() -> None:
         _on_cb_movie_schedule = BotApp._on_cb_movie_schedule
         _on_cb_menu = BotApp._on_cb_menu
         _on_cb_flow = BotApp._on_cb_flow
+        _on_cb_mwblock = BotApp._on_cb_mwblock
         _on_cb_stop = BotApp._on_cb_stop
         _on_cb_dl_manage = BotApp._on_cb_dl_manage
         _on_cb_tvpost = BotApp._on_cb_tvpost
@@ -1898,6 +1899,7 @@ def test_on_callback_schedule_cancel_returns_to_command_center() -> None:
         _on_cb_movie_schedule = BotApp._on_cb_movie_schedule
         _on_cb_menu = BotApp._on_cb_menu
         _on_cb_flow = BotApp._on_cb_flow
+        _on_cb_mwblock = BotApp._on_cb_mwblock
         _on_cb_stop = BotApp._on_cb_stop
         _on_cb_dl_manage = BotApp._on_cb_dl_manage
         _on_cb_tvpost = BotApp._on_cb_tvpost
@@ -2055,6 +2057,7 @@ def test_on_callback_remove_clear_returns_to_library_browser() -> None:
         _on_cb_movie_schedule = BotApp._on_cb_movie_schedule
         _on_cb_menu = BotApp._on_cb_menu
         _on_cb_flow = BotApp._on_cb_flow
+        _on_cb_mwblock = BotApp._on_cb_mwblock
         _on_cb_stop = BotApp._on_cb_stop
         _on_cb_dl_manage = BotApp._on_cb_dl_manage
         _on_cb_tvpost = BotApp._on_cb_tvpost
@@ -2248,6 +2251,7 @@ def test_on_callback_schedule_pickeps_uses_anchor_renderer() -> None:
         _on_cb_movie_schedule = BotApp._on_cb_movie_schedule
         _on_cb_menu = BotApp._on_cb_menu
         _on_cb_flow = BotApp._on_cb_flow
+        _on_cb_mwblock = BotApp._on_cb_mwblock
         _on_cb_stop = BotApp._on_cb_stop
         _on_cb_dl_manage = BotApp._on_cb_dl_manage
         _on_cb_tvpost = BotApp._on_cb_tvpost
@@ -2354,6 +2358,7 @@ def test_on_callback_schedule_skip_uses_anchor_renderer() -> None:
         _on_cb_movie_schedule = BotApp._on_cb_movie_schedule
         _on_cb_menu = BotApp._on_cb_menu
         _on_cb_flow = BotApp._on_cb_flow
+        _on_cb_mwblock = BotApp._on_cb_mwblock
         _on_cb_stop = BotApp._on_cb_stop
         _on_cb_dl_manage = BotApp._on_cb_dl_manage
         _on_cb_tvpost = BotApp._on_cb_tvpost
