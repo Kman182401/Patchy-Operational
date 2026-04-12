@@ -1,0 +1,25 @@
+---
+tags:
+  - reference
+aliases:
+  - Ideas Index
+created: 2026-04-11
+updated: 2026-04-11
+---
+
+# Ideas Index
+
+## Overview
+
+Future features and brainstorms for Patchy Bot. These are ideas that haven't been started yet — once one becomes a plan, move it to `02-Work/`.
+
+## All Ideas
+
+```dataview
+LIST
+FROM #idea
+SORT file.name ASC
+```
+
+> [!code]- Claude Code Reference
+> Idea notes live in `04-Ideas/` and use the `idea` tag. Use the `tpl-idea.md` template to add a new one. When an idea is promoted to active work, change the tag to `work/todo` or `work/upgrade`, add `status` and `priority` frontmatter fields, and move the file to `02-Work/Todos/` or `02-Work/Upgrades/`.

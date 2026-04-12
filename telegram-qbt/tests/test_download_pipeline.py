@@ -487,6 +487,37 @@ class TestProgressSmoothing:
                 timeout=3.0,
             )
 
+    @pytest.mark.asyncio
+    async def test_headless_tracker_skips_message_editing(self, mock_ctx, monkeypatch):
+        """Headless mode (tracker_msg=None) must not raise AttributeError on .edit_text /
+        .delete and must still populate batch_monitor_data during the loop."""
+        sleep_mock = AsyncMock()
+        monkeypatch.setattr("patchy_bot.handlers.download.asyncio.sleep", sleep_mock)
+
+        # Return a completed torrent so the loop exits on the first tick.
+        complete_info = _torrent(state="uploading", progress=1.0, amount_left=0, completed=1_000_000)
+        mock_ctx.qbt.get_torrent = MagicMock(return_value=complete_info)
+        mock_ctx.plex.ready.return_value = False
+
+        key = (12345, "a" * 40)
+
+        with patch("patchy_bot.handlers.download._organize_download") as mock_org:
+            org_result = MagicMock()
+            org_result.moved = False
+            org_result.new_path = ""
+            org_result.summary = ""
+            mock_org.return_value = org_result
+
+            # tracker_msg=None — headless mode. Must NOT raise.
+            await asyncio.wait_for(
+                track_download_progress(mock_ctx, 12345, "a" * 40, None, "Headless Test"),
+                timeout=3.0,
+            )
+
+        # Cleanup ran in the finally block.
+        assert key not in mock_ctx.batch_monitor_data
+        assert key not in mock_ctx.progress_tasks
+
 
 # ---------------------------------------------------------------------------
 # 8d: Active downloads state filtering

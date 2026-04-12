@@ -681,6 +681,7 @@ class BotApp:
         *,
         header: str | None = None,
         post_add_rows: list[list[Any]] | None = None,
+        chat_id: int = 0,
     ) -> None:
         download_handler.start_progress_tracker(
             self._ctx,
@@ -690,6 +691,7 @@ class BotApp:
             title,
             header=header,
             post_add_rows=post_add_rows,
+            chat_id=chat_id,
         )
 
     def _start_pending_progress_tracker(
@@ -701,6 +703,7 @@ class BotApp:
         *,
         header: str | None = None,
         post_add_rows: list[list[Any]] | None = None,
+        headless: bool = False,
     ) -> None:
         download_handler.start_pending_progress_tracker(
             self._ctx,
@@ -710,6 +713,7 @@ class BotApp:
             base_msg,
             header=header,
             post_add_rows=post_add_rows,
+            headless=headless,
         )
 
     def _stop_download_keyboard(
@@ -2005,15 +2009,22 @@ class BotApp:
             _del.add_done_callback(self._ctx.background_tasks.discard)
             torrent_hash = result.get("hash")
             if torrent_hash:
-                tracker_msg = await self.app.bot.send_message(
+                # Headless: feed Command Center directly, no separate monitor message.
+                self._start_progress_tracker(
+                    user_id,
+                    torrent_hash,
+                    None,
+                    torrent_name,
                     chat_id=chat_id,
-                    text=f"<b>📡 Live Monitor Attached</b>\n<i>Tracking {_h(code)} download progress…</i>",
-                    reply_markup=self._stop_download_keyboard(torrent_hash),
-                    parse_mode=_PM,
                 )
-                self._start_progress_tracker(user_id, torrent_hash, tracker_msg, torrent_name)
             else:
-                self._start_pending_progress_tracker(user_id, torrent_name, category, notif_msg)
+                self._start_pending_progress_tracker(
+                    user_id,
+                    torrent_name,
+                    category,
+                    notif_msg,
+                    headless=True,
+                )
         except Exception:
             LOG.warning("Failed to send auto-queue notification", exc_info=True)
 
@@ -2954,11 +2965,16 @@ class BotApp:
                     skipped_signature=None,
                 )
                 pending = set(updated_pending)
+                status_chat_id = int(getattr(status_msg, "chat_id", 0) or 0)
                 if pack_result.get("hash"):
-                    self._start_progress_tracker(user_id, pack_result["hash"], status_msg, pack_name)
+                    self._start_progress_tracker(user_id, pack_result["hash"], None, pack_name, chat_id=status_chat_id)
                 else:
                     self._start_pending_progress_tracker(
-                        user_id, pack_name, pack_result.get("category", "tv"), status_msg
+                        user_id,
+                        pack_name,
+                        pack_result.get("category", "tv"),
+                        status_msg,
+                        headless=True,
                     )
             else:
                 # Season pack not found — queue these individually
@@ -3001,16 +3017,27 @@ class BotApp:
                         return ep_code, exc
 
             dl_results = await asyncio.gather(*[_dl_ep(c) for c in remaining_codes])
+            status_chat_id_ep = int(getattr(status_msg, "chat_id", 0) or 0)
             for code, result in dl_results:
                 if isinstance(result, Exception):
                     individual_failures.append((code, str(result)))
                 else:
                     individual_success.append(f"✅ <code>{_h(code)}</code>: {_h(result['name'])}")
                     if result.get("hash"):
-                        self._start_progress_tracker(user_id, result["hash"], status_msg, result["name"])
+                        self._start_progress_tracker(
+                            user_id,
+                            result["hash"],
+                            None,
+                            result["name"],
+                            chat_id=status_chat_id_ep,
+                        )
                     else:
                         self._start_pending_progress_tracker(
-                            user_id, result["name"], result.get("category", "tv"), status_msg
+                            user_id,
+                            result["name"],
+                            result.get("category", "tv"),
+                            status_msg,
+                            headless=True,
                         )
             if individual_failures:
                 final_pending = sorted(set(updated_pending) - {c for c, _ in individual_failures})
@@ -3091,16 +3118,27 @@ class BotApp:
                     return ep_code, exc
 
         dl_results = await asyncio.gather(*[_dl_ep(c) for c in wanted])
+        status_chat_id = int(getattr(status_msg, "chat_id", 0) or 0)
         for code, result in dl_results:
             if isinstance(result, Exception):
                 failures.append((code, str(result)))
             else:
                 success_lines.append(f"\u2705 <code>{_h(code)}</code>: {_h(result['name'])}")
                 if result.get("hash"):
-                    self._start_progress_tracker(user_id_track, result["hash"], status_msg, result["name"])
+                    self._start_progress_tracker(
+                        user_id_track,
+                        result["hash"],
+                        None,
+                        result["name"],
+                        chat_id=status_chat_id,
+                    )
                 else:
                     self._start_pending_progress_tracker(
-                        user_id_track, result["name"], result.get("category", "tv"), status_msg
+                        user_id_track,
+                        result["name"],
+                        result.get("category", "tv"),
+                        status_msg,
+                        headless=True,
                     )
         if failures:
             remaining_pending = sorted(set(updated_pending) - {code for code, _detail in failures})

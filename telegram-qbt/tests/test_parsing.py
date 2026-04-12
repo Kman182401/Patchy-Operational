@@ -3319,7 +3319,7 @@ def test_schedule_notify_auto_queued_includes_category_and_path() -> None:
     assert "Path:" in first_msg
 
 
-def test_schedule_notify_auto_queued_attaches_live_monitor_when_hash_available() -> None:
+def test_schedule_notify_auto_queued_starts_headless_tracker_when_hash_available() -> None:
     from unittest.mock import AsyncMock, MagicMock
 
     from qbt_telegram_bot import BotApp
@@ -3344,10 +3344,18 @@ def test_schedule_notify_auto_queued_attaches_live_monitor_when_hash_available()
 
     asyncio.run(BotApp._schedule_notify_auto_queued(bot, track, "S01E01", result))
 
-    # Should have sent 2 messages: notification card + live monitor
-    assert call_count[0] == 2
-    # _start_progress_tracker must be called (not pending tracker)
+    # Should have sent exactly 1 message: the auto-queued notification card.
+    # The per-download "Live Monitor Attached" message is gone — Command Center
+    # is the sole display.
+    assert call_count[0] == 1
+    # _start_progress_tracker must be called with tracker_msg=None (headless)
     bot._start_progress_tracker.assert_called_once()
+    pos_args, kw_args = bot._start_progress_tracker.call_args
+    # Signature: (user_id, torrent_hash, tracker_msg, title, *, chat_id=...)
+    assert pos_args[0] == 1  # user_id
+    assert pos_args[1] == "deadbeef"
+    assert pos_args[2] is None  # tracker_msg is None (headless)
+    assert kw_args.get("chat_id") == 1
     bot._start_pending_progress_tracker.assert_not_called()
 
 
@@ -3379,6 +3387,7 @@ def test_schedule_download_requested_edits_status_card_not_new_message() -> None
 
     status_mock = MagicMock()
     status_mock.edit_text = AsyncMock()
+    status_mock.chat_id = 777
 
     reply_texts = []
 
@@ -3408,6 +3417,14 @@ def test_schedule_download_requested_edits_status_card_not_new_message() -> None
 
     # Must NOT have a separate "What's next?" reply message
     assert not any("What's next" in t for t in reply_texts)
+
+    # Headless refactor: the progress tracker must be started with tracker_msg=None
+    # and the status_msg chat_id passed explicitly so the batch monitor can render.
+    bot._start_progress_tracker.assert_called_once()
+    pos_args, kw_args = bot._start_progress_tracker.call_args
+    # (user_id_track, result["hash"], None, result["name"], chat_id=...)
+    assert pos_args[2] is None
+    assert kw_args.get("chat_id") == 777
 
 
 # ── RateLimiter ──────────────────────────────────────────────────────────────

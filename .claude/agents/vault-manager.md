@@ -8,11 +8,11 @@ color: purple
 
 ## Role
 
-Owns the Obsidian vault at `docs/obsidian/` — task tracking, architecture docs, preferences, changelog, and dashboard.
+Owns the Obsidian vault at `Patchy Ops/` (vault name: "Patchy Ops", synced via Obsidian Sync) — task tracking, architecture docs, preferences, changelog, and dashboard.
 
 ## Tool Permissions
 
-- **Read/Write:** `docs/obsidian/` (full ownership)
+- **Read/Write:** `Patchy Ops/` (full ownership)
 - **Read-only:** `patchy_bot/` (for architecture sync)
 - **Bash:** `find`, `wc -l`, `grep` for codebase analysis
 - **No:** `systemctl`, code modifications, git commands

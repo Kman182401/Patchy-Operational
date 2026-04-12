@@ -1786,15 +1786,22 @@ async def schedule_notify_auto_queued(
         _del.add_done_callback(ctx.background_tasks.discard)
         torrent_hash = result.get("hash")
         if torrent_hash:
-            tracker_msg = await ctx.app.bot.send_message(
+            # Headless: feed Command Center directly, no separate monitor message.
+            start_progress_tracker_fn(
+                user_id,
+                torrent_hash,
+                None,
+                torrent_name,
                 chat_id=chat_id,
-                text=f"<b>\U0001f4e1 Live Monitor Attached</b>\n<i>Tracking {_h(code)} download progress\u2026</i>",
-                reply_markup=stop_download_keyboard_fn(torrent_hash),
-                parse_mode=_PM,
             )
-            start_progress_tracker_fn(user_id, torrent_hash, tracker_msg, torrent_name)
         else:
-            start_pending_progress_tracker_fn(user_id, torrent_name, category, notif_msg)
+            start_pending_progress_tracker_fn(
+                user_id,
+                torrent_name,
+                category,
+                notif_msg,
+                headless=True,
+            )
     except Exception:
         LOG.warning("Failed to send auto-queue notification", exc_info=True)
 

@@ -35,7 +35,7 @@
 
 ## Obsidian Project Vault
 
-An Obsidian vault lives at `docs/obsidian/` containing project architecture documentation, task tracking, user preferences, and a changelog.
+An Obsidian vault lives at `Patchy Ops/` (vault name: "Patchy Ops", synced via Obsidian Sync) containing project architecture documentation, task tracking, user preferences, and a changelog. Previously located at `docs/obsidian/`.
 
 **Key files:**
 - `Dashboard.md` — system overview, status counts, priority queue, current focus

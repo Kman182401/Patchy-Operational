@@ -631,7 +631,15 @@ def track_ephemeral_message(ctx: HandlerContext, user_id: int, message: Any) -> 
 
 
 async def tracker_send_fallback(ctx: HandlerContext, tracker_msg: Any, text: str) -> None:
-    """Send a message directly to the chat when tracker_msg was deleted."""
+    """Send a message directly to the chat when tracker_msg was deleted.
+
+    Headless callers pass ``tracker_msg=None`` (no inline monitor message to fall back
+    to); in that case the text is logged instead of pushed to the user, since the
+    Command Center batch monitor owns all user-visible progress.
+    """
+    if tracker_msg is None:
+        LOG.info("Headless tracker suppressed fallback send: %s", text.splitlines()[0] if text else "")
+        return
     chat_id = getattr(tracker_msg, "chat_id", None)
     if not chat_id:
         return
@@ -662,7 +670,13 @@ def tracker_retry_after_seconds(exc: Exception) -> int:
 
 
 async def safe_tracker_edit(tracker_msg: Any, text: str, reply_markup: Any = None) -> TrackerEditResult:
-    """Edit a tracker message, handling transient Telegram errors gracefully."""
+    """Edit a tracker message, handling transient Telegram errors gracefully.
+
+    Headless callers pass ``tracker_msg=None``; in that case the edit is a no-op and
+    the result is reported as OK so the tracker loop can continue.
+    """
+    if tracker_msg is None:
+        return TrackerEditResult(True)
     try:
         await tracker_msg.edit_text(text, reply_markup=reply_markup, parse_mode=_PM)
         return TrackerEditResult(True)
@@ -837,9 +851,15 @@ def start_progress_tracker(
     title: str,
     *,
     header: str | None = None,
-    post_add_rows: list[list[Any]] | None = None,
+    post_add_rows: list[list[Any]] | None = None,  # TODO: unused after headless monitor refactor
+    chat_id: int = 0,
 ) -> None:
-    """Launch a progress-tracking asyncio task for a torrent, keyed by (uid, hash)."""
+    """Launch a progress-tracking asyncio task for a torrent, keyed by (uid, hash).
+
+    ``tracker_msg`` may be ``None`` for headless tracking — in that mode the tracker
+    feeds the Command Center batch monitor without editing a per-download message.
+    When headless, ``chat_id`` must be supplied so the batch monitor can be started.
+    """
     key = (user_id, torrent_hash.lower())
     existing = ctx.progress_tasks.get(key)
     if existing and not existing.done():
@@ -858,9 +878,12 @@ def start_progress_tracker(
         name=f"progress:{user_id}:{torrent_hash.lower()}",
     )
     ctx.progress_tasks[key] = task
-    chat_id = int(getattr(tracker_msg, "chat_id", 0) or 0)
-    if chat_id > 0:
-        start_batch_monitor(ctx, user_id, chat_id)
+    if tracker_msg is not None:
+        resolved_chat_id = int(getattr(tracker_msg, "chat_id", 0) or 0)
+    else:
+        resolved_chat_id = int(chat_id or 0)
+    if resolved_chat_id > 0:
+        start_batch_monitor(ctx, user_id, resolved_chat_id)
 
 
 def start_pending_progress_tracker(
@@ -871,9 +894,15 @@ def start_pending_progress_tracker(
     base_msg: Any,
     *,
     header: str | None = None,
-    post_add_rows: list[list[Any]] | None = None,
+    post_add_rows: list[list[Any]] | None = None,  # TODO: unused after headless monitor refactor
+    headless: bool = False,
 ) -> None:
-    """Launch a pending-monitor task that waits for qBT to assign a hash, then attaches a live monitor."""
+    """Launch a pending-monitor task that waits for qBT to assign a hash, then attaches a live monitor.
+
+    When ``headless=True``, the tracker will not send or edit any user-visible
+    monitor message once the hash resolves; it just starts feeding the Command
+    Center batch monitor. Timeout errors are logged instead of posted to the chat.
+    """
     key = (user_id, category.lower(), title.strip().lower())
     existing = ctx.pending_tracker_tasks.get(key)
     if existing and not existing.done():
@@ -888,6 +917,7 @@ def start_pending_progress_tracker(
             base_msg,
             header=header,
             post_add_rows=post_add_rows,
+            headless=headless,
         )
     )
     ctx.pending_tracker_tasks[key] = task
@@ -901,39 +931,66 @@ async def attach_progress_tracker_when_ready(
     base_msg: Any,
     *,
     header: str | None = None,
-    post_add_rows: list[list[Any]] | None = None,
+    post_add_rows: list[list[Any]] | None = None,  # TODO: unused after headless monitor refactor
+    headless: bool = False,
 ) -> None:
-    """Poll qBT until the torrent hash is available, then start a live progress tracker."""
+    """Poll qBT until the torrent hash is available, then start a live progress tracker.
+
+    When ``headless=True``, no user-visible monitor message is sent — the tracker
+    simply starts a headless progress tracker whose data flows into the Command
+    Center batch monitor. The ``base_msg``'s chat_id is still used so the batch
+    monitor knows where to render.
+    """
     key = (user_id, category.lower(), title.strip().lower())
     try:
         torrent_hash = await resolve_hash_by_name(ctx, title, category, wait_s=35)
         if not torrent_hash:
-            try:
-                sent = await base_msg.reply_text(
-                    "\u26a0\ufe0f <b>Monitor Could Not Attach</b>\n\n"
-                    "Could not find the torrent hash after 35s.\n"
-                    "Use <code>/active</code> to check download status.",
-                    parse_mode=_PM,
+            if not headless:
+                try:
+                    sent = await base_msg.reply_text(
+                        "\u26a0\ufe0f <b>Monitor Could Not Attach</b>\n\n"
+                        "Could not find the torrent hash after 35s.\n"
+                        "Use <code>/active</code> to check download status.",
+                        parse_mode=_PM,
+                    )
+                    track_ephemeral_message(ctx, user_id, sent)
+                except Exception:
+                    LOG.warning("Failed to send pending tracker timeout notification", exc_info=True)
+            else:
+                LOG.info(
+                    "Headless pending tracker timeout for %r (%s) — no user message sent",
+                    title,
+                    category,
                 )
-                track_ephemeral_message(ctx, user_id, sent)
-            except Exception:
-                LOG.warning("Failed to send pending tracker timeout notification", exc_info=True)
             try:
                 ctx.store.log_health_event(
                     user_id,
                     None,
                     "pending_tracker_timeout",
                     "warn",
-                    json.dumps({"title": title, "category": category, "wait_s": 35}),
+                    json.dumps({"title": title, "category": category, "wait_s": 35, "headless": headless}),
                     title,
                 )
             except Exception:
                 LOG.debug("Failed to log pending_tracker_timeout health event", exc_info=True)
             return
 
-        # When we have a header, edit the existing message to show combined content.
-        # Without a header, reply with a new message (old behavior — avoids clobbering
-        # shared messages like the schedule batch summary).
+        if headless:
+            # No inline monitor message — feed the Command Center batch monitor directly.
+            chat_id = int(getattr(base_msg, "chat_id", 0) or 0)
+            start_progress_tracker(
+                ctx,
+                user_id,
+                torrent_hash,
+                None,
+                title,
+                header=header,
+                post_add_rows=post_add_rows,
+                chat_id=chat_id,
+            )
+            return
+
+        # Legacy non-headless path — edit or reply with a monitor-attached message.
         stop_kb = stop_download_keyboard(torrent_hash, post_add_rows=post_add_rows)
         initial_text = "<b>\U0001f4e1 Live Monitor Attached</b>\n<i>Tracking download progress\u2026</i>"
         if header:
@@ -1198,10 +1255,11 @@ async def track_download_progress(
                 if not security.allowed:
                     if security.notice_text:
                         await tracker_send_fallback(ctx, tracker_msg, security.notice_text)
-                    try:
-                        await tracker_msg.delete()
-                    except Exception:
-                        pass
+                    if tracker_msg is not None:
+                        try:
+                            await tracker_msg.delete()
+                        except Exception:
+                            pass
                     break
                 media_path = security.media_path
                 # Organize download into Plex-standard structure.
@@ -1280,10 +1338,11 @@ async def track_download_progress(
                 if org_result is not None:
                     await tracker_send_fallback(ctx, tracker_msg, notif_text)
                 # Delete the monitor message so it doesn't linger in the chat.
-                try:
-                    await tracker_msg.delete()
-                except Exception:
-                    pass
+                if tracker_msg is not None:
+                    try:
+                        await tracker_msg.delete()
+                    except Exception:
+                        pass
                 break
 
             tick += 1
@@ -2049,7 +2108,7 @@ async def do_add_background(
             try:
                 await interim_msg.edit_text(
                     f"\u26a0\ufe0f Could not resolve torrent hash for:\n<code>{_h(result.name)}</code>\n\n"
-                    "<i>A live monitor will auto-attach if the hash appears later.</i>",
+                    "<i>The Command Center will track this download once its hash resolves.</i>",
                     reply_markup=InlineKeyboardMarkup(
                         [[InlineKeyboardButton("\U0001f3e0 Home", callback_data="nav:home")]]
                     ),
@@ -2066,6 +2125,7 @@ async def do_add_background(
                     interim_msg,
                     header=header,
                     post_add_rows=post_add_rows,
+                    headless=True,
                 )
             completed_normally = True
             return
@@ -2099,24 +2159,36 @@ async def do_add_background(
             f"{queue_note}"
         )
 
-        # --- Attach progress tracker IMMEDIATELY ---
+        # --- Attach progress tracker (HEADLESS — Command Center owns live display) ---
         if start_tracker:
-            stop_kb = stop_download_keyboard(torrent_hash, post_add_rows=post_add_rows)
-            combined_text = (
-                summary + "\n\n<b>\U0001f4e1 Live Monitor Attached</b>\n<i>Tracking download progress\u2026</i>"
+            # Build the post-add action keyboard: existing post-add rows + a
+            # Stop & Delete row + Home. This keyboard stays on the summary
+            # message forever — it is NOT edited by the progress tracker.
+            action_rows: list[list[Any]] = []
+            if post_add_rows:
+                action_rows.extend(post_add_rows)
+            action_rows.append(
+                [
+                    InlineKeyboardButton(
+                        "\U0001f6d1 Stop & Delete Download",
+                        callback_data=f"stop:{torrent_hash}",
+                    )
+                ]
             )
+            action_rows.append([InlineKeyboardButton("\U0001f3e0 Home", callback_data="nav:home")])
+            action_kb = InlineKeyboardMarkup(action_rows)
             try:
-                await interim_msg.edit_text(combined_text, reply_markup=stop_kb, parse_mode=_PM)
+                await interim_msg.edit_text(summary, reply_markup=action_kb, parse_mode=_PM)
             except Exception:
-                LOG.warning("Failed to edit interim msg for tracker attach", exc_info=True)
+                LOG.warning("Failed to edit interim msg for post-add summary", exc_info=True)
+            chat_id = int(getattr(interim_msg, "chat_id", 0) or 0)
             start_progress_tracker(
                 ctx,
                 user_id,
                 torrent_hash,
-                interim_msg,
+                None,
                 result.name,
-                header=summary,
-                post_add_rows=post_add_rows,
+                chat_id=chat_id,
             )
         else:
             # Schedule callers handle their own tracker — just edit the message.
