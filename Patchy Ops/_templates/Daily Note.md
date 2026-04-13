@@ -1,13 +1,13 @@
 # {{date:dddd, MMMM D, YYYY}}
 
-## Quick Notes
-- 
-
 ## To-Do
 - [ ] 
+
+## Quick Notes
+- 
 
 ## Ideas
 - 
 
-## Project Notes
-- 
+## Done Today
+- [x] 

@@ -9,6 +9,38 @@ Two layers:
 
 When in doubt, dump into Inbox or your Daily Note.
 
+## Tasks — One-tap Workflow
+
+**The fastest way: `Tasks.md`**
+It's bookmarked at the top of your left sidebar. One tap to open. Four sections (Today / This Week / Someday / Waiting On / Done). Type freely.
+
+**Add a task** — tap the ☑ checkbox button (first button in the mobile toolbar). It drops a `- [ ]` on the current line. Type the task. Done.
+
+**Complete a task** — tap the `[ ]` box. It flips to `[x]` and the whole line visually crosses out and dims. No extra taps.
+
+**Add a note under a task** — tap at the end of the task, press Enter, then tap the `→|` indent button. Type the note. You get:
+```
+- [ ] Fix the bug
+    - tried restarting, still broken
+    - error message: ...
+```
+Completing the parent task leaves the notes readable (they only dim slightly).
+
+**iOS home-screen shortcuts for true zero-tap capture:**
+Open Safari, go to each URL below, Share → Add to Home Screen:
+
+- `obsidian://open?vault=Patchy%20Ops&file=Tasks` — jump straight to Tasks
+- `obsidian://daily?vault=Patchy%20Ops` — jump straight to today's daily note
+- `obsidian://new?vault=Patchy%20Ops&file=Inbox%2FQuick&append=true&content=%0A-%20%5B%20%5D%20` — append a new task line to `Inbox/Quick.md`
+
+For a **text-prompt one-tap** ("ask me what the task is, then add it"), build an iOS Shortcut:
+1. Shortcuts app → `+` → Add Action → "Ask for Input" (prompt: "New task")
+2. Add Action → "URL" → set to `obsidian://new?vault=Patchy%20Ops&file=Tasks&append=true&content=%0A-%20%5B%20%5D%20` then append the "Provided Input" variable (URL-encoded)
+3. Add Action → "Open URLs"
+4. Save → Add to Home Screen
+
+Now tapping that icon: prompt → type → done. The task lands in `Tasks.md`.
+
 ## One-tap Capture
 
 **Daily Note (recommended)**

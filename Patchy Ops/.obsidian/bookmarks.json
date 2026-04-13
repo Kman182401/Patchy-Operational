@@ -2,6 +2,11 @@
   "items": [
     {
       "type": "file",
+      "path": "Tasks.md",
+      "title": "Tasks"
+    },
+    {
+      "type": "file",
       "path": "How-to-Use-This-Vault.md",
       "title": "How to Use This Vault"
     },

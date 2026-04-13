@@ -55,3 +55,53 @@
 .is-mobile .markdown-rendered code {
   font-size: 0.9em;
 }
+
+/* ===== Completed-task visual treatment ===== */
+/* Applies to both reading mode and Live Preview, mobile and desktop. */
+
+/* Strong strikethrough + dim for completed tasks in reading mode */
+.markdown-rendered li.task-list-item[data-task="x"],
+.markdown-rendered li.task-list-item[data-task="X"] {
+  text-decoration: line-through;
+  text-decoration-thickness: 1.5px;
+  opacity: 0.55;
+  color: var(--text-muted);
+}
+
+/* Same treatment in Live Preview / source mode — Obsidian marks the line
+   with HyperMD-task-line and the checkbox state via the is-checked class. */
+.cm-s-obsidian .HyperMD-task-line.is-task-checked,
+.cm-s-obsidian .HyperMD-list-line .task-list-item-checkbox[checked] + * {
+  text-decoration: line-through;
+  text-decoration-thickness: 1.5px;
+  opacity: 0.55;
+}
+
+/* Live Preview: fade the whole line when the task is checked.
+   Obsidian adds the task state as a data attribute on the line. */
+.markdown-source-view.mod-cm6 .cm-line:has(input[type="checkbox"]:checked) {
+  opacity: 0.55;
+  text-decoration: line-through;
+  text-decoration-thickness: 1.5px;
+}
+
+/* Keep the checkbox itself at full opacity so you can still tap to un-check */
+.markdown-source-view.mod-cm6 .cm-line:has(input[type="checkbox"]:checked) input[type="checkbox"] {
+  opacity: 1;
+  text-decoration: none;
+}
+
+/* Nested notes under a completed task also dim, but slightly less,
+   so you can still read your annotations */
+.markdown-rendered li.task-list-item[data-task="x"] ul,
+.markdown-rendered li.task-list-item[data-task="X"] ul {
+  text-decoration: none;
+  opacity: 0.85;
+}
+
+/* Large, tappable checkbox specifically on mobile */
+.is-mobile .task-list-item-checkbox {
+  width: 1.4em !important;
+  height: 1.4em !important;
+  margin-right: 0.6em !important;
+}
