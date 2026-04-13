@@ -619,17 +619,13 @@ async def _apply_completion_security_gate(
         )
 
     try:
-        _log_hash = torrent_hash
-        _log_name = name
-        _log_reasons = reasons
-        _log_user_id = user_id
         await asyncio.to_thread(
             lambda: ctx.store.log_malware_block(
-                _log_hash,
-                _log_name,
+                torrent_hash,
+                name,
                 "download",
-                _log_reasons,
-                user_id=_log_user_id,
+                reasons,
+                user_id=user_id,
             )
         )
     except Exception:
@@ -1872,21 +1868,15 @@ async def completion_poller_job(ctx: HandlerContext, context: ContextTypes.DEFAU
                 except Exception:
                     LOG.warning("Failed to delete blocked torrent at completion: %s", torrent_hash, exc_info=True)
                 try:
-                    _cp_hash = torrent_hash
-                    _cp_name = name
-                    _cp_reasons = completion_scan.reasons
-                    _cp_score = completion_scan.score
-                    _cp_tier = completion_scan.tier
-                    _cp_signals = _serialize_signals(completion_scan)
                     await asyncio.to_thread(
                         lambda: ctx.store.log_malware_block(
-                            _cp_hash,
-                            _cp_name,
+                            torrent_hash,
+                            name,
                             "download",
-                            _cp_reasons,
-                            risk_score=_cp_score,
-                            tier=_cp_tier,
-                            signals=_cp_signals,
+                            completion_scan.reasons,
+                            risk_score=completion_scan.score,
+                            tier=completion_scan.tier,
+                            signals=_serialize_signals(completion_scan),
                             user_id=0,
                         )
                     )
