@@ -2524,12 +2524,19 @@ class BotApp:
                 continue
             if malware_scan.is_blocked:
                 try:
+                    _block_hash = torrent_hash or str(row.get("hash") or row.get("fileHash") or row.get("name") or "")
+                    _block_name = str(row.get("name") or "")
+                    _block_signals = download_handler._serialize_signals(malware_scan)
                     await asyncio.to_thread(
-                        self.store.log_malware_block,
-                        torrent_hash or str(row.get("hash") or row.get("fileHash") or row.get("name") or ""),
-                        str(row.get("name") or ""),
-                        "search",
-                        malware_scan.reasons,
+                        lambda: self.store.log_malware_block(
+                            _block_hash,
+                            _block_name,
+                            "search",
+                            malware_scan.reasons,
+                            risk_score=malware_scan.score,
+                            tier=malware_scan.tier,
+                            signals=_block_signals,
+                        )
                     )
                 except Exception:
                     pass

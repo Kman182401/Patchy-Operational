@@ -127,10 +127,6 @@ class Config:
                 os.path.abspath(os.path.expanduser("~")),
                 "/tmp",
             ]
-            for candidate in (self.movies_path, self.tv_path, self.nvme_mount_path):
-                if candidate:
-                    user_roots.append(os.path.abspath(os.path.expanduser(candidate)))
-
             # Sane post-symlink-resolution roots: home (resolved), media roots
             # (resolved), /tmp, and /mnt (covers external storage mounts like
             # /mnt/bulk, /mnt/nvme that are a normal host setup).
@@ -140,8 +136,10 @@ class Config:
                 "/mnt",
             ]
             for candidate in (self.movies_path, self.tv_path, self.nvme_mount_path):
-                if candidate:
-                    safe_resolved_roots.append(os.path.realpath(candidate))
+                if not candidate:
+                    continue
+                user_roots.append(os.path.abspath(os.path.expanduser(candidate)))
+                safe_resolved_roots.append(os.path.realpath(candidate))
 
             def _contained(path: str, roots: list[str]) -> bool:
                 return any(path == root or path.startswith(root + os.sep) for root in roots)
