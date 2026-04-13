@@ -17,10 +17,11 @@ This dashboard is your starting point — it shows what work is open right now, 
 
 ## Current Focus
 
-**Malware Engine v2 — Session 5 shipped (2026-04-13).** Per-user attribution, `/malware_stats` slash command, structured `SignalID` reason codes, weekly digest runner, ClamAV operations docs, and a new architecture reference page at [[Malware Engine v2]]. Future idea parked at [[telegram-malware-config]].
+**Skill infrastructure landed (2026-04-13, late).** 14-skill Python suite is now installed at `.claude/skills/`, Context7 moved from the MCP plugin to the `ctx7` CLI (CLI + Skills mode), and `context7-skills-scout` + `find-docs` are available globally. Immediately prior: Malware Engine v2 Session 5 — see [[Malware Engine v2]]; future idea parked at [[telegram-malware-config]].
 
 ## Recent Completions
 
+- **2026-04-13 (late)** — Python skill suite (14 skills) installed, Context7 CLI migration, download.py closure cleanup.
 - **2026-04-13** — Malware Engine v2 Session 5 (per-user attribution, `/malware_stats`, `SignalID` constants, weekly digest, ClamAV docs, vault architecture page).
 - **2026-04-11** — Obsidian vault rewritten into the `00-Home/` … `05-Changelog/` layout.
 - **2026-04-10** — Episode filtering fix, next-ep callback fix, inspection timeout bump, candidate cycling fix.

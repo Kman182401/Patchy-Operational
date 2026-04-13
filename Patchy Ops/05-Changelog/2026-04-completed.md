@@ -14,6 +14,7 @@ updated: 2026-04-13
 April was a month of hardening. Key highlights:
 
 - **Malware Engine v2 — Session 5** — per-user attribution, a `/malware_stats` slash command, structured `SignalID` reason codes, a weekly malware digest runner, and a fresh architecture page in the vault.
+- **Python skill suite + Context7 CLI migration** — 14-skill Python suite installed under `.claude/skills/`, Context7 moved off the MCP plugin onto the `ctx7` CLI, and global `context7-skills-scout` / `find-docs` skills added.
 - **TV scheduling fix** — shows that aired multiple episodes on the same day were only picking up the first one. That's fixed.
 - **Batch cleanup on the 7th** — seventeen smaller bugs knocked out in one sweep, covering everything from VPN reconnect handling to file-move race conditions to the smoothing math that drives the live progress display.
 - **Malware scan gate** — the download pipeline now catches suspicious files before they reach your library.
@@ -22,6 +23,18 @@ April was a month of hardening. Key highlights:
 - **Obsidian vault** — created and seeded (the vault you're reading right now).
 
 > [!code]- Claude Code Reference
+>
+> ## 2026-04-13 (late)
+>
+> **Skill infrastructure + Context7 CLI migration**
+>
+> - Python skill suite installed at `.claude/skills/` (mirrored under `skills/patchy-bot/`): `skill-creator`, 11 python skills (`-error-handling`, `-resilience`, `-background-jobs`, `-resource-management`, `-observability`, `-type-safety`, `-anti-patterns`, `-design-patterns`, `-configuration`, `-code-style`, `writing-python`), `context7-skill`, and the project meta-skill `patchy-bot-python-router`.
+> - Global skills added at `~/.claude/skills/`: `context7-skills-scout`, `find-docs`.
+> - Context7 migrated from MCP plugin to `ctx7` CLI (CLI + Skills mode). MCP plugin disabled. Pro subscription still active.
+> - `CLAUDE.md` Web Research Policy rewritten to reference the CLI workflow (`ctx7 library …` → `ctx7 docs …`).
+> - Code-simplifier cleanup on `handlers/download.py`: removed superfluous `_log_*` / `_cp_*` closure-bind locals around `log_malware_block` calls in the completion security gate and poller.
+>
+> Files modified: `.claude/skills/**`, `skills/patchy-bot/**`, `~/.claude/skills/context7-skills-scout/`, `~/.claude/skills/find-docs/`, `CLAUDE.md`, `telegram-qbt/patchy_bot/handlers/download.py`.
 >
 > ## 2026-04-13
 >

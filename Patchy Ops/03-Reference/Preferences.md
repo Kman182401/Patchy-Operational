@@ -4,7 +4,7 @@ tags:
 aliases:
   - User Preferences
 created: 2026-04-11
-updated: 2026-04-11
+updated: 2026-04-13
 ---
 
 # Preferences
@@ -69,6 +69,9 @@ Patchy is a pirate. The branding emoji is `🏴‍☠️` — never `🐾`.
 ## Learned Preferences
 
 _New preferences discovered during work get added here with a date. Never deleted; obsolete entries get ~~strikethrough~~._
+
+- **2026-04-13** — Context7 is now the `ctx7` CLI (CLI + Skills mode); the MCP plugin is disabled. Look up library docs with `ctx7 library <name> "<query>"` then `ctx7 docs <id> "<question>"`. Pro subscription is active — call it freely for every library interaction (python-telegram-bot, TMDB, qBittorrent, Plex, asyncio, SQLite, pytest, etc.). After every Context7 lookup, also scan the four canonical skill libraries for related skills and surface them (never install without approval).
+- **2026-04-13** — A 14-skill Python suite lives at `.claude/skills/` (skill-creator + 11 python skills + context7-skill + `patchy-bot-python-router` meta-skill). Let them auto-trigger; the router maps `telegram-qbt/patchy_bot/` modules to the right primary skill and documents Patchy-Bot-specific overrides (no qBT interface binding, no pydantic-settings, no Celery, no Prometheus, no uv, `_h()` for HTML escaping, `PurePosixPath` for path safety, movie/TV parity).
 
 > [!code]- Claude Code Reference
 > **Telegram UI**
