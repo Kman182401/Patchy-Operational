@@ -38,6 +38,18 @@ from ..utils import _h, human_size, quality_tier
 from .download import is_direct_torrent_link
 
 # ---------------------------------------------------------------------------
+# Secret redaction for debug logs
+# ---------------------------------------------------------------------------
+
+_SECRET_QS_RE = re.compile(r"(?i)(api[_-]?key|apikey|passkey|token|rss_?key)=[^&\s]+")
+
+
+def _redact_url(u: str) -> str:
+    """Redact common secret query-string values (api key, passkey, token) in a URL."""
+    return _SECRET_QS_RE.sub(r"\1=REDACTED", u)
+
+
+# ---------------------------------------------------------------------------
 # Search parser
 # ---------------------------------------------------------------------------
 
@@ -81,18 +93,33 @@ def apply_filters(
 ) -> list[dict[str, Any]]:
     """Filter search result rows by seeds, size, quality, and source availability."""
     out: list[dict[str, Any]] = []
+    total_in = len(rows)
+    _drop_seeds = 0
+    _drop_min_size = 0
+    _drop_max_size = 0
+    _drop_quality_floor = 0
+    _drop_source = 0
+    _drop_scoring = 0
+    _drop_malware = 0
+    _drop_language = 0
+    _first_reject_reason: str | None = None
+    _first_reject_name: str | None = None
     for r in rows:
         seeds = int(r.get("nbSeeders") or r.get("seeders") or 0)
         size = int(r.get("fileSize") or r.get("size") or 0)
         name = str(r.get("fileName") or r.get("name") or "")
         if seeds < min_seeds:
+            _drop_seeds += 1
             continue
         if min_size is not None and size < min_size:
+            _drop_min_size += 1
             continue
         if max_size is not None and size > max_size:
+            _drop_max_size += 1
             continue
         # quality_tier() is a resolution floor (2160/1080/720/480), NOT a quality score
         if min_quality > 0 and quality_tier(name) < min_quality:
+            _drop_quality_floor += 1
             continue
 
         # Keep only results that have a usable direct torrent source.
@@ -105,6 +132,14 @@ def apply_filters(
                 str(r.get("descrLink") or r.get("descr_link") or "").strip(),
             ]
             if not any(is_direct_torrent_link(c) for c in candidates if c):
+                _drop_source += 1
+                if LOG.isEnabledFor(logging.DEBUG):
+                    LOG.debug(
+                        "apply_filters source-drop %r: hash=%r candidates=%r",
+                        name,
+                        rh,
+                        [_redact_url(c) for c in candidates if c],
+                    )
                 continue
 
         uploader = extract_uploader(r)
@@ -112,6 +147,10 @@ def apply_filters(
         # Score the result — reject garbage (CAM, TS, AV1, upscaled, zero-seed, LQ groups)
         ts = score_torrent(name, size, seeds, media_type=media_type)
         if ts.is_rejected:
+            _drop_scoring += 1
+            if _first_reject_reason is None:
+                _first_reject_reason = ts.reject_reason
+                _first_reject_name = name
             continue
 
         # Malware / fake-content heuristic filter
@@ -124,6 +163,7 @@ def apply_filters(
         )
         if malware_scan.is_blocked:
             LOG.info("Search filter blocked %r: %s", name, "; ".join(malware_scan.reasons))
+            _drop_malware += 1
             continue
 
         if uploader:
@@ -131,11 +171,37 @@ def apply_filters(
 
         # Reject non-English results (empty = assumed English, or must contain 'en')
         if ts.parsed.languages and "en" not in ts.parsed.languages:
+            _drop_language += 1
             continue
         # Attach score to the row for sorting
         r["_quality_score"] = ts
 
         out.append(r)
+
+    total_out = len(out)
+    dropped = total_in - total_out
+    if dropped > 0:
+        LOG.info(
+            "Search filter: %d in → %d passed "
+            "(seeds: -%d, min_size: -%d, max_size: -%d, quality_floor: -%d, "
+            "source: -%d, scoring: -%d, malware: -%d, language: -%d)",
+            total_in,
+            total_out,
+            _drop_seeds,
+            _drop_min_size,
+            _drop_max_size,
+            _drop_quality_floor,
+            _drop_source,
+            _drop_scoring,
+            _drop_malware,
+            _drop_language,
+        )
+        if _drop_scoring > 0 and _first_reject_reason and LOG.isEnabledFor(logging.DEBUG):
+            LOG.debug(
+                "apply_filters first scoring reject: %r reason=%s",
+                _first_reject_name,
+                _first_reject_reason,
+            )
     return out
 
 

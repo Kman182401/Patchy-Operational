@@ -123,6 +123,24 @@ sender = {
     "fingerprint": "patchy-server-001",
     "download": False,
 }
+# LocalSend v2 fileType is a CATEGORY enum, not a MIME type.
+# Allowed: image, video, audio, pdf, text, apk, other.
+# We deliberately avoid "text" because the iOS client treats it as an
+# in-app message snippet (shows "sent you a message" popup with empty body)
+# instead of a downloadable file. Markdown/logs/etc go as "other".
+def ls_category(mime: str, name: str) -> str:
+    if mime.startswith("image/"):
+        return "image"
+    if mime.startswith("video/"):
+        return "video"
+    if mime.startswith("audio/"):
+        return "audio"
+    if mime == "application/pdf":
+        return "pdf"
+    if mime == "application/vnd.android.package-archive" or name.lower().endswith(".apk"):
+        return "apk"
+    return "other"
+
 files = {}
 for i, path in enumerate(sys.argv[1:], start=1):
     fid = f"file{i}"
@@ -133,7 +151,7 @@ for i, path in enumerate(sys.argv[1:], start=1):
         "id": fid,
         "fileName": name,
         "size": size,
-        "fileType": mime,
+        "fileType": ls_category(mime, name),
         "preview": "",
     }
 print(json.dumps({"info": sender, "files": files}))

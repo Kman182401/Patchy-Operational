@@ -17,6 +17,8 @@ import logging
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from patchy_bot.handlers.chat import (
     chat_needs_qbt_snapshot,
     patchy_system_prompt,
@@ -139,6 +141,58 @@ def test_apply_filters_quality_scoring_blocks_cam() -> None:
     rows = [_good_row(name="Movie.2024.HDCAM.x264-GROUP", seeds=500)]
     out = apply_filters(rows, min_seeds=1, min_size=None, max_size=None, min_quality=0)
     assert out == []
+
+
+def test_apply_filters_passes_media_type_episode() -> None:
+    """Episode-sized result (800MB) should NOT get size penalty with media_type='episode'."""
+    rows = [_good_row(name="Show.S01E01.1080p.WEB-DL.x264-GROUP", size=800_000_000)]
+    out = apply_filters(
+        rows,
+        min_seeds=1,
+        min_size=None,
+        max_size=None,
+        min_quality=0,
+        media_type="episode",
+    )
+    assert len(out) == 1
+    ts = out[0]["_quality_score"]
+    assert ts.format_score > -50
+
+
+def test_apply_filters_defaults_movie_media_type() -> None:
+    """Without an explicit media_type, apply_filters defaults to 'movie' and accepts a good movie row."""
+    rows = [_good_row()]
+    out = apply_filters(rows, min_seeds=1, min_size=None, max_size=None, min_quality=0)
+    assert len(out) == 1
+
+
+def test_apply_filters_logs_summary_with_drops(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """apply_filters emits one INFO summary line when dropped > 0."""
+    rows = [
+        _good_row(seeds=0),  # dropped by seeds stage
+        _good_row(name="Movie.2023.CAM.XviD-GROUP", seeds=500),  # dropped by scoring
+        _good_row(),  # passes
+    ]
+    with caplog.at_level(logging.INFO, logger="qbtg"):
+        out = apply_filters(rows, min_seeds=1, min_size=None, max_size=None, min_quality=0)
+    assert len(out) == 1
+    assert "Search filter:" in caplog.text
+    assert "3 in \u2192 1 passed" in caplog.text
+    assert "seeds: -1" in caplog.text
+    assert "scoring: -1" in caplog.text
+
+
+def test_apply_filters_no_summary_when_nothing_dropped(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When nothing is dropped, the summary log line is silenced."""
+    rows = [_good_row()]
+    with caplog.at_level(logging.INFO, logger="qbtg"):
+        out = apply_filters(rows, min_seeds=1, min_size=None, max_size=None, min_quality=0)
+    assert len(out) == 1
+    assert "Search filter:" not in caplog.text
 
 
 # ===================================================================
@@ -371,6 +425,21 @@ def test_is_direct_torrent_link_info_page() -> None:
 def test_is_direct_torrent_link_empty() -> None:
     """Empty string is not a direct link."""
     assert is_direct_torrent_link("") is False
+
+
+def test_jackett_proxy_url_accepted() -> None:
+    """Localhost Jackett proxy download URLs must be treated as direct torrent links."""
+    url = (
+        "http://127.0.0.1:9117/api/v2.0/indexers/torrentgalaxy/results/torznab/download"
+        "?jackett_apikey=abc123&guid=https://example.com/torrent/12345"
+    )
+    assert is_direct_torrent_link(url)
+
+
+def test_random_http_url_not_direct_link() -> None:
+    """Generic web pages must NOT be classified as direct torrent links."""
+    assert not is_direct_torrent_link("https://example.com/torrent-info-page")
+    assert not is_direct_torrent_link("https://torrentgalaxy.to/torrent/12345/some-movie")
 
 
 # ===================================================================

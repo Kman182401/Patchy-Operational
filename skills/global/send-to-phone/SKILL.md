@@ -73,6 +73,13 @@ The `localsend` Go CLI dev build installed at `/usr/local/bin/localsend` is **br
 
 The session from step 2 expires within seconds of idle, so the script does prepare + upload back-to-back.
 
+## LocalSend Protocol Gotchas (read before editing `send.sh`)
+
+- **`fileType` is a category enum, NOT a MIME type.** The `prepare-upload` manifest's `fileType` field must be one of: `image`, `video`, `audio`, `pdf`, `apk`, `text`, `other`. Passing a raw MIME string (`text/markdown`, `application/json`, etc.) causes iOS LocalSend to misroute the payload into its in-app **message viewer** — the phone shows a "Patchy Server sent you a message" popup with an empty body, and the server returns HTTP 204 which looks like "Quick Save is off." The `ls_category()` helper in `scripts/send.sh` does the MIME → category mapping; do not bypass it.
+- **Avoid `"text"` for document files.** Even though `text` is a valid enum value, iOS LocalSend routes it to the message viewer (same blank-popup symptom). Send `.md`, `.log`, `.txt`, `.json`, `.yaml`, etc. as `"other"` so they arrive as downloadable files. `ls_category()` already does this — keep it that way.
+- **Session expiry is seconds, not minutes.** Do not insert long sleeps or interactive prompts between `prepare-upload` and the first `upload` call.
+- **Quick Save = On bypasses the accept dialog.** With Quick Save off, `prepare-upload` returns 204 and the phone shows a system accept prompt; the script's retry loop waits 30s for the tap.
+
 ## Phone Details
 
 - **Device name:** Energetic Papaya (iPhone)
@@ -93,6 +100,14 @@ The script tries the primary IP first and falls back automatically if it can't r
 | 3 | Empty response from prepare-upload | Network flaked — rerun |
 | 4 | prepare-upload rejected | Enable Quick Save: On in LocalSend settings on the phone |
 | 5 | Some files uploaded, some failed | Rerun; check per-file HTTP codes in stderr |
+
+### Symptom-based troubleshooting
+
+| Symptom on phone | Likely cause | Fix |
+|---|---|---|
+| "Patchy Server sent you a message" popup with blank/empty body | `fileType` was sent as a raw MIME (e.g. `text/markdown`) or as `"text"` — iOS routed it into the message viewer instead of the file receiver | Confirm `ls_category()` in `scripts/send.sh` is mapping MIME → category enum (`image`/`video`/`audio`/`pdf`/`apk`/`other`) and that `.md`/`.log`/`.txt`/etc. files resolve to `"other"`. Never put raw `mime` into `files[fid]["fileType"]`. |
+| Script prints "Phone returned 204 No Content — Quick Save is off" but Quick Save IS on | Could be the fileType-enum bug above (server 204's when it can't parse/accept the manifest), not actually a Quick Save issue | Check the `fileType` values in `build_prepare_json` before blaming Quick Save. |
+| Script exits 0 but file never appears on phone | Uploaded to a stale session, or phone dismissed the message-viewer popup | Rerun; verify fileType enum mapping; check LocalSend history on phone |
 
 If all IPs fail, have the user open LocalSend → Settings → Server info to read the current IPs. Update `PRIMARY_IP` / `FALLBACK_IPS` in `scripts/send.sh` if they've changed permanently.
 
