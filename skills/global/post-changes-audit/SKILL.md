@@ -58,6 +58,21 @@ Then run these skills inline:
 5. **scope-guard** — Check for scope drift from the original task
 6. **diff-review** — Final pre-commit quality gate (debug leftovers, secrets, accidental files)
 
+## Step 3.5: Mandatory code-review plugin pass (ALL modes)
+
+The `code-review@claude-plugins-official` plugin MUST be invoked on every post-changes-audit run, regardless of mode.
+
+- **If the current branch has an open PR** (`gh pr view --json number 2>/dev/null`): invoke the `/code-review` slash command via the `Skill` tool on that PR and fold its findings into the final report.
+- **If there is no PR** (Patchy_Bot pushes straight to `origin/main`, so this is the normal case): apply the plugin's multi-reviewer pattern to the local pre-commit diff. Launch 5 parallel Sonnet agents via the Agent tool, each given the output of `git diff -- patchy_bot/`, tasked as:
+  1. CLAUDE.md compliance audit
+  2. Shallow bug scan on the diff only (no extra context)
+  3. Git blame / historical context review of modified lines
+  4. Scan prior commits/PRs touching these files for comments that still apply
+  5. Re-read in-file code comments and verify the changes respect any guidance there
+  Then score each finding 0–100 for confidence (see plugin command spec) and keep only items ≥80. Merge kept items into the final audit report alongside the mode-specific subagent findings.
+
+This step runs in parallel with the mode-specific subagents when possible, and its findings contribute to the VERDICT in Step 4.
+
 ## Step 4: Consolidate & Report
 
 Collect all findings from subagents and inline checks. Produce this report:

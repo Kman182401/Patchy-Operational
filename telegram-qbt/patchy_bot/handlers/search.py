@@ -101,6 +101,7 @@ def apply_filters(
     _drop_source = 0
     _drop_scoring = 0
     _drop_malware = 0
+    _caution_malware = 0
     _drop_language = 0
     _first_reject_reason: str | None = None
     _first_reject_name: str | None = None
@@ -153,7 +154,7 @@ def apply_filters(
                 _first_reject_name = name
             continue
 
-        # Malware / fake-content heuristic filter
+        # Malware / fake-content heuristic filter (3-tier: clean / caution / blocked)
         malware_scan = scan_search_result(
             name=name,
             size_bytes=size,
@@ -161,10 +162,20 @@ def apply_filters(
             media_type=media_type,
             uploader=uploader,
         )
-        if malware_scan.is_blocked:
-            LOG.info("Search filter blocked %r: %s", name, "; ".join(malware_scan.reasons))
+        tier = getattr(malware_scan, "tier", None)
+        if tier == "blocked" or (tier is None and malware_scan.is_blocked):
+            LOG.info(
+                "Search filter blocked %r (score=%d): %s",
+                name,
+                getattr(malware_scan, "score", -1),
+                malware_scan.reasons,
+            )
             _drop_malware += 1
             continue
+        if tier == "caution":
+            # Keep the row but attach the scan so the UI can surface a warning.
+            r["_malware_scan"] = malware_scan
+            _caution_malware += 1
 
         if uploader:
             r["uploader"] = uploader
@@ -180,11 +191,11 @@ def apply_filters(
 
     total_out = len(out)
     dropped = total_in - total_out
-    if dropped > 0:
+    if dropped > 0 or _caution_malware > 0:
         LOG.info(
             "Search filter: %d in → %d passed "
             "(seeds: -%d, min_size: -%d, max_size: -%d, quality_floor: -%d, "
-            "source: -%d, scoring: -%d, malware: -%d, language: -%d)",
+            "source: -%d, scoring: -%d, malware: -%d, malware_caution: %d, language: -%d)",
             total_in,
             total_out,
             _drop_seeds,
@@ -194,6 +205,7 @@ def apply_filters(
             _drop_source,
             _drop_scoring,
             _drop_malware,
+            _caution_malware,
             _drop_language,
         )
         if _drop_scoring > 0 and _first_reject_reason and LOG.isEnabledFor(logging.DEBUG):

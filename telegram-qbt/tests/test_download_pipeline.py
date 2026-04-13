@@ -1096,8 +1096,14 @@ class TestCompletionPollerJob:
 
     @pytest.mark.asyncio
     @patch("patchy_bot.handlers.download._organize_download")
-    async def test_infected_payload_quarantined_and_not_organized(self, mock_org, mock_ctx, monkeypatch, tmp_path):
-        sample_dir = tmp_path / "infected-release"
+    async def test_infected_payload_deleted_and_not_organized(self, mock_org, mock_ctx, monkeypatch, tmp_path):
+        # v2: infected payloads are deleted directly (no quarantine).
+        # The sample dir must live inside an allowed root so _validate_safe_path
+        # permits the rmtree fallback.
+        from pathlib import Path
+
+        movies_root = mock_ctx.cfg.movies_path
+        sample_dir = Path(movies_root) / "infected-release"
         sample_dir.mkdir()
         (sample_dir / "movie.exe").write_bytes(b"bad")
 
@@ -1111,6 +1117,7 @@ class TestCompletionPollerJob:
         mock_ctx.cfg.allowed_user_ids = {12345}
         mock_ctx.qbt.list_torrents = MagicMock(return_value=[infected])
         mock_ctx.qbt.delete_torrent = MagicMock()
+        mock_ctx.qbt.get_torrent_files = MagicMock(return_value=[])
         mock_ctx.store.is_completion_notified = MagicMock(return_value=False)
         mock_ctx.store.mark_completion_notified = MagicMock()
         mock_ctx.store.cleanup_old_completion_records = MagicMock()
@@ -1126,11 +1133,10 @@ class TestCompletionPollerJob:
         await completion_poller_job(mock_ctx, MagicMock())
 
         mock_org.assert_not_called()
-        mock_ctx.qbt.delete_torrent.assert_called_once_with("a" * 40, delete_files=False)
+        mock_ctx.qbt.delete_torrent.assert_called_once_with("a" * 40, delete_files=True)
         assert any("Malware Detected" in text for text in sent_text)
-        quarantine_root = tmp_path / "Spam" / "quarantine"
-        assert quarantine_root.exists()
-        assert any(quarantine_root.iterdir())
+        # Files have been removed by the rmtree fallback.
+        assert not sample_dir.exists()
 
 
 # ---------------------------------------------------------------------------

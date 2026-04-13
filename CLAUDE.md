@@ -24,7 +24,14 @@
 
 - After completing any task that modifies files under `/home/karson/Patchy_Bot/` (runtime code, config, skills, vault, docs, memory), run the `push` shell alias in Bash. It auto-commits and pushes to `origin/main` of the Patchy-Operational repo.
 - The `push` alias is the ONLY sanctioned git path — never run raw `git commit`/`git push`/branch commands manually.
-- End-of-task order: restart the service first (if runtime code changed), then run `push`. Both must happen before reporting "done".
+- End-of-task order: post-changes-audit → code-simplifier agent on touched code → restart the service (if runtime code changed) → run `push` → `/revise-claude-md`. All five must happen before reporting "done".
+
+## CLAUDE.md / Memory Refresh Rule
+
+- At the end of any productive session (one that made code, config, skill, memory, or vault changes), invoke the `/revise-claude-md` slash command provided by the `claude-md-management@claude-plugins-official` plugin. This command reflects on the session, drafts concise additions to the relevant CLAUDE.md / `.claude.local.md` files, and asks for approval before applying them.
+- The purpose is to keep CLAUDE.md, `.claude/memory/` entries, and the Obsidian vault's `Preferences.md` continuously synchronized with what was actually learned — so future sessions always start with an accurate picture of completed work, in-flight work, and open items.
+- If `/revise-claude-md` proposes no changes, that is a valid outcome — do not fabricate insights to justify an edit. Simply report "no new learnings captured" and move on.
+- This step runs AFTER `push` so any CLAUDE.md updates from this step land in the NEXT commit, not the current one (preventing the command from racing with the push alias).
 
 ## File Ownership
 
@@ -36,27 +43,38 @@
 - Run `pytest -q` in [`telegram-qbt/`](/home/karson/Patchy_Bot/telegram-qbt) for touched Python areas when tests exist.
 - Prefer the curated project-local skills; do not restore a mirrored global skill library to this repo.
 - Keep instructions that are workflow-specific, command-specific, or operationally detailed out of this file.
-- Treat `.claude/memory/MEMORY.md` as an index, not a narrative log.
 - Preserve path safety and media-type validation when moving or deleting files.
+
+## Memory Systems (two, distinct roles)
+
+Patchy_Bot has TWO memory stores. Know which one to use when.
+
+1. **Auto-memory (canonical, live)** — `~/.claude/projects/-home-karson-Patchy-Bot/memory/`
+   Managed by the Claude Code auto-memory system. Trigger-based entries typed as `user`, `feedback`, `project`, `reference`. `MEMORY.md` is the index — one line per entry, ~150 chars, no narrative. **This is the primary source of truth for preferences, rules, and cross-session learnings.** Write new learnings here.
+
+2. **Project-local legacy log** — `~/Patchy_Bot/.claude/memory/`
+   Categorized narrative files (`bugs.md`, `decisions.md`, `patterns.md`, `sessions.md`) plus its own `MEMORY.md` index. Historical context from earlier sessions; treat as read-mostly archive. Do not duplicate new learnings here — put them in the auto-memory store instead. Only append to `sessions.md` if the user explicitly asks for a session narrative log.
+
+**End-of-session sync:** `/revise-claude-md` considers CLAUDE.md first; it does not touch either memory store. The auto-memory system handles its own updates as you save entries during the session. If a new learning belongs in the legacy log (rare), save it manually.
 
 ## Obsidian Project Vault
 
-An Obsidian vault lives at `Patchy Ops/` (vault name: "Patchy Ops", synced via Obsidian Sync) containing project architecture documentation, task tracking, user preferences, and a changelog. Previously located at `docs/obsidian/`.
+An Obsidian vault lives at `Patchy Ops/` (vault name: "Patchy Ops", synced via Obsidian Sync) containing project architecture documentation, task tracking, user preferences, and a changelog.
 
-**Key files:**
-- `Dashboard.md` — system overview, status counts, priority queue, current focus
-- `Preferences.md` — user likes/dislikes/conventions (READ before every task, UPDATE when you learn new preferences)
-- `Architecture/` — module map, SQLite tables, callback routes, clients, state model
-- `Tasks/` — open bugs (Fixes/), feature work (Todos/), improvements (Upgrades/)
-- `Ideas/` — future possibilities (read-only unless asked)
-- `Changelog/` — completed work log (append after completing tasks)
-- `_templates/task-template.md` — frontmatter format for new task notes
+**Layout (numbered-folder structure):**
+- `00-Home/Dashboard.md` — system overview, status counts, priority queue, current focus
+- `01-System/` — architecture docs: `Modules.md`, `API Clients.md`, `Callback Routes.md`, `SQLite Tables.md`, `State & Flows.md`, `System Overview.md`
+- `02-Work/Work Board.md` + `02-Work/Todos/` + `02-Work/Upgrades/` — active work items
+- `03-Reference/Preferences.md` — user likes/dislikes/conventions (READ before every task, UPDATE when you learn new preferences)
+- `04-Ideas/` — future possibilities, indexed by `Ideas Index.md` (read-only unless asked)
+- `05-Changelog/` — completed work log, indexed by `Changelog Index.md`; month files like `2026-04-completed.md`
+- `_templates/tpl-task.md`, `tpl-idea.md`, `tpl-changelog.md` — frontmatter templates for new notes
 
 **Rules:**
-- Before starting any task, check `Preferences.md` for relevant conventions
-- After completing a task that was tracked in the vault, update its status to `done` and add a Changelog entry
-- After completing a task that changes architecture (new modules, tables, callbacks), update the relevant Architecture doc
-- When you learn something the user prefers or dislikes, add it to `Preferences.md` under "Learned Preferences"
-- After any vault modifications, update Dashboard.md counts and priority queue
+- Before starting any task, check `03-Reference/Preferences.md` for relevant conventions
+- After completing a task that was tracked in the vault, update its status to `done` and append a Changelog entry to the current month file
+- After completing a task that changes architecture (new modules, tables, callbacks), update the relevant `01-System/` doc
+- When you learn something the user prefers or dislikes, add it to `03-Reference/Preferences.md` under "Learned Preferences"
+- After any vault modifications, refresh `00-Home/Dashboard.md` counts and priority queue
 - Use the `vault-manager` subagent for complex vault operations
-- New task notes must use the template frontmatter format from `_templates/task-template.md`
+- New task notes must use the template frontmatter format from `_templates/tpl-task.md`; new ideas use `tpl-idea.md`; new changelog entries use `tpl-changelog.md`

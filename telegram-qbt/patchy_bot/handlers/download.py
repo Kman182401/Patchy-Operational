@@ -11,7 +11,6 @@ import asyncio
 import errno as _errno
 import json
 import logging
-import os
 import re
 import shutil
 import subprocess
@@ -67,20 +66,62 @@ def _torrent_file_names(files: list[dict[str, Any]]) -> list[str]:
     return out
 
 
+def _torrent_file_sizes(files: list[dict[str, Any]]) -> list[int]:
+    """Parallel list of per-file sizes (bytes), aligned with _torrent_file_names."""
+    out: list[int] = []
+    for row in files:
+        name = str(row.get("name") or row.get("path") or "").strip()
+        if not name:
+            continue
+        try:
+            out.append(int(row.get("size") or 0))
+        except (TypeError, ValueError):
+            out.append(0)
+    return out
+
+
+def _validate_safe_path(target: str, allowed_roots: list[str]) -> bool:
+    """Return True iff *target* resolves inside one of *allowed_roots*.
+
+    Used as a guard before any destructive filesystem operation on download
+    payloads.  Symlinks are resolved on both sides.  Roots that fail to
+    resolve are silently skipped — never widen the allow-list on error.
+    """
+    from pathlib import Path
+
+    try:
+        resolved = Path(target).resolve()
+    except (OSError, RuntimeError):
+        return False
+    for root in allowed_roots:
+        if not root:
+            continue
+        try:
+            root_resolved = Path(root).resolve()
+        except (OSError, RuntimeError):
+            continue
+        try:
+            if resolved.is_relative_to(root_resolved):
+                return True
+        except (AttributeError, ValueError):
+            continue
+    return False
+
+
 async def _wait_for_file_inspection(
     ctx: HandlerContext,
     torrent_hash: str,
     *,
     timeout_s: int,
-) -> list[str]:
+) -> list[dict[str, Any]]:
+    """Poll qBittorrent for file metadata; return raw rows once available."""
     deadline = time.time() + timeout_s
     last_error: Exception | None = None
     while time.time() < deadline:
         try:
             files = await asyncio.to_thread(ctx.qbt.get_torrent_files, torrent_hash)
-            names = _torrent_file_names(files)
-            if names:
-                return names
+            if files:
+                return files
         except Exception as exc:
             last_error = exc
         await asyncio.sleep(0.8)
@@ -107,7 +148,7 @@ async def _concurrent_file_scan(
         ctx.cfg.file_inspection_timeout_s * 3 if result.is_magnet else ctx.cfg.file_inspection_timeout_s
     )
     try:
-        files = await _wait_for_file_inspection(ctx, torrent_hash, timeout_s=inspection_timeout)
+        raw_files = await _wait_for_file_inspection(ctx, torrent_hash, timeout_s=inspection_timeout)
     except Exception as exc:
         LOG.warning(
             "Concurrent scan: inspection timeout for %s (magnet=%s): %s",
@@ -117,6 +158,8 @@ async def _concurrent_file_scan(
         )
         return  # ClamAV completion gate is the safety net
 
+    files = _torrent_file_names(raw_files)
+    file_sizes = _torrent_file_sizes(raw_files)
     malware_scan = scan_download(
         name=result.name,
         size_bytes=result.size,
@@ -124,6 +167,7 @@ async def _concurrent_file_scan(
         media_type=result.media_type,
         files=files,
         uploader=result.uploader,
+        file_sizes=file_sizes,
     )
     if not malware_scan.is_blocked:
         return  # Clean — download continues
@@ -142,11 +186,12 @@ async def _concurrent_file_scan(
         )
     except Exception:
         pass
-    reasons_text = "\n".join(f"\u2022 {r}" for r in malware_scan.reasons)
+    reasons_text = "\n".join(f"\u2022 {_h(r)}" for r in malware_scan.reasons)
     warn_text = (
         "\u26a0\ufe0f <b>Security Hold</b>\n\n"
         f"<code>{_h(result.name)}</code>\n\n"
-        f"Suspicious content detected during download:\n{reasons_text}\n\n"
+        f"Suspicious content detected during download "
+        f"(risk score {malware_scan.score}/100):\n{reasons_text}\n\n"
         "Torrent is <b>paused</b>. Choose an action:"
     )
     warn_kb = InlineKeyboardMarkup(
@@ -166,26 +211,6 @@ async def _concurrent_file_scan(
             track_ephemeral_message(ctx, user_id, sent)
     except Exception:
         LOG.warning("Failed to send concurrent scan block alert", exc_info=True)
-
-
-def _sanitize_quarantine_name(value: str) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9._ -]+", "_", value).strip(" ._")
-    return cleaned or "quarantine-item"
-
-
-def _quarantine_payload(path: str, quarantine_root: str, torrent_hash: str) -> str:
-    os.makedirs(quarantine_root, exist_ok=True)
-    src = str(path or "").strip()
-    if not src or not os.path.exists(src):
-        raise RuntimeError(f"download path missing: {src or 'unknown'}")
-    base_name = _sanitize_quarantine_name(os.path.basename(src.rstrip("/")) or torrent_hash[:12])
-    dest = os.path.join(quarantine_root, base_name)
-    counter = 2
-    while os.path.exists(dest):
-        dest = os.path.join(quarantine_root, f"{base_name}-{counter}")
-        counter += 1
-    shutil.move(src, dest)
-    return dest
 
 
 _clamd_cache: tuple[bool, float] = (False, 0.0)
@@ -331,27 +356,34 @@ async def _apply_completion_security_gate(
             f"ClamAV could not produce a safe verdict. Torrent paused pending manual review.\n\n"
             f"{reason_lines}"
         )
-        # Return allowed=False but don't quarantine — caller will skip organization
+        # Return allowed=False — caller will skip organization
         # but mark_completion_notified prevents infinite re-scan.
         return CompletionSecurityResult(False, media_path, notice)
 
-    # --- ClamAV infected → delete, quarantine, block ---
+    # --- ClamAV infected → delete files, block ---
+    allowed_roots = [
+        ctx.cfg.tv_path,
+        ctx.cfg.movies_path,
+        ctx.cfg.spam_path,
+        getattr(ctx.cfg, "qbt_download_path", "") or "",
+    ]
+    safe_to_delete = _validate_safe_path(media_path, allowed_roots) if media_path else False
+
     try:
-        await asyncio.to_thread(ctx.qbt.delete_torrent, torrent_hash, delete_files=False)
+        await asyncio.to_thread(ctx.qbt.delete_torrent, torrent_hash, delete_files=True)
     except Exception:
-        LOG.warning("Failed to remove torrent after malware hold: %s", torrent_hash, exc_info=True)
+        LOG.warning("Failed to delete torrent after malware hold: %s", torrent_hash, exc_info=True)
 
-    quarantine_root = os.path.join(ctx.cfg.spam_path, "quarantine")
-    quarantine_path = media_path
-    quarantine_error: str | None = None
-    try:
-        quarantine_path = await asyncio.to_thread(_quarantine_payload, media_path, quarantine_root, torrent_hash)
-    except Exception as exc:
-        quarantine_error = str(exc)
-        LOG.warning("Failed to quarantine payload for %s", torrent_hash, exc_info=True)
-
-    if quarantine_error:
-        reasons = [*reasons, f"quarantine failed: {quarantine_error}"]
+    if safe_to_delete and media_path:
+        try:
+            await asyncio.to_thread(shutil.rmtree, media_path, True)
+        except Exception:
+            LOG.warning("rmtree fallback failed for %s", media_path, exc_info=True)
+    elif media_path:
+        LOG.critical(
+            "Refusing to delete suspicious payload outside allowed roots: %s",
+            media_path,
+        )
 
     try:
         await asyncio.to_thread(ctx.store.log_malware_block, torrent_hash, name, "download", reasons)
@@ -363,22 +395,21 @@ async def _apply_completion_security_gate(
             ctx.store.log_health_event,
             user_id,
             torrent_hash,
-            "malware_quarantine",
+            "malware_delete",
             "critical",
-            json.dumps({"reasons": reasons, "quarantine_path": quarantine_path}),
+            json.dumps({"reasons": reasons}),
             name,
         )
     except Exception:
         LOG.debug("Failed to log malware health event", exc_info=True)
 
-    where = (
-        f"\nQuarantined to: <code>{_h(quarantine_path)}</code>"
-        if quarantine_path and quarantine_path != media_path
-        else "\nPayload remains in place pending manual review."
-    )
     reason_lines = "\n".join(f"• {_h(reason)}" for reason in reasons[:8])
-    notice = f"⚠️ <b>Malware Detected</b>\n<code>{_h(name)}</code>\n\nClamAV detected malicious content.{where}\n\n{reason_lines}"
-    return CompletionSecurityResult(False, quarantine_path, notice)
+    notice = (
+        f"⚠️ <b>Malware Detected</b>\n<code>{_h(name)}</code>\n\n"
+        f"ClamAV detected malicious content. Files have been deleted.\n\n"
+        f"{reason_lines}"
+    )
+    return CompletionSecurityResult(False, media_path, notice)
 
 
 # ---------------------------------------------------------------------------
@@ -1484,8 +1515,10 @@ async def completion_poller_job(ctx: HandlerContext, context: ContextTypes.DEFAU
         try:
             raw_files = await asyncio.to_thread(ctx.qbt.get_torrent_files, torrent_hash)
             file_names = _torrent_file_names(raw_files)
+            file_sizes_list = _torrent_file_sizes(raw_files)
         except Exception:
             file_names = []
+            file_sizes_list = []
         if file_names:
             cat_lower = category.lower()
             mt = "episode" if cat_lower in ("tv", "shows", "tv shows") else "movie"
@@ -1495,6 +1528,7 @@ async def completion_poller_job(ctx: HandlerContext, context: ContextTypes.DEFAU
                 quality_tier=quality_tier(name),
                 media_type=mt,
                 files=file_names,
+                file_sizes=file_sizes_list,
             )
             if completion_scan.is_blocked:
                 try:
@@ -1508,7 +1542,11 @@ async def completion_poller_job(ctx: HandlerContext, context: ContextTypes.DEFAU
                 except Exception:
                     pass
                 reason_lines = "\n".join(f"• {_h(r)}" for r in completion_scan.reasons[:8])
-                notice = f"⚠️ <b>Download Blocked</b>\n<code>{_h(name)}</code>\n\nFile-list heuristics flagged suspicious content.\n\n{reason_lines}"
+                notice = (
+                    f"⚠️ <b>Download Blocked</b>\n<code>{_h(name)}</code>\n\n"
+                    f"File-list heuristics flagged suspicious content "
+                    f"(risk score {completion_scan.score}/100).\n\n{reason_lines}"
+                )
                 await asyncio.to_thread(ctx.store.mark_completion_notified, torrent_hash, name)
                 for uid in ctx.cfg.allowed_user_ids:
                     try:
@@ -1989,7 +2027,9 @@ async def do_add(
         except Exception:
             pass  # logging failure must not block the user response
         reasons_text = "\n".join(f"• {r}" for r in malware_scan.reasons)
-        raise RuntimeError(f"Download blocked — suspicious content detected:\n{reasons_text}")
+        raise RuntimeError(
+            f"Download blocked — suspicious content detected (risk score {malware_scan.score}/100):\n{reasons_text}"
+        )
     # --- end malware gate ---
     is_magnet = url.lower().startswith("magnet:?")
     try:
@@ -2251,7 +2291,7 @@ async def do_add_full(
         ctx.cfg.file_inspection_timeout_s * 3 if result.is_magnet else ctx.cfg.file_inspection_timeout_s
     )
     try:
-        files = await _wait_for_file_inspection(ctx, torrent_hash, timeout_s=inspection_timeout)
+        raw_files = await _wait_for_file_inspection(ctx, torrent_hash, timeout_s=inspection_timeout)
     except Exception as exc:
         inspection_note = (
             "\n\u26a0\ufe0f File inspection did not complete in time. "
@@ -2264,6 +2304,8 @@ async def do_add_full(
             exc,
         )
     else:
+        files = _torrent_file_names(raw_files)
+        file_sizes = _torrent_file_sizes(raw_files)
         malware_scan_result = scan_download(
             name=result.name,
             size_bytes=result.size,
@@ -2271,6 +2313,7 @@ async def do_add_full(
             media_type=result.media_type,
             files=files,
             uploader=result.uploader,
+            file_sizes=file_sizes,
         )
         if malware_scan_result.is_blocked:
             try:
@@ -2287,7 +2330,10 @@ async def do_add_full(
             except Exception:
                 pass
             reasons_text = "\n".join(f"• {r}" for r in malware_scan_result.reasons)
-            raise RuntimeError(f"Download blocked — suspicious content detected:\n{reasons_text}")
+            raise RuntimeError(
+                f"Download blocked — suspicious content detected "
+                f"(risk score {malware_scan_result.score}/100):\n{reasons_text}"
+            )
 
     queued = False
     async with ctx.download_queue_lock:
