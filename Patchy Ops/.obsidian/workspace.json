@@ -185,6 +185,8 @@
   },
   "active": "d0538726ebfd62f7",
   "lastOpenFiles": [
+    "02-Work/Upgrades/duplicate-cleanup-scheduling.md",
+    "02-Work/Upgrades/duplicate-cleanup-scheduling.md.tmp.4059269.1776059773339",
     "Notes, Ideas, etc..md",
     "Notes.md",
     "Untitled.md",
@@ -197,7 +199,6 @@
     "03-Reference/Coding Conventions.md.tmp.4059269.1775962314216",
     "03-Reference/Coding Conventions.md.tmp.4059269.1775962306647",
     "03-Reference/Coding Conventions.md.tmp.4059269.1775962299842",
-    "01-System/System Overview.md.tmp.4059269.1775962281861",
     "04-Ideas/Ideas Index.md",
     "03-Reference/Preferences.md",
     "00-Home/Dashboard.md",
@@ -219,7 +220,6 @@
     "02-Work/Todos/download-malware-scan-visibility.md",
     "02-Work/Todos/bot-phase2-decomposition.md",
     "02-Work/Work Board.md",
-    "01-System/System Overview.md",
-    "01-System/State & Flows.md"
+    "01-System/System Overview.md"
   ]
 }

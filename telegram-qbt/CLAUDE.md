@@ -42,6 +42,8 @@ Apply the repo-root project rules in [`../CLAUDE.md`](/home/karson/Patchy_Bot/CL
 - Type hints required on all new function signatures
 - Scoring functions should penalize (score -= N), not hard-reject (return -9999)
 - In-memory caching for hot polling loops; DB as restart-safe fallback
+- `asyncio.to_thread(func, *args)` does NOT forward kw-only params — wrap kwarg calls as `await asyncio.to_thread(lambda: func(..., kw=val))` (see `bot.py` movie-track block logging call site)
+- Module-level mutable state accessed from multiple async call sites (e.g. `_clamav_consecutive_errors`, `_last_daily_cleanup_ts`) must be guarded by an `asyncio.Lock`; acquire only around the read-modify-write, release across any `await asyncio.to_thread(...)` to avoid holding the lock across blocking I/O
 
 ### Parity Rule
 Any change to Movie Search must also be applied to TV Search and vice versa. Check both paths after modifying either.
@@ -63,6 +65,9 @@ When using multiple related EMA smoothing variables (smooth_progress_pct, smooth
 ### SQLite
 - File permissions: owner-only `0o600`
 - WAL mode with `busy_timeout=5000` — don't hold transactions open unnecessarily
+- Python `sqlite3` uses `isolation_level="deferred"` by default — `ALTER TABLE ADD COLUMN` opens an implicit txn, so call `conn.commit()` before `BEGIN IMMEDIATE` or the next migration step raises `cannot start a transaction within a transaction`
+- Multi-step schema migrations (CREATE/INSERT/DROP/RENAME) must run inside an explicit `BEGIN IMMEDIATE` ... `COMMIT` / `ROLLBACK` wrapper with a defensive `DROP TABLE IF EXISTS <new_name>` before `CREATE` to survive crash-recovery restarts
+- Bulk `DELETE` on retention cleanup must be paged (`WHERE rowid IN (SELECT rowid ... LIMIT 1000)` loop) so the write lock doesn't starve the completion poller
 
 ### Thread Safety
 - `QBClient` uses `threading.Lock()` — preserve this; keep lock scope minimal
@@ -164,6 +169,8 @@ Invoke manually: `/post-changes-audit [quick|standard|deep]`
 | `torrent-client-abstraction-agent` | Transmission/rTorrent abstraction planning |
 
 **Model routing:** Audit/review agents use Opus. Implementation agents use Sonnet (project default). Do not hardcode `model` in Agent tool calls — let `settings.json` control it unless the agent definition specifies otherwise.
+
+**Runtime availability caveat:** `audit-correctness-agent` and `audit-performance-agent` are defined in `.claude/agents/` but the Claude Code runtime does not currently expose them (likely due to non-standard frontmatter — `permissionMode: plan` instead of the standard `tools:` key). Until the registration is fixed, fall back to `reviewer` for correctness audits and `performance-optimization-agent` for performance audits. The post-changes-audit workflow must substitute these until the frontmatter is corrected.
 
 ## Subagent-Driven Development
 
