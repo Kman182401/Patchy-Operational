@@ -58,27 +58,9 @@
             "command": "bash /home/karson/Patchy_Bot/.claude/hooks/post-edit-format.sh"
           }
         ]
-      },
-      {
-        "matcher": "Write|Edit|Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash /home/karson/Patchy_Bot/.claude/hooks/memory-recorder.sh"
-          }
-        ]
       }
     ],
     "Stop": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash /home/karson/Patchy_Bot/.claude/hooks/session-finalizer.sh"
-          }
-        ]
-      },
       {
         "matcher": "",
         "hooks": [

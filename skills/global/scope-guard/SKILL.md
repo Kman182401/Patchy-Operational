@@ -1,6 +1,6 @@
 ---
 name: scope-guard
-description: This skill should be used when the user asks for a "scope check", "am I on track", "staying focused", "check for scope creep", "what was I asked to do", or when performing any multi-step implementation task. Trigger automatically during planning, implementation, and before marking work complete. Prevents scope creep by comparing current work against the original user request.
+description: Prevent scope creep by comparing current work to the original request. Trigger on "scope check", "am I on track", "staying focused", or during multi-step tasks.
 ---
 
 # Scope Guard

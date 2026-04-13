@@ -30,21 +30,25 @@ This dashboard is your starting point — it shows what work is open right now, 
 
 ## Open Work
 
-```dataview
-TABLE priority, status, file.folder AS "Bucket"
-FROM #work/todo OR #work/upgrade
-WHERE status != "done"
-SORT priority ASC
-```
+**Todos**
+- [ ] **high** — [[movie-tracking-audit]]
+- [ ] **medium** — [[bot-phase2-decomposition]]
+- [ ] **medium** — [[download-malware-scan-visibility]]
+- [ ] **medium** — [[vpn-interface-safety-docs]]
+
+**Upgrades**
+- [ ] **high** — [[plex-watchlist-auto-download]]
+- [ ] **medium** — [[search-result-poster-thumbnails]]
+- [ ] **low** — [[alert-notifications-clear-button]]
+- [ ] **low** — [[duplicate-cleanup-scheduling]]
+- [ ] **low** — [[quality-dedup-cross-resolution]]
+- [ ] **low** — [[search-early-exit-tuning]]
+
+See [[Work Board]] for the canonical list.
 
 ## Recent Changelog
 
-```dataview
-TABLE created
-FROM #changelog
-SORT created DESC
-LIMIT 5
-```
+- [[2026-04-completed]]
 
 ## System Map
 

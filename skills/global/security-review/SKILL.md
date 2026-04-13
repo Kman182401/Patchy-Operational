@@ -1,7 +1,8 @@
 ---
 name: security-review
-description: "This skill should be used when the user asks to 'security review', 'check for vulnerabilities', 'secure this code', 'OWASP check', or when adding authentication, handling user input, working with secrets, creating API endpoints, or implementing payment/sensitive features. Provides comprehensive security checklist and patterns. Distinct from security-reviewer (which runs proactively after edits) and security-scan (which scans .claude/ config)."
+description: "Security review checklist and OWASP patterns. Manual-invoke only. Use when explicitly asked to security-review, check vulnerabilities, or audit auth/secrets/endpoints."
 origin: ECC
+disable-model-invocation: true
 ---
 
 # Security Review Skill

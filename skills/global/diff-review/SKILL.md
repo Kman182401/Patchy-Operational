@@ -1,6 +1,6 @@
 ---
 name: diff-review
-description: This skill should be used when the user asks to "review my diff", "check before commit", "diff review", "pre-commit check", "what changed", "scan my changes", "review staged changes", or needs a quality gate before any git commit. Trigger automatically before committing when preparing changes for review. Catches debug leftovers, accidental changes, leaked secrets, and quality issues in the actual diff that linters and security-review miss.
+description: Pre-commit diff quality gate. Use when the user asks to review a diff, check before commit, or scan changes. Catches debug leftovers, leaked secrets, accidental edits.
 ---
 
 # Diff Review

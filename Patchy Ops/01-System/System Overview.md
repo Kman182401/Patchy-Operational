@@ -38,11 +38,15 @@ See also:
 - [[State & Flows]] — how the bot remembers what each user is doing
 - [[Callback Routes]] — how button taps get matched to handlers
 
-```dataview
-LIST
-FROM #system
-SORT file.name ASC
-```
+**System pages**
+
+- [[API Clients]]
+- [[Callback Routes]]
+- [[Malware Engine v2]]
+- [[Modules]]
+- [[SQLite Tables]]
+- [[State & Flows]]
+- [[System Overview]]
 
 ```mermaid
 graph TD

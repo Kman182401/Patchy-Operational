@@ -2,6 +2,10 @@
 
 Repo-root rules in `../CLAUDE.md` apply. This file adds `telegram-qbt/` runtime specifics.
 
+## Agents
+Use task-oriented agents: explorer, implementer, reviewer, test-runner.
+Delegate isolated tasks to keep main context clean.
+
 ## Overview
 Python 3.12+, python-telegram-bot (polling), SQLite WAL, asyncio. Entry: `patchy_bot/__main__.py` → `bot.py`. Service: `telegram-qbt-bot.service`.
 
