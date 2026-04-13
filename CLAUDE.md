@@ -2,7 +2,7 @@
 
 ## Guardrails
 
-- Do not run git write commands in `/home/karson/Patchy_Bot` unless the user explicitly asks in the current message.
+- Do not run raw git write commands (`git commit`, `git push`, branch/reset) in `/home/karson/Patchy_Bot`. The `push` shell alias is the only sanctioned commit+push path (see Push Rule).
 - Prefer code over docs when they disagree.
 - Keep changes targeted. Do not rewrite unrelated flows or move files without a clear reason.
 - Do not break [`telegram-qbt/qbt_telegram_bot.py`](/home/karson/Patchy_Bot/telegram-qbt/qbt_telegram_bot.py); it is a back-compat shim unless the user explicitly wants it changed.
@@ -18,7 +18,13 @@
 
 ## Restart Rule
 
-- After changes under [`telegram-qbt/patchy_bot/`](/home/karson/Patchy_Bot/telegram-qbt/patchy_bot) or related runtime config/service files, restart [`telegram-qbt/telegram-qbt-bot.service`](/home/karson/Patchy_Bot/telegram-qbt/telegram-qbt-bot.service) when applying changes locally is appropriate.
+- After changes under [`telegram-qbt/patchy_bot/`](/home/karson/Patchy_Bot/telegram-qbt/patchy_bot) or related runtime config/service files, restart [`telegram-qbt/telegram-qbt-bot.service`](/home/karson/Patchy_Bot/telegram-qbt/telegram-qbt-bot.service) so the running bot picks up the change.
+
+## Push Rule
+
+- After completing any task that modifies files under `/home/karson/Patchy_Bot/` (runtime code, config, skills, vault, docs, memory), run the `push` shell alias in Bash. It auto-commits and pushes to `origin/main` of the Patchy-Operational repo.
+- The `push` alias is the ONLY sanctioned git path — never run raw `git commit`/`git push`/branch commands manually.
+- End-of-task order: restart the service first (if runtime code changed), then run `push`. Both must happen before reporting "done".
 
 ## File Ownership
 
