@@ -28,15 +28,16 @@ import math
 import re
 from typing import Any
 
-LOG = logging.getLogger("qbtg")
-
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from ..malware import scan_search_result
 from ..quality import score_torrent
+from ..store import Store
 from ..ui.text import format_risk_badge
 from ..utils import _h, human_size, quality_tier
-from .download import is_direct_torrent_link
+from .download import _serialize_signals, is_direct_torrent_link
+
+LOG = logging.getLogger("qbtg")
 
 # ---------------------------------------------------------------------------
 # Secret redaction for debug logs
@@ -92,10 +93,17 @@ def apply_filters(
     min_quality: int,
     media_type: str = "movie",
     release_dates: dict[str, int] | None = None,
+    store: Store | None = None,
 ) -> list[dict[str, Any]]:
-    """Filter search result rows by seeds, size, quality, and source availability."""
+    """Filter search result rows by seeds, size, quality, and source availability.
+
+    When ``store`` is provided, malware-blocked rows are persisted to
+    ``malware_scan_log`` (stage="search"), throttled to at most 10 entries
+    per call so a single noisy search cannot flood the table.
+    """
     out: list[dict[str, Any]] = []
     total_in = len(rows)
+    _search_block_budget = 10
     _drop_seeds = 0
     _drop_min_size = 0
     _drop_max_size = 0
@@ -176,6 +184,20 @@ def apply_filters(
                 getattr(malware_scan, "score", -1),
                 malware_scan.reasons,
             )
+            if store is not None and _search_block_budget > 0:
+                try:
+                    store.log_malware_block(
+                        torrent_hash=rh or name[:40],
+                        torrent_name=name,
+                        stage="search",
+                        reasons=malware_scan.reasons,
+                        risk_score=malware_scan.score,
+                        tier=malware_scan.tier,
+                        signals=_serialize_signals(malware_scan),
+                    )
+                    _search_block_budget -= 1
+                except Exception:
+                    LOG.debug("Failed to persist search-time malware block", exc_info=True)
             _drop_malware += 1
             continue
         if tier == "caution":
@@ -528,7 +550,6 @@ def render_page(
     min_q = int(opts.get("min_quality") or 0)
     qtxt = f"{min_q}p+" if min_q else "any"
     media_hint = str(opts.get("media_hint") or "any")
-    sid = search_meta["search_id"]
     query = search_meta["query"]
     lines = [
         f"<b>🔎 Search:</b> <code>{_h(query)}</code>",

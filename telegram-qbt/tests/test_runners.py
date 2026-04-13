@@ -64,7 +64,7 @@ def _completed_torrent(**overrides: Any) -> dict[str, Any]:
 async def test_completion_poller_skips_when_no_app(mock_ctx: Any) -> None:
     """When ctx.app is None the poller returns immediately without touching qbt."""
     mock_ctx.app = None
-    await completion_poller_job(mock_ctx, None)
+    await completion_poller_job(mock_ctx, None)  # pyright: ignore[reportArgumentType]
     # qbt should never be called
     mock_ctx.qbt.list_torrents.assert_not_called()
 
@@ -74,7 +74,7 @@ async def test_completion_poller_handles_qbt_error(mock_ctx: Any) -> None:
     mock_ctx.app = MagicMock()
     mock_ctx.qbt.list_torrents = MagicMock(side_effect=ConnectionError("refused"))
     # Should not raise
-    await completion_poller_job(mock_ctx, None)
+    await completion_poller_job(mock_ctx, None)  # pyright: ignore[reportArgumentType]
 
 
 async def test_completion_poller_skips_already_notified(mock_ctx: Any, monkeypatch: Any) -> None:
@@ -86,7 +86,7 @@ async def test_completion_poller_skips_already_notified(mock_ctx: Any, monkeypat
     mock_ctx.store.mark_completion_notified = MagicMock()
     mock_ctx.store.cleanup_old_completion_records = MagicMock()
 
-    await completion_poller_job(mock_ctx, None)
+    await completion_poller_job(mock_ctx, None)  # pyright: ignore[reportArgumentType]
 
     mock_ctx.store.mark_completion_notified.assert_not_called()
 
@@ -113,7 +113,7 @@ async def test_completion_poller_detects_finished(mock_ctx: Any, monkeypatch: An
         lambda *a: FakeOrganizeResult(),
     )
 
-    await completion_poller_job(mock_ctx, None)
+    await completion_poller_job(mock_ctx, None)  # pyright: ignore[reportArgumentType]
 
     mock_ctx.store.mark_completion_notified.assert_called_once()
     mock_bot.send_message.assert_called_once()
@@ -144,7 +144,7 @@ async def test_completion_poller_organizes_download(mock_ctx: Any, monkeypatch: 
 
     monkeypatch.setattr("patchy_bot.handlers.download._organize_download", fake_organize)
 
-    await completion_poller_job(mock_ctx, None)
+    await completion_poller_job(mock_ctx, None)  # pyright: ignore[reportArgumentType]
 
     assert len(organize_calls) == 1
     # First arg is the media path
@@ -171,7 +171,7 @@ async def test_completion_poller_triggers_plex_scan(mock_ctx: Any, monkeypatch: 
         lambda *a: FakeOrganizeResult(),
     )
 
-    await completion_poller_job(mock_ctx, None)
+    await completion_poller_job(mock_ctx, None)  # pyright: ignore[reportArgumentType]
 
     mock_ctx.plex.refresh_for_path.assert_called_once()
 
@@ -197,7 +197,7 @@ async def test_completion_poller_notifies_multiple_users(mock_ctx: Any, monkeypa
         lambda *a: FakeOrganizeResult(),
     )
 
-    await completion_poller_job(mock_ctx, None)
+    await completion_poller_job(mock_ctx, None)  # pyright: ignore[reportArgumentType]
 
     assert mock_bot.send_message.call_count == 3
 
@@ -208,7 +208,7 @@ async def test_completion_poller_cleans_old_records(mock_ctx: Any, monkeypatch: 
     mock_ctx.store.cleanup_old_completion_records = MagicMock()
     mock_ctx.app = MagicMock()
 
-    await completion_poller_job(mock_ctx, None)
+    await completion_poller_job(mock_ctx, None)  # pyright: ignore[reportArgumentType]
 
     mock_ctx.store.cleanup_old_completion_records.assert_called_once()
 
@@ -241,7 +241,7 @@ async def test_remove_runner_no_due_jobs(mock_ctx: Any, monkeypatch: Any) -> Non
     mock_ctx.store.list_due_remove_jobs = MagicMock(return_value=[])
     monkeypatch.setattr("patchy_bot.handlers.remove.now_ts", lambda: 1000)
 
-    await remove_runner_job(mock_ctx, None)
+    await remove_runner_job(mock_ctx, None)  # pyright: ignore[reportArgumentType]
 
     mock_ctx.store.list_due_remove_jobs.assert_called_once()
 
@@ -260,7 +260,7 @@ async def test_remove_runner_processes_due_job(mock_ctx: Any, monkeypatch: Any) 
 
     monkeypatch.setattr("patchy_bot.handlers.remove.remove_attempt_plex_cleanup", fake_cleanup)
 
-    await remove_runner_job(mock_ctx, None)
+    await remove_runner_job(mock_ctx, None)  # pyright: ignore[reportArgumentType]
 
     assert len(cleanup_calls) == 1
     assert cleanup_calls[0]["job_id"] == "j1"
@@ -278,7 +278,7 @@ async def test_remove_runner_handles_cleanup_failure(mock_ctx: Any, monkeypatch:
     monkeypatch.setattr("patchy_bot.handlers.remove.remove_attempt_plex_cleanup", fail_cleanup)
 
     # Should not raise
-    await remove_runner_job(mock_ctx, None)
+    await remove_runner_job(mock_ctx, None)  # pyright: ignore[reportArgumentType]
 
 
 async def test_remove_runner_lock_prevents_concurrent(mock_ctx: Any, monkeypatch: Any) -> None:
@@ -294,14 +294,14 @@ async def test_remove_runner_lock_prevents_concurrent(mock_ctx: Any, monkeypatch
 
     async def slow_runner() -> None:
         call_order.append("start-1")
-        await remove_runner_job(mock_ctx, None)
+        await remove_runner_job(mock_ctx, None)  # pyright: ignore[reportArgumentType]
         call_order.append("end-1")
 
     async def fast_runner() -> None:
         # Give the slow runner a moment to acquire the lock
         await asyncio.sleep(0.01)
         call_order.append("start-2")
-        await remove_runner_job(mock_ctx, None)
+        await remove_runner_job(mock_ctx, None)  # pyright: ignore[reportArgumentType]
         call_order.append("end-2")
 
     await asyncio.gather(slow_runner(), fast_runner())
@@ -646,7 +646,7 @@ async def test_schedule_runner_batch_downloads_multiple_episodes(monkeypatch: An
     )
     acquire_results = {c: {"name": f"Test.{c}", "hash": f"hash_{c}"} for c in codes}
     store = _BatchDummyStore(track)
-    bot = _BatchDummyBot(store, acquire_results)
+    bot = _BatchDummyBot(store, acquire_results)  # pyright: ignore[reportArgumentType]
 
     from patchy_bot.bot import BotApp
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 from patchy_bot.handlers.search import apply_filters
 from patchy_bot.malware import DetectionSignal, ScanResult
 from patchy_bot.ui.text import format_risk_badge
@@ -258,3 +260,82 @@ class TestFormatRiskBadge:
         badge = format_risk_badge(scan)
         assert "<script>" not in badge
         assert "&lt;script&gt;" in badge
+
+
+# ---------------------------------------------------------------------------
+# Session 4 Task 11: apply_filters store-backed malware block logging
+# ---------------------------------------------------------------------------
+
+
+def _blocked_row(hash_char: str) -> dict:
+    return {
+        "name": "Movie.codec.required.install.to.watch.requires.registration.1080p",
+        "size": 2_000_000_000,
+        "seeders": 50,
+        "hash": hash_char * 40,
+    }
+
+
+class TestApplyFiltersStoreLogging:
+    """Session 4: apply_filters persists blocked rows to malware_scan_log via store."""
+
+    def test_blocked_result_persisted_to_store(self) -> None:
+        """apply_filters(store=mock_store) calls log_malware_block for blocked results."""
+        mock_store = MagicMock()
+        mock_store.log_malware_block = MagicMock(return_value=None)
+        rows = [_blocked_row("a")]
+
+        out = apply_filters(
+            rows,
+            min_seeds=0,
+            min_size=None,
+            max_size=None,
+            min_quality=0,
+            media_type="movie",
+            store=mock_store,
+        )
+        assert out == []
+        assert mock_store.log_malware_block.call_count == 1
+        call = mock_store.log_malware_block.call_args
+        # Stage must be 'search'; risk_score/tier/signals must be passed.
+        assert call.kwargs.get("stage") == "search"
+        assert call.kwargs.get("tier") == "blocked"
+        assert isinstance(call.kwargs.get("risk_score"), int)
+        assert call.kwargs.get("signals") is not None
+
+    def test_search_block_throttle(self) -> None:
+        """apply_filters logs at most 10 blocks per search even with 20+ blocked rows."""
+        mock_store = MagicMock()
+        mock_store.log_malware_block = MagicMock(return_value=None)
+        # 20 blocked rows with distinct hashes
+        rows = [_blocked_row(hex(i)[2:].rjust(1, "0")[:1] or "f") for i in range(20)]
+        # Ensure hashes are all distinct by rewriting
+        for i, row in enumerate(rows):
+            row["hash"] = f"{i:040x}"
+
+        out = apply_filters(
+            rows,
+            min_seeds=0,
+            min_size=None,
+            max_size=None,
+            min_quality=0,
+            media_type="movie",
+            store=mock_store,
+        )
+        assert out == []
+        # Throttle is 10 per call.
+        assert mock_store.log_malware_block.call_count == 10
+
+    def test_apply_filters_without_store_does_not_crash(self) -> None:
+        """apply_filters(store=None) still filters correctly without logging."""
+        rows = [_blocked_row("a")]
+        out = apply_filters(
+            rows,
+            min_seeds=0,
+            min_size=None,
+            max_size=None,
+            min_quality=0,
+            media_type="movie",
+            store=None,
+        )
+        assert out == []

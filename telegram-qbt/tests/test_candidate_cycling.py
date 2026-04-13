@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import pytest
-
 from patchy_bot.ui.keyboards import candidate_nav_keyboard
 from patchy_bot.ui.text import movie_candidate_caption, tv_candidate_caption
-
 
 # ---------------------------------------------------------------------------
 # Keyboard builder tests

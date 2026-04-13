@@ -82,7 +82,7 @@ def test_schedule_refresh_degrades_cleanly_when_metadata_lookup_fails(monkeypatc
             self._ctx = self
 
     track = {"track_id": "track-1", "last_probe_json": {"show": {"name": "Example Show"}}}
-    updated, probe = asyncio.run(BotApp._schedule_refresh_track(DummyBot(), track))
+    updated, probe = asyncio.run(BotApp._schedule_refresh_track(DummyBot(), track))  # pyright: ignore[reportArgumentType]
 
     assert probe["metadata_error"] == "tv metadata offline"
     assert updated["track_id"] == "track-1"
@@ -117,9 +117,9 @@ def test_schedule_qbt_codes_honors_path_equivalent_category_aliases() -> None:
         _norm_path = staticmethod(BotApp._norm_path)
 
         def _qbt_category_aliases(self, primary_category: str, save_path: str) -> set[str]:
-            return BotApp._qbt_category_aliases(self, primary_category, save_path)
+            return BotApp._qbt_category_aliases(self, primary_category, save_path)  # pyright: ignore[reportArgumentType]
 
-    codes = BotApp._schedule_qbt_codes_for_show(DummyBot(), "Example Show", 1)
+    codes = BotApp._schedule_qbt_codes_for_show(DummyBot(), "Example Show", 1)  # pyright: ignore[reportArgumentType]
     assert codes == {"S01E02"}
 
 
@@ -133,13 +133,13 @@ def test_schedule_next_check_ignores_stale_retry_and_uses_future_release_window(
 
     air_ts = 1_700_000_000 + (8 * 24 * 3600)
     next_check = BotApp._schedule_next_check_at(
-        DummyBot(),
+        DummyBot(),  # pyright: ignore[reportArgumentType]
         air_ts,
         has_actionable_missing=False,
         auto_state={"next_auto_retry_at": 1_699_000_000},
     )
 
-    assert next_check == air_ts + BotApp._schedule_release_grace_s(DummyBot())
+    assert next_check == air_ts + BotApp._schedule_release_grace_s(DummyBot())  # pyright: ignore[reportArgumentType]
 
 
 def test_schedule_next_check_uses_future_retry_for_actionable_missing(monkeypatch) -> None:
@@ -150,7 +150,7 @@ def test_schedule_next_check_uses_future_retry_for_actionable_missing(monkeypatc
     monkeypatch.setattr("patchy_bot.bot.now_ts", lambda: 1_700_000_000)
 
     next_check = BotApp._schedule_next_check_at(
-        DummyBot(),
+        DummyBot(),  # pyright: ignore[reportArgumentType]
         None,
         has_actionable_missing=True,
         auto_state={"next_auto_retry_at": 1_700_000_900},
@@ -186,11 +186,11 @@ def test_schedule_repair_track_state_clears_stale_retry(monkeypatch) -> None:
     }
 
     bot = DummyBot()
-    BotApp._schedule_repair_track_state(bot, track)
+    BotApp._schedule_repair_track_state(bot, track)  # pyright: ignore[reportArgumentType]
 
     assert bot.store.updated is not None
-    assert bot.store.updated["auto_state_json"]["next_auto_retry_at"] is None
-    assert int(bot.store.updated["next_check_at"]) > 1_700_000_000
+    assert bot.store.updated["auto_state_json"]["next_auto_retry_at"] is None  # pyright: ignore[reportIndexIssue]
+    assert int(bot.store.updated["next_check_at"]) > 1_700_000_000  # pyright: ignore[reportArgumentType]
 
 
 def test_qbt_transport_status_flags_missing_bound_interface(monkeypatch) -> None:
@@ -207,7 +207,7 @@ def test_qbt_transport_status_flags_missing_bound_interface(monkeypatch) -> None
 
     monkeypatch.setattr("os.path.exists", lambda path: False)
 
-    ok, reason = BotApp._qbt_transport_status(DummyBot())
+    ok, reason = BotApp._qbt_transport_status(DummyBot())  # pyright: ignore[reportArgumentType]
     assert ok is False
     assert "bound interface missing: surfshark_wg" == reason
 
@@ -227,7 +227,7 @@ def test_qbt_transport_status_flags_disconnected_client(monkeypatch) -> None:
     monkeypatch.setattr("os.path.exists", lambda path: path == "/sys/class/net/enp4s0")
     monkeypatch.setattr("builtins.open", lambda *_args, **_kwargs: io.StringIO("up\n"))
 
-    ok, reason = BotApp._qbt_transport_status(DummyBot())
+    ok, reason = BotApp._qbt_transport_status(DummyBot())  # pyright: ignore[reportArgumentType]
     assert ok is False
     assert "connection_status=disconnected via enp4s0 (up), dht_nodes=0" == reason
 
@@ -247,7 +247,7 @@ def test_qbt_transport_status_accepts_connected_client(monkeypatch) -> None:
     monkeypatch.setattr("os.path.exists", lambda path: path == "/sys/class/net/enp4s0")
     monkeypatch.setattr("builtins.open", lambda *_args, **_kwargs: io.StringIO("up\n"))
 
-    ok, reason = BotApp._qbt_transport_status(DummyBot())
+    ok, reason = BotApp._qbt_transport_status(DummyBot())  # pyright: ignore[reportArgumentType]
     assert ok is True
     assert "connection_status=connected via enp4s0 (up), dht_nodes=304" == reason
 
@@ -263,7 +263,7 @@ def test_targets_only_include_movies_and_tv() -> None:
         def __init__(self) -> None:
             self.cfg = DummyCfg()
 
-    targets = BotApp._targets(DummyBot())
+    targets = BotApp._targets(DummyBot())  # pyright: ignore[reportArgumentType]
 
     assert set(targets) == {"movies", "tv"}
     assert targets["movies"]["path"] == "/srv/movies"
@@ -285,14 +285,14 @@ def test_storage_status_no_longer_depends_on_spam_path(monkeypatch) -> None:
             self.cfg = DummyCfg()
 
         def _targets(self) -> dict[str, dict[str, str]]:
-            return BotApp._targets(self)
+            return BotApp._targets(self)  # pyright: ignore[reportArgumentType]
 
     mkdir_calls: list[str] = []
 
     monkeypatch.setattr("os.makedirs", lambda path, exist_ok=False: mkdir_calls.append(path))
     monkeypatch.setattr("os.path.isdir", lambda path: path in {"/srv/movies", "/srv/tv"})
 
-    ok, reason = BotApp._storage_status(DummyBot())
+    ok, reason = BotApp._storage_status(DummyBot())  # pyright: ignore[reportArgumentType]
 
     assert ok is True
     assert reason == "ready"
@@ -309,7 +309,7 @@ def test_storage_probe_paths_prefer_media_paths_before_nvme_mount() -> None:
         def __init__(self) -> None:
             self.cfg = DummyCfg()
 
-    paths = BotApp._storage_probe_paths(DummyBot())
+    paths = BotApp._storage_probe_paths(DummyBot())  # pyright: ignore[reportArgumentType]
 
     assert paths == ["/srv/plex/movies", "/srv/plex/tv", "/mnt/workstation"]
 
@@ -345,7 +345,7 @@ def test_plex_storage_display_uses_media_path_even_if_nvme_mount_differs(monkeyp
 
     monkeypatch.setattr("os.statvfs", fake_statvfs)
 
-    text = BotApp._plex_storage_display(DummyBot())
+    text = BotApp._plex_storage_display(DummyBot())  # pyright: ignore[reportArgumentType]
 
     assert stat_targets == ["/srv/plex/movies"]
     assert "💾 Plex storage:" in text
@@ -373,7 +373,7 @@ def test_store_uses_schedule_due_index(tmp_path) -> None:
     import sqlite3 as _sqlite3
 
     db_path = str(tmp_path / "state.sqlite3")
-    store = Store(db_path)
+    Store(db_path)  # creates schema as side effect
 
     conn = _sqlite3.connect(db_path)
     plan = conn.execute(
@@ -531,7 +531,7 @@ def test_remove_confirm_keyboard_compacts_small_action_sets_into_two_columns() -
         _nav_footer = BotApp._nav_footer
         _compact_action_rows = staticmethod(BotApp._compact_action_rows)
 
-    keyboard = BotApp._remove_confirm_keyboard(DummyBot(), 1).inline_keyboard
+    keyboard = BotApp._remove_confirm_keyboard(DummyBot(), 1).inline_keyboard  # pyright: ignore[reportArgumentType]
 
     assert [[button.text for button in row] for row in keyboard] == [
         ["✅ Confirm Delete (1)", "🧹 Clear Selection"],
@@ -543,7 +543,7 @@ def test_home_only_keyboard_contains_home_button() -> None:
     class DummyBot:
         _nav_footer = BotApp._nav_footer
 
-    keyboard = BotApp._home_only_keyboard(DummyBot()).inline_keyboard
+    keyboard = BotApp._home_only_keyboard(DummyBot()).inline_keyboard  # pyright: ignore[reportArgumentType]
 
     assert [[button.text for button in row] for row in keyboard] == [["🏠 Home"]]
 
@@ -552,7 +552,7 @@ def test_nav_footer_can_omit_home() -> None:
     class DummyBot:
         _nav_footer = BotApp._nav_footer
 
-    rows = BotApp._nav_footer(DummyBot(), back_data="go:back", include_home=False)
+    rows = BotApp._nav_footer(DummyBot(), back_data="go:back", include_home=False)  # pyright: ignore[reportArgumentType]
 
     assert [[button.text for button in row] for row in rows] == [["⬅️ Back"]]
 
@@ -562,7 +562,7 @@ def test_remove_prompt_keyboard_compacts_when_five_or_fewer_buttons_are_visible(
         _nav_footer = BotApp._nav_footer
         _compact_action_rows = staticmethod(BotApp._compact_action_rows)
 
-    keyboard = BotApp._remove_prompt_keyboard(DummyBot(), 1).inline_keyboard
+    keyboard = BotApp._remove_prompt_keyboard(DummyBot(), 1).inline_keyboard  # pyright: ignore[reportArgumentType]
 
     assert [[button.text for button in row] for row in keyboard] == [
         ["📚 Browse Plex Library", "🧾 Review Selection (1)"],
@@ -575,7 +575,7 @@ def test_remove_season_action_keyboard_keeps_stacked_layout_when_more_than_five_
         _nav_footer = BotApp._nav_footer
         _compact_action_rows = staticmethod(BotApp._compact_action_rows)
 
-    keyboard = BotApp._remove_season_action_keyboard(DummyBot(), False, 1).inline_keyboard
+    keyboard = BotApp._remove_season_action_keyboard(DummyBot(), False, 1).inline_keyboard  # pyright: ignore[reportArgumentType]
 
     assert [[button.text for button in row] for row in keyboard] == [
         ["🗑 Select Entire Season", "🎞 Browse Episodes"],
@@ -587,7 +587,7 @@ def test_remove_season_action_keyboard_keeps_stacked_layout_when_more_than_five_
 
 
 def test_remove_show_action_screen_displays_series_selected_in_text_not_button(tmp_path) -> None:
-    from patchy_bot.handlers.remove import remove_show_actions_text, remove_show_action_keyboard
+    from patchy_bot.handlers.remove import remove_show_action_keyboard, remove_show_actions_text
 
     show_dir = tmp_path / "Silicon Valley"
     show_dir.mkdir()
@@ -768,16 +768,16 @@ def test_remove_child_builders_use_clean_season_and_episode_names(tmp_path) -> N
         "root_path": str(tmp_path),
     }
 
-    season_items = BotApp._remove_show_children(DummyBot(), show_candidate)
+    season_items = BotApp._remove_show_children(DummyBot(), show_candidate)  # pyright: ignore[reportArgumentType]
     assert [item["name"] for item in season_items] == ["Season 2", "Season 4"]
     assert season_items[0]["season_number"] == 2
     assert season_items[1]["is_virtual"] is True
     assert all(item["name"] != "Subs" for item in season_items)
 
-    episode_items = BotApp._remove_season_children(DummyBot(), season_items[0])
+    episode_items = BotApp._remove_season_children(DummyBot(), season_items[0])  # pyright: ignore[reportArgumentType]
     assert len(episode_items) == 1
     assert episode_items[0]["name"] == "S2 Episode 3"
-    assert BotApp._remove_season_children(DummyBot(), season_items[1])[0]["name"] == "S4 Episode 1"
+    assert BotApp._remove_season_children(DummyBot(), season_items[1])[0]["name"] == "S4 Episode 1"  # pyright: ignore[reportArgumentType]
     assert all("txt" not in item["name"].lower() for item in episode_items)
 
 
@@ -1013,7 +1013,7 @@ def test_plex_refresh_for_path_uses_post_with_path_parameter(tmp_path) -> None:
 
     class FakeSession:
         def __init__(self) -> None:
-            self.calls: list[tuple[str, str, dict[str, object] | None, dict[str, str] | None]] = []
+            self.calls: list[tuple[str, str, dict[str, object], dict[str, str]]] = []
 
         def request(
             self,
@@ -1052,7 +1052,7 @@ def test_plex_refresh_for_path_uses_post_with_path_parameter(tmp_path) -> None:
     assert method == "POST"
     assert url == "http://plex.local:32400/library/sections/2/refresh"
     assert params == {"path": str(movie_dir)}
-    assert headers.get("X-Plex-Token") == "token-123"
+    assert headers.get("X-Plex-Token") == "token-123"  # pyright: ignore[reportOptionalMemberAccess]
 
 
 def test_plex_purge_deleted_path_refreshes_parent_then_empties_trash(tmp_path, monkeypatch) -> None:
@@ -1063,7 +1063,7 @@ def test_plex_purge_deleted_path_refreshes_parent_then_empties_trash(tmp_path, m
 
     class FakeSession:
         def __init__(self) -> None:
-            self.calls: list[tuple[str, str, dict[str, object] | None, dict[str, str] | None]] = []
+            self.calls: list[tuple[str, str, dict[str, object], dict[str, str]]] = []
 
         def request(
             self,
@@ -1141,12 +1141,12 @@ def test_plex_purge_deleted_path_refreshes_parent_then_empties_trash(tmp_path, m
     assert method == "POST"
     assert url == "http://plex.local:32400/library/sections/5/refresh"
     assert params == {"path": str(season_dir)}
-    assert headers.get("X-Plex-Token") == "token-123"
+    assert headers.get("X-Plex-Token") == "token-123"  # pyright: ignore[reportOptionalMemberAccess]
     # Verify emptyTrash call
     method, url, params, headers = fake_session.calls[1]
     assert method == "PUT"
     assert url == "http://plex.local:32400/library/sections/5/emptyTrash"
-    assert headers.get("X-Plex-Token") == "token-123"
+    assert headers.get("X-Plex-Token") == "token-123"  # pyright: ignore[reportOptionalMemberAccess]
 
 
 def test_plex_verify_remove_identity_absent_for_show_requires_show_metadata_to_disappear() -> None:
@@ -1187,7 +1187,7 @@ def test_remove_show_children_sorts_seasons_by_parsed_number(tmp_path) -> None:
         "root_path": str(tmp_path),
     }
 
-    season_items = BotApp._remove_show_children(DummyBot(), show_candidate)
+    season_items = BotApp._remove_show_children(DummyBot(), show_candidate)  # pyright: ignore[reportArgumentType]
 
     assert [item["name"] for item in season_items] == ["Season 1", "Season 2", "Season 3", "Season 4"]
 
@@ -1298,7 +1298,7 @@ def test_delete_remove_candidates_surfaces_pending_plex_cleanup(monkeypatch) -> 
     ctx = SimpleNamespace()
 
     text = _rm.delete_remove_candidates(
-        ctx,
+        ctx,  # pyright: ignore[reportArgumentType]
         [
             {
                 "name": "Example Show",
@@ -1337,7 +1337,7 @@ def test_remove_season_children_sorts_episode_numbers_numerically(tmp_path) -> N
         "season_number": 1,
     }
 
-    episode_items = BotApp._remove_season_children(DummyBot(), season_candidate)
+    episode_items = BotApp._remove_season_children(DummyBot(), season_candidate)  # pyright: ignore[reportArgumentType]
 
     assert [item["name"] for item in episode_items] == ["S1 Episode 1", "S1 Episode 2", "S1 Episode 10"]
 
@@ -1364,9 +1364,9 @@ def test_remove_library_and_search_candidates_skip_non_media_files(tmp_path) -> 
         _ctx = SimpleNamespace(cfg=cfg)
 
     bot = DummyBot()
-    movie_items = BotApp._remove_library_items(bot, "movies")
-    tv_items = BotApp._remove_library_items(bot, "tv")
-    search_items = BotApp._find_remove_candidates(bot, "Show Name")
+    movie_items = BotApp._remove_library_items(bot, "movies")  # pyright: ignore[reportArgumentType]
+    tv_items = BotApp._remove_library_items(bot, "tv")  # pyright: ignore[reportArgumentType]
+    search_items = BotApp._find_remove_candidates(bot, "Show Name")  # pyright: ignore[reportArgumentType]
 
     assert [item["name"] for item in movie_items] == ["Movie.One.2024.mkv"]
     assert [item["name"] for item in tv_items] == ["S1 Episode 2"]
@@ -1399,7 +1399,7 @@ def test_find_remove_candidates_groups_duplicate_tv_show_dirs(tmp_path) -> None:
         _ctx = SimpleNamespace(cfg=cfg)
 
     bot = DummyBot()
-    search_items = BotApp._find_remove_candidates(bot, "Daredevil Born Again")
+    search_items = BotApp._find_remove_candidates(bot, "Daredevil Born Again")  # pyright: ignore[reportArgumentType]
 
     assert len(search_items) == 1
     assert search_items[0]["name"] == "Daredevil Born Again"
@@ -1418,7 +1418,7 @@ def test_remove_show_group_children_formats_direct_episode_files(tmp_path) -> No
         _extract_show_name = staticmethod(BotApp._extract_show_name)
 
     grouped_children = BotApp._remove_show_group_children(
-        DummyBot(),
+        DummyBot(),  # pyright: ignore[reportArgumentType]
         [
             {
                 "name": "Show.Name.S01E02.1080p.mkv",
@@ -1448,7 +1448,7 @@ def test_render_remove_ui_edits_existing_remove_message() -> None:
 
         async def edit_message_text(self, **kwargs: object):
             self.edit_calls.append(kwargs)
-            return DummyMessage(self, int(kwargs["chat_id"]), int(kwargs["message_id"]))
+            return DummyMessage(self, int(kwargs["chat_id"]), int(kwargs["message_id"]))  # pyright: ignore[reportArgumentType]
 
     class DummyMessage:
         def __init__(self, bot: DummyBotApi, chat_id: int, message_id: int) -> None:
@@ -1485,7 +1485,7 @@ def test_render_remove_ui_edits_existing_remove_message() -> None:
         "remove_ui_message_id": 321,
     }
 
-    rendered = asyncio.run(BotApp._render_remove_ui(app, 77, anchor, flow, "Updated remove UI"))
+    rendered = asyncio.run(BotApp._render_remove_ui(app, 77, anchor, flow, "Updated remove UI"))  # pyright: ignore[reportArgumentType]
 
     assert rendered.chat_id == 100
     assert rendered.message_id == 321
@@ -1541,7 +1541,7 @@ def test_render_remove_ui_falls_back_to_new_message_when_edit_fails() -> None:
         "remove_ui_message_id": 321,
     }
 
-    rendered = asyncio.run(BotApp._render_remove_ui(app, 77, anchor, flow, "Updated remove UI"))
+    rendered = asyncio.run(BotApp._render_remove_ui(app, 77, anchor, flow, "Updated remove UI"))  # pyright: ignore[reportArgumentType]
 
     assert rendered.chat_id == 100
     assert rendered.message_id == 555
@@ -1580,7 +1580,7 @@ def test_render_command_center_edits_existing_message() -> None:
             return "keyboard"
 
     msg = DummyMessage()
-    result = asyncio.run(BotApp._render_command_center(DummyBot(), msg))
+    result = asyncio.run(BotApp._render_command_center(DummyBot(), msg))  # pyright: ignore[reportArgumentType]
 
     assert result == "edited"
     assert msg.reply_calls == []
@@ -1634,7 +1634,7 @@ def test_promote_stale_inline_ui_reposts_keyboard_and_disables_old_message() -> 
     bot_api = DummyBotApi()
     anchor = DummyMessage(bot_api, 100, 300)
 
-    promoted = asyncio.run(BotApp._render_nav_ui(app, 77, anchor, "Old command center", reply_markup="keyboard"))
+    promoted = asyncio.run(BotApp._render_nav_ui(app, 77, anchor, "Old command center", reply_markup="keyboard"))  # pyright: ignore[reportArgumentType]
 
     assert promoted.message_id == 901
     assert len(bot_api.edit_calls) == 1
@@ -1651,7 +1651,7 @@ def test_promote_stale_inline_ui_noops_for_latest_message() -> None:
 
         async def edit_message_text(self, **kwargs: object):
             self.edit_calls.append(kwargs)
-            return DummyMessage(self, int(kwargs["chat_id"]), int(kwargs["message_id"]))
+            return DummyMessage(self, int(kwargs["chat_id"]), int(kwargs["message_id"]))  # pyright: ignore[reportArgumentType]
 
     class DummyMessage:
         def __init__(self, bot: DummyBotApi, chat_id: int, message_id: int) -> None:
@@ -1685,7 +1685,7 @@ def test_promote_stale_inline_ui_noops_for_latest_message() -> None:
     current_message = DummyMessage(bot_api, 100, 300)
 
     result = asyncio.run(
-        BotApp._render_nav_ui(app, 77, current_message, "Current command center", reply_markup="keyboard")
+        BotApp._render_nav_ui(app, 77, current_message, "Current command center", reply_markup="keyboard")  # pyright: ignore[reportArgumentType]
     )
 
     assert result.message_id == 500
@@ -1732,7 +1732,7 @@ def test_open_remove_browse_root_skips_search_or_browse_landing_screen() -> None
     bot = DummyBot()
     msg = object()
 
-    asyncio.run(BotApp._open_remove_browse_root(bot, 77, msg))
+    asyncio.run(BotApp._open_remove_browse_root(bot, 77, msg))  # pyright: ignore[reportArgumentType]
 
     assert bot.user_flow[77]["stage"] == "browse_root"
     assert bot.render_calls == [
@@ -1847,7 +1847,7 @@ def test_on_callback_remove_cancel_returns_to_command_center() -> None:
     update = DummyUpdate(query)
     bot = DummyBot()
 
-    asyncio.run(BotApp.on_callback(bot, update, None))
+    asyncio.run(BotApp.on_callback(bot, update, None))  # pyright: ignore[reportArgumentType]
 
     assert bot.cleared == [77]
     assert query.answer_calls == [{"text": None, "show_alert": False}]
@@ -1957,7 +1957,7 @@ def test_on_callback_schedule_cancel_returns_to_command_center() -> None:
     update = DummyUpdate(query)
     bot = DummyBot()
 
-    asyncio.run(BotApp.on_callback(bot, update, None))
+    asyncio.run(BotApp.on_callback(bot, update, None))  # pyright: ignore[reportArgumentType]
 
     assert bot.cleared == [77]
     assert query.answer_calls == [{"text": None, "show_alert": False}]
@@ -2023,7 +2023,7 @@ def test_on_text_schedule_cancel_returns_to_command_center() -> None:
     update = DummyUpdate()
     bot = DummyBot()
 
-    asyncio.run(BotApp.on_text(bot, update, None))
+    asyncio.run(BotApp.on_text(bot, update, None))  # pyright: ignore[reportArgumentType]
 
     assert bot.cleared == [77]
     assert bot.command_center_calls == [update.effective_message]
@@ -2131,7 +2131,7 @@ def test_on_callback_remove_clear_returns_to_library_browser() -> None:
     update = DummyUpdate(query)
     bot = DummyBot()
 
-    asyncio.run(BotApp.on_callback(bot, update, None))
+    asyncio.run(BotApp.on_callback(bot, update, None))  # pyright: ignore[reportArgumentType]
 
     assert bot.flow == {"mode": "remove", "stage": "show_actions", "selected_items": []}
     assert bot.open_calls == [
@@ -2211,7 +2211,7 @@ def test_on_callback_remove_review_is_noop_when_selection_is_empty() -> None:
     update = DummyUpdate(query)
     bot = DummyBot()
 
-    asyncio.run(BotApp.on_callback(bot, update, None))
+    asyncio.run(BotApp.on_callback(bot, update, None))  # pyright: ignore[reportArgumentType]
 
     assert bot.flow == {"mode": "remove", "stage": "show_actions", "selected_items": []}
     assert bot.render_calls == []
@@ -2310,19 +2310,19 @@ def test_on_callback_schedule_pickeps_uses_anchor_renderer() -> None:
             self.render_calls.append({"args": args, "kwargs": kwargs})
 
         def _nav_footer(self, *, back_data: str = "", include_home: bool = True):
-            return BotApp._nav_footer(self, back_data=back_data, include_home=include_home)
+            return BotApp._nav_footer(self, back_data=back_data, include_home=include_home)  # pyright: ignore[reportArgumentType]
 
     message = DummyMessage()
     query = DummyQuery(message)
     update = DummyUpdate(query)
     bot = DummyBot()
 
-    asyncio.run(BotApp.on_callback(bot, update, None))
+    asyncio.run(BotApp.on_callback(bot, update, None))  # pyright: ignore[reportArgumentType]
 
     assert query.answer_calls == [{"text": None, "show_alert": False}]
     assert len(bot.render_calls) == 1
-    assert bot.render_calls[0]["args"][1] == message
-    assert "🎯 Choose Episodes to Download" in str(bot.render_calls[0]["args"][3])
+    assert bot.render_calls[0]["args"][1] == message  # pyright: ignore[reportIndexIssue]
+    assert "🎯 Choose Episodes to Download" in str(bot.render_calls[0]["args"][3])  # pyright: ignore[reportIndexIssue]
 
 
 def test_on_callback_schedule_skip_uses_anchor_renderer() -> None:
@@ -2414,7 +2414,7 @@ def test_on_callback_schedule_skip_uses_anchor_renderer() -> None:
     update = DummyUpdate(query)
     bot = DummyBot()
 
-    asyncio.run(BotApp.on_callback(bot, update, None))
+    asyncio.run(BotApp.on_callback(bot, update, None))  # pyright: ignore[reportArgumentType]
 
     assert query.answer_calls == [{"text": None, "show_alert": False}]
     assert bot.store.updated == {
@@ -2423,7 +2423,7 @@ def test_on_callback_schedule_skip_uses_anchor_renderer() -> None:
         "last_missing_signature": "sig-1",
     }
     assert len(bot.render_calls) == 1
-    assert "I'll skip this notification." in bot.render_calls[0]["args"][2]
+    assert "I'll skip this notification." in bot.render_calls[0]["args"][2]  # pyright: ignore[reportIndexIssue]
 
 
 def test_render_schedule_ui_edits_existing_schedule_message() -> None:
@@ -2433,7 +2433,7 @@ def test_render_schedule_ui_edits_existing_schedule_message() -> None:
 
         async def edit_message_text(self, **kwargs: object):
             self.edit_calls.append(kwargs)
-            return DummyMessage(self, int(kwargs["chat_id"]), int(kwargs["message_id"]))
+            return DummyMessage(self, int(kwargs["chat_id"]), int(kwargs["message_id"]))  # pyright: ignore[reportArgumentType]
 
     class DummyMessage:
         def __init__(self, bot: DummyBotApi, chat_id: int, message_id: int) -> None:
@@ -2464,7 +2464,7 @@ def test_render_schedule_ui_edits_existing_schedule_message() -> None:
     anchor = DummyMessage(bot_api, 100, 200)
     flow = {"mode": "schedule", "stage": "confirm", "schedule_ui_chat_id": 100, "schedule_ui_message_id": 321}
 
-    rendered = asyncio.run(BotApp._render_schedule_ui(app, 77, anchor, flow, "Updated schedule UI"))
+    rendered = asyncio.run(BotApp._render_schedule_ui(app, 77, anchor, flow, "Updated schedule UI"))  # pyright: ignore[reportArgumentType]
 
     assert rendered.chat_id == 100
     assert rendered.message_id == 321
@@ -2480,7 +2480,7 @@ def test_render_nav_ui_edits_existing_navigation_message() -> None:
 
         async def edit_message_text(self, **kwargs: object):
             self.edit_calls.append(kwargs)
-            return DummyMessage(self, int(kwargs["chat_id"]), int(kwargs["message_id"]))
+            return DummyMessage(self, int(kwargs["chat_id"]), int(kwargs["message_id"]))  # pyright: ignore[reportArgumentType]
 
     class DummyMessage:
         def __init__(self, bot: DummyBotApi, chat_id: int, message_id: int) -> None:
@@ -2506,7 +2506,7 @@ def test_render_nav_ui_edits_existing_navigation_message() -> None:
     bot_api = DummyBotApi()
     anchor = DummyMessage(bot_api, 100, 200)
 
-    rendered = asyncio.run(BotApp._render_nav_ui(app, 77, anchor, "Updated nav UI"))
+    rendered = asyncio.run(BotApp._render_nav_ui(app, 77, anchor, "Updated nav UI"))  # pyright: ignore[reportArgumentType]
 
     assert rendered.chat_id == 100
     assert rendered.message_id == 321
@@ -2552,7 +2552,7 @@ def test_render_nav_ui_falls_back_to_new_message_when_edit_fails() -> None:
     bot_api = DummyBotApi()
     anchor = DummyMessage(bot_api, 100, 200)
 
-    rendered = asyncio.run(BotApp._render_nav_ui(app, 77, anchor, "Updated nav UI"))
+    rendered = asyncio.run(BotApp._render_nav_ui(app, 77, anchor, "Updated nav UI"))  # pyright: ignore[reportArgumentType]
 
     assert rendered.chat_id == 100
     assert rendered.message_id == 555
@@ -2602,7 +2602,7 @@ def test_render_schedule_ui_falls_back_to_new_message_when_edit_fails() -> None:
     anchor = DummyMessage(bot_api, 100, 200)
     flow = {"mode": "schedule", "stage": "confirm", "schedule_ui_chat_id": 100, "schedule_ui_message_id": 321}
 
-    rendered = asyncio.run(BotApp._render_schedule_ui(app, 77, anchor, flow, "Updated schedule UI"))
+    rendered = asyncio.run(BotApp._render_schedule_ui(app, 77, anchor, flow, "Updated schedule UI"))  # pyright: ignore[reportArgumentType]
 
     assert rendered.chat_id == 100
     assert rendered.message_id == 555
@@ -2618,7 +2618,7 @@ def test_render_tv_ui_edits_existing_tv_message() -> None:
 
         async def edit_message_text(self, **kwargs: object):
             self.edit_calls.append(kwargs)
-            return DummyMessage(self, int(kwargs["chat_id"]), int(kwargs["message_id"]))
+            return DummyMessage(self, int(kwargs["chat_id"]), int(kwargs["message_id"]))  # pyright: ignore[reportArgumentType]
 
     class DummyMessage:
         def __init__(self, bot: DummyBotApi, chat_id: int, message_id: int) -> None:
@@ -2649,7 +2649,7 @@ def test_render_tv_ui_edits_existing_tv_message() -> None:
     anchor = DummyMessage(bot_api, 100, 200)
     flow = {"mode": "tv", "stage": "await_title", "tv_ui_chat_id": 100, "tv_ui_message_id": 321}
 
-    rendered = asyncio.run(BotApp._render_tv_ui(app, 77, anchor, flow, "Updated tv UI"))
+    rendered = asyncio.run(BotApp._render_tv_ui(app, 77, anchor, flow, "Updated tv UI"))  # pyright: ignore[reportArgumentType]
 
     assert rendered.chat_id == 100
     assert rendered.message_id == 321
@@ -2699,7 +2699,7 @@ def test_render_tv_ui_falls_back_to_new_message_when_edit_fails() -> None:
     anchor = DummyMessage(bot_api, 100, 200)
     flow = {"mode": "tv", "stage": "await_title", "tv_ui_chat_id": 100, "tv_ui_message_id": 321}
 
-    rendered = asyncio.run(BotApp._render_tv_ui(app, 77, anchor, flow, "Updated tv UI"))
+    rendered = asyncio.run(BotApp._render_tv_ui(app, 77, anchor, flow, "Updated tv UI"))  # pyright: ignore[reportArgumentType]
 
     assert rendered.chat_id == 100
     assert rendered.message_id == 555
@@ -2724,8 +2724,8 @@ def test_cleanup_private_user_message_only_deletes_private_chats() -> None:
     private_msg = DummyMessage("private")
     group_msg = DummyMessage("group")
 
-    asyncio.run(BotApp._cleanup_private_user_message(object(), private_msg))
-    asyncio.run(BotApp._cleanup_private_user_message(object(), group_msg))
+    asyncio.run(BotApp._cleanup_private_user_message(object(), private_msg))  # pyright: ignore[reportArgumentType]
+    asyncio.run(BotApp._cleanup_private_user_message(object(), group_msg))  # pyright: ignore[reportArgumentType]
 
     assert private_msg.deleted == 1
     assert group_msg.deleted == 0
@@ -3495,7 +3495,7 @@ def test_store_creates_db_with_owner_only_permissions(tmp_path):
     import stat
 
     db_path = str(tmp_path / "test_state.sqlite3")
-    s = Store(db_path)
+    Store(db_path)  # creates DB file as side effect
     mode = stat.S_IMODE(os.stat(db_path).st_mode)
     assert mode == 0o600, f"Expected 0600, got {oct(mode)}"
 
@@ -3504,7 +3504,7 @@ def test_store_uses_wal_journal_mode(tmp_path):
     import sqlite3
 
     db_path = str(tmp_path / "test_wal.sqlite3")
-    s = Store(db_path)
+    Store(db_path)  # creates DB file as side effect
     conn = sqlite3.connect(db_path)
     mode = conn.execute("PRAGMA journal_mode;").fetchone()[0]
     conn.close()
@@ -4003,7 +4003,7 @@ def test_render_movie_ui_edits_existing_movie_message() -> None:
 
         async def edit_message_text(self, **kwargs: object):
             self.edit_calls.append(kwargs)
-            return DummyMessage(self, int(kwargs["chat_id"]), int(kwargs["message_id"]))
+            return DummyMessage(self, int(kwargs["chat_id"]), int(kwargs["message_id"]))  # pyright: ignore[reportArgumentType]
 
     class DummyMessage:
         def __init__(self, bot: DummyBotApi, chat_id: int, message_id: int) -> None:
@@ -4033,7 +4033,7 @@ def test_render_movie_ui_edits_existing_movie_message() -> None:
     anchor = DummyMessage(bot_api, 100, 200)
     flow = {"mode": "movie", "stage": "await_title", "movie_ui_chat_id": 100, "movie_ui_message_id": 321}
 
-    rendered = asyncio.run(BotApp._render_flow_ui(app, 77, anchor, flow, "Updated movie UI", flow_key="movie"))
+    rendered = asyncio.run(BotApp._render_flow_ui(app, 77, anchor, flow, "Updated movie UI", flow_key="movie"))  # pyright: ignore[reportArgumentType]
 
     assert rendered.chat_id == 100
     assert rendered.message_id == 321
@@ -4082,7 +4082,7 @@ def test_render_movie_ui_falls_back_to_new_message_when_edit_fails() -> None:
     anchor = DummyMessage(bot_api, 100, 200)
     flow = {"mode": "movie", "stage": "await_title", "movie_ui_chat_id": 100, "movie_ui_message_id": 321}
 
-    rendered = asyncio.run(BotApp._render_flow_ui(app, 77, anchor, flow, "Updated movie UI", flow_key="movie"))
+    rendered = asyncio.run(BotApp._render_flow_ui(app, 77, anchor, flow, "Updated movie UI", flow_key="movie"))  # pyright: ignore[reportArgumentType]
 
     assert rendered.chat_id == 100
     assert rendered.message_id == 555
@@ -4127,7 +4127,7 @@ def test_movie_cancel_renders_movie_specific_screen() -> None:
     async def _run():
         flow = app._get_flow(42)
         await app._cleanup_private_user_message(msg)
-        flow_snapshot = dict(flow)
+        flow_snapshot = dict(flow)  # pyright: ignore[reportArgumentType, reportCallIssue]
         app._clear_flow(42)
         from telegram import InlineKeyboardMarkup
 
@@ -4145,7 +4145,7 @@ def test_movie_cancel_renders_movie_specific_screen() -> None:
     assert msg.deleted == 1
     assert app._get_flow(42) is None
     assert len(cancel_calls) == 1
-    assert "Movie Search Cancelled" in cancel_calls[0]["text"]
+    assert "Movie Search Cancelled" in cancel_calls[0]["text"]  # pyright: ignore[reportOperatorIssue]
 
 
 def test_movie_title_submission_calls_cleanup_private() -> None:
@@ -4210,7 +4210,7 @@ def test_movie_noresult_footer_uses_menu_movie_back_data() -> None:
 
     markup = InlineKeyboardMarkup(kb_rows)
     all_buttons = [btn for row in markup.inline_keyboard for btn in row]
-    back_buttons = [b for b in all_buttons if b.callback_data and "menu:movie" in b.callback_data]
+    back_buttons = [b for b in all_buttons if b.callback_data and "menu:movie" in b.callback_data]  # pyright: ignore[reportOperatorIssue]
     assert len(back_buttons) >= 1
 
 
@@ -4237,7 +4237,7 @@ def test_schedule_apply_tracking_mode_multi_episode_premiere(monkeypatch) -> Non
         "pending_codes": [],
         "episode_air": {"S01E01": past, "S01E02": past, "S01E03": past},
     }
-    result = schedule_apply_tracking_mode(ctx, track, probe)
+    result = schedule_apply_tracking_mode(ctx, track, probe)  # pyright: ignore[reportArgumentType]
     assert result["actionable_missing_codes"] == ["S01E01", "S01E02", "S01E03"]
     assert result["tracking_code"] == "S01E01"
     assert result["tracked_missing_codes"] == ["S01E01", "S01E02", "S01E03"]
@@ -4262,7 +4262,7 @@ def test_schedule_apply_tracking_mode_stops_at_unreleased(monkeypatch) -> None:
         "pending_codes": [],
         "episode_air": {"S01E01": past, "S01E02": past, "S01E03": future, "S01E04": future},
     }
-    result = schedule_apply_tracking_mode(ctx, track, probe)
+    result = schedule_apply_tracking_mode(ctx, track, probe)  # pyright: ignore[reportArgumentType]
     assert result["actionable_missing_codes"] == ["S01E01", "S01E02"]
     assert result["tracking_code"] == "S01E01"
 
@@ -4285,7 +4285,7 @@ def test_schedule_apply_tracking_mode_skips_pending_in_batch(monkeypatch) -> Non
         "pending_codes": ["S01E02"],
         "episode_air": {"S01E01": past, "S01E02": past, "S01E03": past},
     }
-    result = schedule_apply_tracking_mode(ctx, track, probe)
+    result = schedule_apply_tracking_mode(ctx, track, probe)  # pyright: ignore[reportArgumentType]
     assert result["actionable_missing_codes"] == ["S01E01", "S01E03"]
     assert "S01E02" not in result["actionable_missing_codes"]
 
@@ -4309,7 +4309,7 @@ def test_schedule_apply_tracking_mode_single_episode_still_works(monkeypatch) ->
         "pending_codes": [],
         "episode_air": {"S01E01": past, "S01E02": future},
     }
-    result = schedule_apply_tracking_mode(ctx, track, probe)
+    result = schedule_apply_tracking_mode(ctx, track, probe)  # pyright: ignore[reportArgumentType]
     assert result["actionable_missing_codes"] == ["S01E01"]
 
 
@@ -4322,7 +4322,7 @@ def test_schedule_next_check_known_future_air_date(monkeypatch) -> None:
 
     ctx = SimpleNamespace()
     air = NOW + 3600
-    result = schedule_next_check_at(ctx, air, has_actionable_missing=False, has_unknown_missing=False, auto_state={})
+    result = schedule_next_check_at(ctx, air, has_actionable_missing=False, has_unknown_missing=False, auto_state={})  # pyright: ignore[reportArgumentType]
     assert result == air + 5400
 
 
@@ -4334,7 +4334,7 @@ def test_schedule_next_check_released_episode(monkeypatch) -> None:
     monkeypatch.setattr("patchy_bot.handlers.schedule.schedule_release_grace_s", lambda: 5400)
 
     ctx = SimpleNamespace()
-    result = schedule_next_check_at(ctx, None, has_actionable_missing=True, has_unknown_missing=False, auto_state={})
+    result = schedule_next_check_at(ctx, None, has_actionable_missing=True, has_unknown_missing=False, auto_state={})  # pyright: ignore[reportArgumentType]
     assert result == NOW + 300
 
 
@@ -4346,7 +4346,7 @@ def test_schedule_next_check_unknown_air_date_slow_poll(monkeypatch) -> None:
     monkeypatch.setattr("patchy_bot.handlers.schedule.schedule_release_grace_s", lambda: 5400)
 
     ctx = SimpleNamespace()
-    result = schedule_next_check_at(ctx, None, has_actionable_missing=False, has_unknown_missing=True, auto_state={})
+    result = schedule_next_check_at(ctx, None, has_actionable_missing=False, has_unknown_missing=True, auto_state={})  # pyright: ignore[reportArgumentType]
     assert result == NOW + 12 * 3600
 
 
@@ -4358,7 +4358,7 @@ def test_schedule_next_check_no_schedule_info(monkeypatch) -> None:
     monkeypatch.setattr("patchy_bot.handlers.schedule.schedule_release_grace_s", lambda: 5400)
 
     ctx = SimpleNamespace()
-    result = schedule_next_check_at(ctx, None, has_actionable_missing=False, has_unknown_missing=False, auto_state={})
+    result = schedule_next_check_at(ctx, None, has_actionable_missing=False, has_unknown_missing=False, auto_state={})  # pyright: ignore[reportArgumentType]
     assert result == NOW + 24 * 3600
 
 
@@ -4373,7 +4373,7 @@ def test_schedule_next_check_backoff_wins_over_air_date(monkeypatch) -> None:
     air = NOW + 3600
     backoff = air + 5400 + 10_000
     result = schedule_next_check_at(
-        ctx,
+        ctx,  # pyright: ignore[reportArgumentType]
         air,
         has_actionable_missing=False,
         has_unknown_missing=False,
@@ -4392,7 +4392,11 @@ def test_schedule_next_check_air_date_past_grace(monkeypatch) -> None:
     ctx = SimpleNamespace()
     past_air = NOW - 10_000
     result = schedule_next_check_at(
-        ctx, past_air, has_actionable_missing=False, has_unknown_missing=False, auto_state={}
+        ctx,  # pyright: ignore[reportArgumentType]
+        past_air,
+        has_actionable_missing=False,
+        has_unknown_missing=False,
+        auto_state={},
     )
     assert result == NOW + 300
 
@@ -4413,7 +4417,7 @@ def test_apply_tracking_mode_unknown_air_date_not_actionable(monkeypatch) -> Non
         "pending_codes": [],
         "episode_air": {"S01E01": None},
     }
-    result = schedule_apply_tracking_mode(ctx, track, probe)
+    result = schedule_apply_tracking_mode(ctx, track, probe)  # pyright: ignore[reportArgumentType]
     assert result["tracked_missing_codes"] == ["S01E01"]
     assert result["actionable_missing_codes"] == []
 
@@ -4440,7 +4444,7 @@ def test_apply_tracking_mode_mixed_known_unknown(monkeypatch) -> None:
         "pending_codes": [],
         "episode_air": {"S01E01": NOW - 7200, "S01E02": None},
     }
-    result = schedule_apply_tracking_mode(ctx, track, probe)
+    result = schedule_apply_tracking_mode(ctx, track, probe)  # pyright: ignore[reportArgumentType]
     assert "S01E01" in result["actionable_missing_codes"]
     assert "S01E02" not in result["actionable_missing_codes"]
     assert "S01E02" in result["tracked_missing_codes"]

@@ -512,21 +512,6 @@ def test_season_pack_max_episodes_override() -> None:
     # With the default (24 eps), a large season pack is within range.
     # With max_episodes=12, the allowed max is halved, so the same size
     # may trigger a size penalty.
-    large_pack_size = _gb(90)  # 90 GB -- within 24*20GB=480GB but let's check relative
-    ts_default = score_torrent(
-        "Show.S01.1080p.WEB-DL.x264-GROUP",
-        large_pack_size,
-        50,
-        media_type="movie",
-        scoring_overrides={"season_pack_max_episodes": 24},
-    )
-    ts_tight = score_torrent(
-        "Show.S01.1080p.WEB-DL.x264-GROUP",
-        large_pack_size,
-        50,
-        media_type="movie",
-        scoring_overrides={"season_pack_max_episodes": 6},
-    )
     # The tighter override should penalise more (or equal if both within range).
     # With 6 eps, max = 20GB * 6 = 120GB, and 90GB is within. Use a bigger size.
     huge_pack = _gb(180)  # 180 GB -- within 24*20=480 but exceeds 6*20=120

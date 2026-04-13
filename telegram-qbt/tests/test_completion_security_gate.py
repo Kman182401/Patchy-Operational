@@ -10,18 +10,16 @@ from __future__ import annotations
 
 import shutil as _shutil_mod
 import subprocess
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 import patchy_bot.handlers.download as _dl_mod
 from patchy_bot.handlers.download import (
-    CompletionSecurityResult,
     _apply_completion_security_gate,
     _clamd_available,
     _run_clamav_scan,
 )
-
 
 # ---------------------------------------------------------------------------
 # _run_clamav_scan — subprocess branches
@@ -338,7 +336,7 @@ class TestCompletionSecurityGate:
         assert gate_ctx.store.log_health_event.called
         call = gate_ctx.store.log_health_event.call_args
         pos = call.args
-        assert pos[2] == "malware_delete"
+        assert pos[2] == "malware_deleted"
         assert pos[3] == "critical"
 
     @pytest.mark.asyncio
@@ -433,3 +431,48 @@ class TestRealClamav:
         test_file.write_text(eicar)
         status, _ = _run_clamav_scan(str(test_file), timeout_s=30)
         assert status in ("infected", "unavailable")
+
+
+# ---------------------------------------------------------------------------
+# Session 4 Task 11: cfg.log_clean_scans flag
+# ---------------------------------------------------------------------------
+
+
+class TestLogCleanScansFlag:
+    """The log_clean_scans config flag gates health-event logging on clean scans."""
+
+    @pytest.mark.asyncio
+    async def test_clean_scan_logged_when_flag_on(self, gate_ctx, tmp_path) -> None:
+        """When cfg.log_clean_scans=True, a malware_scan_clean health event is logged."""
+        gate_ctx.cfg.log_clean_scans = True
+        media_path = str(tmp_path / "Movies" / "ok")
+        with patch.object(_dl_mod, "_run_clamav_scan", return_value=("clean", [])):
+            result = await _apply_completion_security_gate(
+                gate_ctx,
+                user_id=7,
+                torrent_hash="h" * 40,
+                name="CleanMovie.mkv",
+                media_path=media_path,
+            )
+        assert result.allowed is True
+        assert gate_ctx.store.log_health_event.called
+        call = gate_ctx.store.log_health_event.call_args
+        pos = call.args
+        assert pos[2] == "malware_scan_clean"
+        assert pos[3] == "info"
+
+    @pytest.mark.asyncio
+    async def test_clean_scan_not_logged_when_flag_off(self, gate_ctx, tmp_path) -> None:
+        """When cfg.log_clean_scans=False, no health event is logged on clean scans."""
+        gate_ctx.cfg.log_clean_scans = False
+        media_path = str(tmp_path / "Movies" / "ok")
+        with patch.object(_dl_mod, "_run_clamav_scan", return_value=("clean", [])):
+            result = await _apply_completion_security_gate(
+                gate_ctx,
+                user_id=7,
+                torrent_hash="h" * 40,
+                name="CleanMovie.mkv",
+                media_path=media_path,
+            )
+        assert result.allowed is True
+        assert not gate_ctx.store.log_health_event.called

@@ -6,7 +6,6 @@ CallbackDispatcher routing logic.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -304,9 +303,8 @@ async def test_cb_menu_profile_renders(fake_app: FakeBotApp, query: MagicMock, m
             "default_limit": 10,
         }
     )
-    # asyncio.to_thread calls sync functions; mock it to just call them
-    original_to_thread = asyncio.to_thread
 
+    # asyncio.to_thread calls sync functions; mock it to just call them
     async def passthrough_to_thread(fn, *args, **kwargs):
         return fn(*args, **kwargs)
 

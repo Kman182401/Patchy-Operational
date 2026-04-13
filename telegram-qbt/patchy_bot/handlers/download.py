@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import errno as _errno
+import inspect
 import json
 import logging
 import re
@@ -16,13 +17,14 @@ import shutil
 import subprocess
 import time
 import urllib.parse
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
-from ..malware import scan_download
+from ..malware import ScanResult, scan_download
 from ..plex_organizer import organize_download as _organize_download
 from ..types import HandlerContext
 from ..ui import flow as flow_mod
@@ -39,9 +41,81 @@ from ._shared import (
 
 LOG = logging.getLogger("qbtg")
 
+
+_SIGNAL_DETAIL_MAX = 256
+_SIGNALS_MAX_COUNT = 20
+
+
+def _serialize_signals(scan: ScanResult) -> list[dict[str, Any]]:
+    """Serialize a ScanResult's signals for persistence in malware_scan_log.
+
+    Caps total signal count and truncates per-signal ``detail`` strings so that
+    a torrent-influenced scan cannot balloon the JSON stored in
+    ``malware_scan_log.signals_json`` or ``download_health_events.detail_json``.
+    """
+    signals = scan.signals[:_SIGNALS_MAX_COUNT]
+    out: list[dict[str, Any]] = []
+    for s in signals:
+        detail = s.detail
+        if len(detail) > _SIGNAL_DETAIL_MAX:
+            detail = detail[:_SIGNAL_DETAIL_MAX] + "\u2026"
+        out.append({"signal_id": s.signal_id, "points": s.points, "detail": detail})
+    return out
+
+
 # In-memory dedup for completion poller — resets on service restart.
 # The persistent DB layer (is_completion_notified) is the safety net.
-_poller_seen_hashes: set[str] = set()
+_POLLER_SEEN_MAX = 2000
+
+
+class _BoundedHashSet:
+    """LRU-bounded set of torrent hashes. Single-writer async — no lock needed."""
+
+    __slots__ = ("_data", "_max")
+
+    def __init__(self, maxsize: int = _POLLER_SEEN_MAX) -> None:
+        self._data: OrderedDict[str, None] = OrderedDict()
+        self._max = maxsize
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._data
+
+    def add(self, key: str) -> None:
+        if key in self._data:
+            self._data.move_to_end(key)
+            return
+        self._data[key] = None
+        while len(self._data) > self._max:
+            self._data.popitem(last=False)
+
+    def discard(self, key: str) -> None:
+        self._data.pop(key, None)
+
+    def clear(self) -> None:
+        self._data.clear()
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+
+_poller_seen_hashes: _BoundedHashSet = _BoundedHashSet()
+
+
+# ClamAV circuit breaker — trip open after N consecutive scan errors so a
+# hung/broken scanner does not block every completion. The breaker has a
+# time-based cooldown: once elapsed, the next call probes ClamAV again so a
+# transient outage does not wedge scanning until the next bot restart.
+_CLAMAV_ERROR_THRESHOLD = 3
+_CLAMAV_BREAKER_COOLDOWN_S = 600  # 10 minutes
+_clamav_consecutive_errors: int = 0
+_clamav_breaker_tripped_at: float = 0.0
+_clamav_breaker_lock: asyncio.Lock = asyncio.Lock()
+
+# Periodic (24h) cleanup of retention-bounded log tables, driven from the
+# completion poller tick.  Zero means "run on the first tick after startup".
+_DAILY_CLEANUP_INTERVAL = 86400
+_last_daily_cleanup_ts: int = 0
+_daily_cleanup_lock: asyncio.Lock = asyncio.Lock()
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,7 +254,7 @@ async def _concurrent_file_scan(
     ctx: HandlerContext,
     user_id: int,
     torrent_hash: str,
-    result: "DoAddResult",
+    result: DoAddResult,
     interim_msg: Any,
 ) -> None:
     """Run file-list inspection + heuristic scan concurrently with active download.
@@ -229,9 +303,30 @@ async def _concurrent_file_scan(
             torrent_name=result.name,
             stage="download",
             reasons=malware_scan.reasons,
+            risk_score=malware_scan.score,
+            tier=malware_scan.tier,
+            signals=_serialize_signals(malware_scan),
         )
     except Exception:
         pass
+    try:
+        ctx.store.log_health_event(
+            user_id,
+            torrent_hash,
+            "malware_heuristic_block",
+            "critical",
+            json.dumps(
+                {
+                    "risk_score": malware_scan.score,
+                    "tier": malware_scan.tier,
+                    "signals": [{"id": s.signal_id, "pts": s.points} for s in malware_scan.signals[:10]],
+                    "action": "blocked",
+                }
+            ),
+            result.name,
+        )
+    except Exception:
+        LOG.debug("Failed to log heuristic block health event", exc_info=True)
     top_signals = sorted(malware_scan.signals, key=lambda s: s.points, reverse=True)[:5]
     signal_lines = "\n".join(f"• <code>{_h(s.signal_id)}</code> (+{s.points}) {_h(s.detail)}" for s in top_signals)
     warn_text = (
@@ -366,20 +461,95 @@ async def _apply_completion_security_gate(
     name: str,
     media_path: str,
 ) -> CompletionSecurityResult:
+    global _clamav_consecutive_errors, _clamav_breaker_tripped_at
+
     if not media_path:
         return CompletionSecurityResult(False, media_path, "Security hold: download path unavailable for scanning.")
 
+    # Circuit breaker: if ClamAV has errored N times in a row, stop calling it
+    # and let heuristic-only downloads through until the cooldown elapses. Once
+    # the cooldown has passed, the next call probes ClamAV again — if that
+    # probe succeeds the success-path below resets the counter; if it errors
+    # again the error-path will re-trip the breaker. Mutation of the shared
+    # counter is serialized by ``_clamav_breaker_lock`` so concurrent callers
+    # (completion poller and _concurrent_file_scan) cannot interleave
+    # read-modify-writes. The lock is NOT held across the ClamAV scan itself.
+    async with _clamav_breaker_lock:
+        if _clamav_consecutive_errors >= _CLAMAV_ERROR_THRESHOLD:
+            elapsed = time.monotonic() - _clamav_breaker_tripped_at
+            if elapsed < _CLAMAV_BREAKER_COOLDOWN_S:
+                LOG.warning(
+                    "ClamAV circuit breaker open (%d consecutive errors, %.0fs remaining) — allowing %s",
+                    _clamav_consecutive_errors,
+                    _CLAMAV_BREAKER_COOLDOWN_S - elapsed,
+                    name,
+                )
+                return CompletionSecurityResult(True, media_path)
+            # Cooldown elapsed — fall through and probe ClamAV once.
+            LOG.info(
+                "ClamAV breaker cooldown elapsed after %.0fs — probing scanner",
+                elapsed,
+            )
+
     status, reasons = await asyncio.to_thread(_run_clamav_scan, media_path, ctx.cfg.malware_scan_timeout_s)
     if status == "clean":
+        async with _clamav_breaker_lock:
+            _clamav_consecutive_errors = 0
+            _clamav_breaker_tripped_at = 0.0
+        if ctx.cfg.log_clean_scans:
+            try:
+                await asyncio.to_thread(
+                    ctx.store.log_health_event,
+                    user_id,
+                    torrent_hash,
+                    "malware_scan_clean",
+                    "info",
+                    json.dumps({"status": "clean"}),
+                    name,
+                )
+            except Exception:
+                LOG.debug("Failed to log clean scan", exc_info=True)
         return CompletionSecurityResult(True, media_path)
 
     # --- ClamAV unavailable (no database) → allow through, log warning ---
     if status == "unavailable":
+        async with _clamav_breaker_lock:
+            _clamav_consecutive_errors = 0
+            _clamav_breaker_tripped_at = 0.0
         LOG.warning("ClamAV unavailable for %s — allowing download (heuristic scan already passed)", name)
         return CompletionSecurityResult(True, media_path)
 
     # --- ClamAV error (timeout / crash) → pause + warn, allow retry next poll ---
     if status == "error":
+        async with _clamav_breaker_lock:
+            _clamav_consecutive_errors += 1
+            # First crossing of the threshold logs a critical health event;
+            # subsequent errors (e.g. a post-cooldown probe that still errors)
+            # refresh the trip timestamp so the cooldown window restarts.
+            tripped_now = _clamav_consecutive_errors == _CLAMAV_ERROR_THRESHOLD
+            if _clamav_consecutive_errors >= _CLAMAV_ERROR_THRESHOLD:
+                _clamav_breaker_tripped_at = time.monotonic()
+            consecutive_errors_snapshot = _clamav_consecutive_errors
+        if tripped_now:
+            LOG.error(
+                "ClamAV circuit breaker tripped after %d consecutive errors "
+                "(cooldown %ds) — subsequent completions will bypass ClamAV "
+                "until the cooldown elapses and a probe succeeds",
+                consecutive_errors_snapshot,
+                _CLAMAV_BREAKER_COOLDOWN_S,
+            )
+            try:
+                await asyncio.to_thread(
+                    ctx.store.log_health_event,
+                    user_id,
+                    torrent_hash,
+                    "clamav_breaker_tripped",
+                    "critical",
+                    json.dumps({"consecutive_errors": consecutive_errors_snapshot}),
+                    name,
+                )
+            except Exception:
+                LOG.debug("Failed to log breaker-tripped event", exc_info=True)
         try:
             await asyncio.to_thread(ctx.qbt.pause_torrents, torrent_hash)
         except Exception:
@@ -391,7 +561,13 @@ async def _apply_completion_security_gate(
                 torrent_hash,
                 "malware_scan_error",
                 "warn",
-                json.dumps({"reasons": reasons}),
+                json.dumps(
+                    {
+                        "reasons": reasons,
+                        "clamav_status": status,
+                        "consecutive_errors": consecutive_errors_snapshot,
+                    }
+                ),
                 name,
             )
         except Exception:
@@ -407,6 +583,9 @@ async def _apply_completion_security_gate(
         return CompletionSecurityResult(False, media_path, notice)
 
     # --- ClamAV infected → delete files, block ---
+    async with _clamav_breaker_lock:
+        _clamav_consecutive_errors = 0
+        _clamav_breaker_tripped_at = 0.0
     allowed_roots = [
         ctx.cfg.tv_path,
         ctx.cfg.movies_path,
@@ -432,7 +611,13 @@ async def _apply_completion_security_gate(
         )
 
     try:
-        await asyncio.to_thread(ctx.store.log_malware_block, torrent_hash, name, "download", reasons)
+        await asyncio.to_thread(
+            ctx.store.log_malware_block,
+            torrent_hash,
+            name,
+            "download",
+            reasons,
+        )
     except Exception:
         LOG.debug("Failed to log malware block", exc_info=True)
 
@@ -441,9 +626,9 @@ async def _apply_completion_security_gate(
             ctx.store.log_health_event,
             user_id,
             torrent_hash,
-            "malware_delete",
+            "malware_deleted",
             "critical",
-            json.dumps({"reasons": reasons}),
+            json.dumps({"reasons": reasons, "action": "deleted", "path": media_path}),
             name,
         )
     except Exception:
@@ -583,9 +768,7 @@ def render_progress_text(
     bar = progress_bar(progress)
 
     dls_val = int(info.get("dlspeed", 0) or 0) if dls_bps is None else max(0, int(dls_bps))
-    uls_val = int(info.get("upspeed", 0) or 0) if uls_bps is None else max(0, int(uls_bps))
     dls = human_size(dls_val) + "/s"
-    uls = human_size(uls_val) + "/s"
 
     total_bytes = int(info.get("size", 0) or info.get("total_size", 0) or 0)
     done_bytes = completed_bytes(info)
@@ -1515,10 +1698,39 @@ async def _remove_from_download_queue(ctx: HandlerContext, torrent_hash: str) ->
 # ---------------------------------------------------------------------------
 
 
+async def _maybe_run_daily_cleanups(ctx: HandlerContext) -> None:
+    """Run retention cleanup once per 24h, driven from the completion poller tick.
+
+    The scheduling-decision mutation of ``_last_daily_cleanup_ts`` is serialized
+    under ``_daily_cleanup_lock`` so that concurrent poller ticks cannot
+    double-run the cleanup. The cleanup work itself runs outside the lock
+    because ``ctx.store.cleanup_*`` already serializes via SQLite's busy
+    timeout.
+    """
+    global _last_daily_cleanup_ts
+    async with _daily_cleanup_lock:
+        now = int(time.time())
+        if now - _last_daily_cleanup_ts < _DAILY_CLEANUP_INTERVAL:
+            return
+        _last_daily_cleanup_ts = now
+    try:
+        deleted_health = await asyncio.to_thread(ctx.store.cleanup_old_health_events, 30)
+        deleted_malware = await asyncio.to_thread(ctx.store.cleanup_old_malware_logs, 90)
+        if deleted_health or deleted_malware:
+            LOG.info(
+                "Daily cleanup: %d health events, %d malware logs removed",
+                deleted_health,
+                deleted_malware,
+            )
+    except Exception:
+        LOG.debug("Daily cleanup failed", exc_info=True)
+
+
 async def completion_poller_job(ctx: HandlerContext, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Periodic job that checks ALL torrents for completions missed by the live monitor."""
     if not ctx.app:
         return
+    await _maybe_run_daily_cleanups(ctx)
     try:
         torrents = await asyncio.to_thread(ctx.qbt.list_torrents, filter_name="completed", limit=200)
     except Exception:
@@ -1594,10 +1806,36 @@ async def completion_poller_job(ctx: HandlerContext, context: ContextTypes.DEFAU
                     LOG.warning("Failed to delete blocked torrent at completion: %s", torrent_hash, exc_info=True)
                 try:
                     await asyncio.to_thread(
-                        ctx.store.log_malware_block, torrent_hash, name, "download", completion_scan.reasons
+                        ctx.store.log_malware_block,
+                        torrent_hash,
+                        name,
+                        "download",
+                        completion_scan.reasons,
+                        risk_score=completion_scan.score,
+                        tier=completion_scan.tier,
+                        signals=_serialize_signals(completion_scan),
                     )
                 except Exception:
                     pass
+                try:
+                    await asyncio.to_thread(
+                        ctx.store.log_health_event,
+                        0,
+                        torrent_hash,
+                        "malware_heuristic_block",
+                        "critical",
+                        json.dumps(
+                            {
+                                "risk_score": completion_scan.score,
+                                "tier": completion_scan.tier,
+                                "signals": [{"id": s.signal_id, "pts": s.points} for s in completion_scan.signals[:10]],
+                                "action": "blocked",
+                            }
+                        ),
+                        name,
+                    )
+                except Exception:
+                    LOG.debug("Failed to log heuristic block health event", exc_info=True)
                 top_signals = sorted(completion_scan.signals, key=lambda s: s.points, reverse=True)[:5]
                 signal_lines = "\n".join(
                     f"• <code>{_h(s.signal_id)}</code> (+{s.points}) {_h(s.detail)}" for s in top_signals
@@ -2081,8 +2319,11 @@ async def do_add(
             ctx.store.log_malware_block(
                 torrent_hash=_torrent_hash_key,
                 torrent_name=_torrent_name,
-                stage="search",
+                stage="pre_add",
                 reasons=malware_scan.reasons,
+                risk_score=malware_scan.score,
+                tier=malware_scan.tier,
+                signals=_serialize_signals(malware_scan),
             )
         except Exception:
             pass  # logging failure must not block the user response
@@ -2149,7 +2390,7 @@ async def send_download_starting_message(
     )
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("\U0001f3e0 Home", callback_data="nav:home")]])
     edit_text = getattr(msg, "edit_text", None)
-    if callable(edit_text) and asyncio.iscoroutinefunction(edit_text):
+    if callable(edit_text) and inspect.iscoroutinefunction(edit_text):
         await msg.edit_text(text, reply_markup=kb, parse_mode=_PM)
         sent = msg
     else:
@@ -2386,9 +2627,30 @@ async def do_add_full(
                     torrent_name=result.name,
                     stage="download",
                     reasons=malware_scan_result.reasons,
+                    risk_score=malware_scan_result.score,
+                    tier=malware_scan_result.tier,
+                    signals=_serialize_signals(malware_scan_result),
                 )
             except Exception:
                 pass
+            try:
+                ctx.store.log_health_event(
+                    user_id,
+                    torrent_hash,
+                    "malware_heuristic_block",
+                    "critical",
+                    json.dumps(
+                        {
+                            "risk_score": malware_scan_result.score,
+                            "tier": malware_scan_result.tier,
+                            "signals": [{"id": s.signal_id, "pts": s.points} for s in malware_scan_result.signals[:10]],
+                            "action": "blocked",
+                        }
+                    ),
+                    result.name,
+                )
+            except Exception:
+                LOG.debug("Failed to log heuristic block health event", exc_info=True)
             top_signals = sorted(malware_scan_result.signals, key=lambda s: s.points, reverse=True)[:5]
             signal_lines = "\n".join(f"• {s.signal_id} (+{s.points}) {s.detail}" for s in top_signals)
             raise RuntimeError(

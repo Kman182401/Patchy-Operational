@@ -1,7 +1,9 @@
-# Patchy Bot — Patterns & Conventions
+# Patchy Bot — Patterns & Conventions (ARCHIVED 2026-04-08)
 
-Append an entry whenever a non-obvious pattern, convention, or gotcha is discovered.
-Newest entries at the top.
+> **FROZEN ARCHIVE — do not append.** New patterns/conventions/gotchas go in
+> the live auto-memory store at `~/.claude/projects/-home-karson-Patchy-Bot/memory/`
+> as `feedback_*` entries. See this directory's `MEMORY.md` for the archive
+> rationale.
 
 ## Entry Format
 ```

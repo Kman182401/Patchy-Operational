@@ -187,3 +187,4 @@ Run `task-master list` to see current project tasks. Auto-injected at session st
 - Default test command: `.venv/bin/python -m pytest -q`
 - Ruff + mypy config in [`pyproject.toml`](/home/karson/Patchy_Bot/telegram-qbt/pyproject.toml)
 - Use targeted tests first when debugging, then run the broader suite before handoff
+- **Fix pre-existing issues, never ignore them.** When fresh pyright/pytest runs surface diagnostics — even ones unrelated to the current task — triage and fix them in the same session. Tractable ones (unused imports, deprecated APIs, missing None-checks, stale event strings) must be patched directly. Structural test-fixture type gaps get minimal `cast()` / `# type: ignore[arg-type]` rather than rewrites. Never report "done" with known errors still present. Dispatch `lint-type-agent` for non-trivial backlogs.

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -16,7 +15,6 @@ from patchy_bot.handlers.full_series import (
     run_full_series_download,
 )
 from patchy_bot.ui import text as text_mod
-
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -53,7 +51,6 @@ def _make_ctx(
     search_rows: list[dict[str, Any]] | None = None,
 ) -> Any:
     """Build a ctx SimpleNamespace with minimal attributes."""
-    present_calls: list[set[str]] = []
 
     class _Store:
         def __init__(self) -> None:
@@ -371,7 +368,7 @@ async def test_partial_season_no_pack_downloads_only_missing(
     status_message = MagicMock()
     status_message.edit_text = AsyncMock()
 
-    result = await run_full_series_download(
+    await run_full_series_download(
         ctx,
         user_id=1,
         chat_id=10,
@@ -517,7 +514,6 @@ async def test_sequential_execution_only_one_torrent_at_a_time(
     ctx = _make_ctx()
 
     # Each season's wait immediately resolves.
-    call_counts: list[int] = []
     call_idx = {"i": 0}
 
     def _present(_c, _n, _y):

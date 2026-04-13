@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-from enum import Enum
 import re
+from enum import StrEnum
 from typing import Any
 
 import requests
@@ -22,7 +22,7 @@ from ..utils import (
 LOG = logging.getLogger("qbtg")
 
 
-class MovieReleaseStatus(str, Enum):
+class MovieReleaseStatus(StrEnum):
     PRE_THEATRICAL = "pre_theatrical"
     IN_THEATERS = "in_theaters"
     WAITING_HOME = "waiting_home"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -28,7 +29,7 @@ def _fake_response(status_code: int = 200, json_data: dict | None = None, text: 
     return resp
 
 
-_CHAT_KWARGS = dict(
+_CHAT_KWARGS: dict[str, Any] = dict(
     messages=[{"role": "user", "content": "hi"}],
     model="primary-model",
     fallback_model="fallback-model",

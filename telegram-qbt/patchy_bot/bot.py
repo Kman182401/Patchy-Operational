@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import collections
 import concurrent.futures
+import inspect
 import logging
 import math
 import os
@@ -2957,7 +2958,7 @@ class BotApp:
         user_id = int(track.get("user_id") or 0)
 
         edit_text = getattr(msg, "edit_text", None)
-        can_edit = callable(edit_text) and asyncio.iscoroutinefunction(edit_text)
+        can_edit = callable(edit_text) and inspect.iscoroutinefunction(edit_text)
         ep_word = "episode" if len(codes) == 1 else "episodes"
         status_lines = [
             "<b>⬇️ Queuing Episodes</b>",
@@ -3118,7 +3119,7 @@ class BotApp:
         pending = set(track.get("pending_json") or [])
         wanted = [code for code in codes if code in available and code not in pending]
         edit_text = getattr(msg, "edit_text", None)
-        can_edit = callable(edit_text) and asyncio.iscoroutinefunction(edit_text)
+        can_edit = callable(edit_text) and inspect.iscoroutinefunction(edit_text)
         if not wanted:
             if can_edit:
                 await msg.edit_text(
@@ -3412,6 +3413,7 @@ class BotApp:
             min_quality=min_quality,
             media_type=media_type,
             release_dates=release_dates,
+            store=self.store,
         )
 
     @staticmethod

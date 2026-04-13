@@ -70,6 +70,7 @@ class Config:
     health_event_retention_days: int = 30
     file_inspection_timeout_s: int = 20
     malware_scan_timeout_s: int = 300
+    log_clean_scans: bool = False
 
     _DANGEROUS_ROOTS: frozenset[str] = frozenset(
         {
@@ -109,6 +110,54 @@ class Config:
                 raise RuntimeError(
                     f"Refusing to start: {attr}={raw!r} resolves to system-critical directory {resolved!r}. "
                     "Set it to a dedicated media directory instead."
+                )
+
+        # Positive-list containment check for spam_path: even if it isn't one of the
+        # 17 dangerous literal roots, reject anything outside the user's home, the
+        # configured media roots, a top-level /mnt storage mount, or /tmp. This
+        # prevents arbitrary directory creation like /etc/foo, /var/lib/attacker,
+        # or /root/x. We check BOTH the literal absolute path and the fully-resolved
+        # (symlink-followed) path — the literal form must live under a user-intended
+        # root, and the resolved form must not escape into a system area.
+        if self.spam_path:
+            literal_spam = os.path.abspath(os.path.expanduser(self.spam_path))
+            resolved_spam = os.path.realpath(self.spam_path)
+
+            user_roots: list[str] = [
+                os.path.abspath(os.path.expanduser("~")),
+                "/tmp",
+            ]
+            for candidate in (self.movies_path, self.tv_path, self.nvme_mount_path):
+                if candidate:
+                    user_roots.append(os.path.abspath(os.path.expanduser(candidate)))
+
+            # Sane post-symlink-resolution roots: home (resolved), media roots
+            # (resolved), /tmp, and /mnt (covers external storage mounts like
+            # /mnt/bulk, /mnt/nvme that are a normal host setup).
+            safe_resolved_roots: list[str] = [
+                os.path.realpath(os.path.expanduser("~")),
+                os.path.realpath("/tmp"),
+                "/mnt",
+            ]
+            for candidate in (self.movies_path, self.tv_path, self.nvme_mount_path):
+                if candidate:
+                    safe_resolved_roots.append(os.path.realpath(candidate))
+
+            def _contained(path: str, roots: list[str]) -> bool:
+                return any(path == root or path.startswith(root + os.sep) for root in roots)
+
+            if not _contained(literal_spam, user_roots):
+                raise ValueError(
+                    f"Refusing to start: spam_path={self.spam_path!r} (literal {literal_spam!r}) "
+                    f"must be configured under one of: {user_roots}. "
+                    "Set SPAM_PATH to a directory under your home, the media library, or /tmp."
+                )
+
+            if not _contained(resolved_spam, safe_resolved_roots):
+                raise ValueError(
+                    f"Refusing to start: spam_path={self.spam_path!r} resolves via symlink "
+                    f"to {resolved_spam!r}, which escapes the allowed roots: {safe_resolved_roots}. "
+                    "Remove the symlink or point SPAM_PATH at a real directory."
                 )
 
     @staticmethod
@@ -196,5 +245,6 @@ class Config:
             health_event_retention_days=max(1, int(os.getenv("HEALTH_EVENT_RETENTION_DAYS", "30"))),
             file_inspection_timeout_s=max(5, int(os.getenv("FILE_INSPECTION_TIMEOUT_SECONDS", "20"))),
             malware_scan_timeout_s=max(30, int(os.getenv("MALWARE_SCAN_TIMEOUT_SECONDS", "300"))),
+            log_clean_scans=parse_bool(os.getenv("LOG_CLEAN_SCANS", "false"), default=False),
             backup_dir=parse_env_optional(os.getenv("BACKUP_DIR")),
         )

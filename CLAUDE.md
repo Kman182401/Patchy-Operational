@@ -45,17 +45,17 @@
 - Keep instructions that are workflow-specific, command-specific, or operationally detailed out of this file.
 - Preserve path safety and media-type validation when moving or deleting files.
 
-## Memory Systems (two, distinct roles)
+## Memory Systems
 
-Patchy_Bot has TWO memory stores. Know which one to use when.
+Patchy_Bot has one live memory store and one frozen archive.
 
 1. **Auto-memory (canonical, live)** — `~/.claude/projects/-home-karson-Patchy-Bot/memory/`
-   Managed by the Claude Code auto-memory system. Trigger-based entries typed as `user`, `feedback`, `project`, `reference`. `MEMORY.md` is the index — one line per entry, ~150 chars, no narrative. **This is the primary source of truth for preferences, rules, and cross-session learnings.** Write new learnings here.
+   Managed by the Claude Code auto-memory system. Trigger-based entries typed as `user`, `feedback`, `project`, `reference`. `MEMORY.md` is the index — one line per entry, ~150 chars, no narrative. **This is the single source of truth for preferences, rules, and cross-session learnings.** All new learnings go here.
 
-2. **Project-local legacy log** — `~/Patchy_Bot/.claude/memory/`
-   Categorized narrative files (`bugs.md`, `decisions.md`, `patterns.md`, `sessions.md`) plus its own `MEMORY.md` index. Historical context from earlier sessions; treat as read-mostly archive. Do not duplicate new learnings here — put them in the auto-memory store instead. Only append to `sessions.md` if the user explicitly asks for a session narrative log.
+2. **Legacy archive (frozen, read-only)** — `~/Patchy_Bot/.claude/memory/`
+   Contains `decisions.md`, `bugs.md`, `patterns.md` (plus an archive `MEMORY.md`). Preserves detailed forensics from the 2026-04-03 → 2026-04-08 sprint — bug-by-bug root causes, full decision rationale, worked pattern examples. **Frozen as of 2026-04-08; do not append to it.** Consult only when a 2026-04-07 bug symptom recurs and the one-line auto-memory summary isn't enough, or when you need the original rationale behind a decision. `sessions.md` was removed on 2026-04-13 (empty auto-hook stubs only).
 
-**End-of-session sync:** `/revise-claude-md` considers CLAUDE.md first; it does not touch either memory store. The auto-memory system handles its own updates as you save entries during the session. If a new learning belongs in the legacy log (rare), save it manually.
+**End-of-session sync:** `/revise-claude-md` updates CLAUDE.md files. The auto-memory system updates itself as you save entries during the session. The legacy archive receives no updates ever.
 
 ## Obsidian Project Vault
 

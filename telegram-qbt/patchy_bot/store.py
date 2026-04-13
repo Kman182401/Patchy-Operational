@@ -386,6 +386,58 @@ class Store:
             "ON movie_tracks(user_id, tmdb_id) WHERE tmdb_id IS NOT NULL"
         )
 
+        # ---- malware_scan_log v2 migration (add risk_score/tier/signals_json, widen CHECK) ----
+        malware_cols = {row[1] for row in conn.execute("PRAGMA table_info(malware_scan_log)")}
+        if "risk_score" not in malware_cols:
+            conn.execute("ALTER TABLE malware_scan_log ADD COLUMN risk_score INTEGER")
+        if "tier" not in malware_cols:
+            conn.execute("ALTER TABLE malware_scan_log ADD COLUMN tier TEXT")
+        if "signals_json" not in malware_cols:
+            conn.execute("ALTER TABLE malware_scan_log ADD COLUMN signals_json TEXT")
+        # Detect whether the CHECK constraint already includes 'pre_add'; if not, rebuild the table.
+        malware_sql_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='malware_scan_log'"
+        ).fetchone()
+        malware_sql = (malware_sql_row[0] if malware_sql_row else "") or ""
+        if "'pre_add'" not in malware_sql:
+            # Wrap the CHECK-constraint rebuild in an explicit transaction so a crash
+            # between steps does not leave an orphan `malware_scan_log_new` table that
+            # would brick the next startup. The defensive DROP IF EXISTS handles any
+            # orphan left over from a pre-fix crash. Commit any implicitly-open
+            # transaction from preceding ALTER TABLE statements before issuing an
+            # explicit BEGIN IMMEDIATE (sqlite3 rejects nested BEGINs).
+            conn.commit()
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute("DROP TABLE IF EXISTS malware_scan_log_new")
+                conn.execute(
+                    """CREATE TABLE malware_scan_log_new (
+                        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                        torrent_hash TEXT NOT NULL,
+                        torrent_name TEXT NOT NULL,
+                        stage        TEXT NOT NULL CHECK(stage IN ('search', 'pre_add', 'download')),
+                        reasons      TEXT NOT NULL,
+                        blocked_at   INTEGER NOT NULL,
+                        risk_score   INTEGER,
+                        tier         TEXT,
+                        signals_json TEXT
+                    )"""
+                )
+                conn.execute(
+                    "INSERT INTO malware_scan_log_new"
+                    "(id, torrent_hash, torrent_name, stage, reasons, blocked_at, risk_score, tier, signals_json) "
+                    "SELECT id, torrent_hash, torrent_name, stage, reasons, blocked_at, risk_score, tier, signals_json "
+                    "FROM malware_scan_log"
+                )
+                conn.execute("DROP TABLE malware_scan_log")
+                conn.execute("ALTER TABLE malware_scan_log_new RENAME TO malware_scan_log")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_malware_hash ON malware_scan_log(torrent_hash)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_malware_blocked_at ON malware_scan_log(blocked_at)")
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+
         conn.execute("PRAGMA optimize;")
         conn.commit()
 
@@ -533,30 +585,89 @@ class Store:
         torrent_name: str,
         stage: str,
         reasons: list[str],
+        *,
+        risk_score: int | None = None,
+        tier: str | None = None,
+        signals: list[dict] | None = None,
     ) -> None:
         """Log a blocked torrent to the malware scan log."""
+        signals_json = json.dumps(signals) if signals else None
         with self._lock:
             if self._closed:
                 raise RuntimeError("Store is closed")
             conn = self._conn
             conn.execute(
                 "INSERT INTO malware_scan_log"
-                "(torrent_hash, torrent_name, stage, reasons, blocked_at) "
-                "VALUES(?, ?, ?, ?, ?)",
-                (torrent_hash, torrent_name, stage, json.dumps(reasons), now_ts()),
+                "(torrent_hash, torrent_name, stage, reasons, blocked_at, risk_score, tier, signals_json) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    torrent_hash,
+                    torrent_name,
+                    stage,
+                    json.dumps(reasons),
+                    now_ts(),
+                    risk_score,
+                    tier,
+                    signals_json,
+                ),
             )
             conn.commit()
 
     def cleanup_old_health_events(self, retention_days: int = 30) -> int:
-        """Delete health events older than retention_days. Return count deleted."""
+        """Delete health events older than retention_days. Return count deleted.
+
+        Pages the DELETE in batches of 1000 rows with a commit between batches so
+        long-backlog retention sweeps don't hold the write lock long enough to
+        starve the completion poller. `retention_days` is clamped to >= 1 to
+        prevent negative values from deleting future-dated rows.
+        """
+        retention_days = max(1, int(retention_days))
         cutoff = now_ts() - retention_days * 86400
+        total = 0
         with self._lock:
             if self._closed:
                 raise RuntimeError("Store is closed")
             conn = self._conn
-            cur = conn.execute("DELETE FROM download_health_events WHERE created_at < ?", (cutoff,))
-            conn.commit()
-            return cur.rowcount
+            while True:
+                cur = conn.execute(
+                    "DELETE FROM download_health_events WHERE rowid IN "
+                    "(SELECT rowid FROM download_health_events WHERE created_at < ? LIMIT 1000)",
+                    (cutoff,),
+                )
+                conn.commit()
+                deleted = cur.rowcount
+                total += deleted
+                if deleted < 1000:
+                    break
+        return total
+
+    def cleanup_old_malware_logs(self, retention_days: int = 90) -> int:
+        """Delete malware_scan_log entries older than retention_days. Returns rows deleted.
+
+        Pages the DELETE in batches of 1000 rows with a commit between batches so
+        long-backlog retention sweeps don't hold the write lock long enough to
+        starve the completion poller. `retention_days` is clamped to >= 1 to
+        prevent negative values from deleting future-dated rows.
+        """
+        retention_days = max(1, int(retention_days))
+        cutoff = now_ts() - retention_days * 86400
+        total = 0
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
+            while True:
+                cur = conn.execute(
+                    "DELETE FROM malware_scan_log WHERE rowid IN "
+                    "(SELECT rowid FROM malware_scan_log WHERE blocked_at < ? LIMIT 1000)",
+                    (cutoff,),
+                )
+                conn.commit()
+                deleted = cur.rowcount
+                total += deleted
+                if deleted < 1000:
+                    break
+        return total
 
     def cleanup(self, max_age_hours: int = 24) -> None:
         cutoff = now_ts() - max_age_hours * 3600

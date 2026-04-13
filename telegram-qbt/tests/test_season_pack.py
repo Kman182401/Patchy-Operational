@@ -46,7 +46,7 @@ async def test_search_season_pack_returns_first_1080p_non_episode_result() -> No
         ),
     )
 
-    result = await schedule_handler.search_season_pack(ctx, "Example Show", 1, 123)
+    result = await schedule_handler.search_season_pack(ctx, "Example Show", 1, 123)  # pyright: ignore[reportArgumentType]
 
     assert result is not None
     assert result["name"] == "Example Show S01 1080p WEB-DL"
@@ -80,7 +80,7 @@ async def test_search_season_pack_rejects_episode_results_and_falls_through() ->
         ),
     )
 
-    result = await schedule_handler.search_season_pack(ctx, "Example Show", 1, 123)
+    result = await schedule_handler.search_season_pack(ctx, "Example Show", 1, 123)  # pyright: ignore[reportArgumentType]
 
     assert result is not None
     assert result["name"] == "Example Show Season 1 1080p BluRay"
@@ -106,7 +106,7 @@ async def test_search_season_pack_returns_none_when_all_queries_empty() -> None:
         ),
     )
 
-    result = await schedule_handler.search_season_pack(ctx, "Example Show", 1, 123)
+    result = await schedule_handler.search_season_pack(ctx, "Example Show", 1, 123)  # pyright: ignore[reportArgumentType]
 
     assert result is None
     assert queries == [
@@ -166,7 +166,7 @@ async def test_schedule_refresh_track_uses_season_pack_for_full_missing_full_sea
     monkeypatch.setattr(schedule_handler, "schedule_is_season_complete", lambda _probe: False)
 
     updated, returned_probe = await schedule_handler.schedule_refresh_track(
-        ctx,
+        ctx,  # pyright: ignore[reportArgumentType]
         track,
         allow_notify=True,
         qbt_category_aliases_fn=lambda *_args, **_kwargs: set(),
@@ -200,7 +200,7 @@ async def test_schedule_refresh_track_skips_season_pack_for_partial_season(monke
     monkeypatch.setattr(schedule_handler, "schedule_is_season_complete", lambda _probe: False)
 
     await schedule_handler.schedule_refresh_track(
-        ctx,
+        ctx,  # pyright: ignore[reportArgumentType]
         track,
         allow_notify=False,
         qbt_category_aliases_fn=lambda *_args, **_kwargs: set(),
@@ -231,7 +231,7 @@ async def test_schedule_refresh_track_skips_season_pack_for_upcoming_mode(monkey
     monkeypatch.setattr(schedule_handler, "schedule_is_season_complete", lambda _probe: False)
 
     await schedule_handler.schedule_refresh_track(
-        ctx,
+        ctx,  # pyright: ignore[reportArgumentType]
         track,
         allow_notify=False,
         qbt_category_aliases_fn=lambda *_args, **_kwargs: set(),
@@ -290,8 +290,8 @@ async def test_bot_schedule_refresh_track_delegates_to_handler(monkeypatch) -> N
         _schedule_notify_missing=object(),
     )
 
-    result = await BotApp._schedule_refresh_track(bot, {"track_id": "track-1"}, allow_notify=True)
+    result = await BotApp._schedule_refresh_track(bot, {"track_id": "track-1"}, allow_notify=True)  # pyright: ignore[reportArgumentType]
 
     assert result == expected
     assert recorded["ctx"] == "CTX"
-    assert recorded["kwargs"]["download_season_pack_fn"] is bot._schedule_download_season_pack
+    assert recorded["kwargs"]["download_season_pack_fn"] is bot._schedule_download_season_pack  # pyright: ignore[reportIndexIssue]

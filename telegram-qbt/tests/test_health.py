@@ -39,13 +39,13 @@ class _FakeCfg:
 
 class TestCheckVpn:
     def test_disabled(self):
-        r = check_vpn(_FakeCfg(vpn_required_for_downloads=False))
+        r = check_vpn(_FakeCfg(vpn_required_for_downloads=False))  # pyright: ignore[reportArgumentType]
         assert r.passed is True
         assert r.severity == "ok"
 
     @patch("os.path.exists", return_value=False)
     def test_interface_missing(self, _):
-        r = check_vpn(_FakeCfg())
+        r = check_vpn(_FakeCfg())  # pyright: ignore[reportArgumentType]
         assert r.passed is False
         assert r.severity == "block"
         assert "not found" in r.message.lower()
@@ -55,7 +55,7 @@ class TestCheckVpn:
             patch("os.path.exists", return_value=True),
             patch("builtins.open", return_value=StringIO("down\n")),
         ):
-            r = check_vpn(_FakeCfg())
+            r = check_vpn(_FakeCfg())  # pyright: ignore[reportArgumentType]
         assert r.passed is False
         assert r.severity == "block"
         assert "down" in r.message.lower()
@@ -71,7 +71,7 @@ class TestCheckVpn:
                 return_value=subprocess.CompletedProcess([], 0, stdout=""),
             ),
         ):
-            r = check_vpn(_FakeCfg())
+            r = check_vpn(_FakeCfg())  # pyright: ignore[reportArgumentType]
         assert r.severity == "warn"
         assert "no ipv4" in r.message.lower()
 
@@ -91,7 +91,7 @@ class TestCheckVpn:
                 side_effect=socket.gaierror("dns fail"),
             ),
         ):
-            r = check_vpn(_FakeCfg())
+            r = check_vpn(_FakeCfg())  # pyright: ignore[reportArgumentType]
         assert r.passed is False
         assert r.severity == "block"
         assert "dns" in r.message.lower()
@@ -111,7 +111,7 @@ class TestCheckVpn:
                 return_value=[(2, 1, 6, "", ("1.2.3.4", 6969))],
             ),
         ):
-            r = check_vpn(_FakeCfg())
+            r = check_vpn(_FakeCfg())  # pyright: ignore[reportArgumentType]
         assert r.passed is True
         assert r.severity == "ok"
 
@@ -200,7 +200,7 @@ class TestRunPreflight:
         qbt = MagicMock()
         qbt.get_transfer_info.return_value = {"connection_status": "connected", "dht_nodes": 42}
         with patch("shutil.disk_usage", return_value=_DiskUsage(500 * 1024**3, 100 * 1024**3, 400 * 1024**3)):
-            report = await run_preflight(cfg, qbt, "/mnt/data")
+            report = await run_preflight(cfg, qbt, "/mnt/data")  # pyright: ignore[reportArgumentType]
         assert report.can_proceed is True
         assert len(report.blockers) == 0
         assert len(report.checks) == 3
@@ -211,7 +211,7 @@ class TestRunPreflight:
         qbt = MagicMock()
         qbt.get_transfer_info.return_value = {"connection_status": "disconnected", "dht_nodes": 0}
         with patch("shutil.disk_usage", return_value=_DiskUsage(500 * 1024**3, 100 * 1024**3, 400 * 1024**3)):
-            report = await run_preflight(cfg, qbt, "/mnt/data")
+            report = await run_preflight(cfg, qbt, "/mnt/data")  # pyright: ignore[reportArgumentType]
         assert report.can_proceed is False
         assert len(report.blockers) == 1
 
@@ -221,7 +221,7 @@ class TestRunPreflight:
         qbt = MagicMock()
         qbt.get_transfer_info.return_value = {"connection_status": "firewalled", "dht_nodes": 10}
         with patch("shutil.disk_usage", return_value=_DiskUsage(500 * 1024**3, 100 * 1024**3, 400 * 1024**3)):
-            report = await run_preflight(cfg, qbt, "/mnt/data")
+            report = await run_preflight(cfg, qbt, "/mnt/data")  # pyright: ignore[reportArgumentType]
         assert report.can_proceed is True
         assert len(report.warnings) == 1
         assert len(report.blockers) == 0

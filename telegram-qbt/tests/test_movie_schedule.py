@@ -20,9 +20,9 @@ from patchy_bot.utils import now_ts
 
 
 @pytest.fixture
-def store() -> Store:
+def store() -> Store:  # pyright: ignore[reportInvalidTypeForm]
     s = Store(":memory:")
-    yield s
+    yield s  # pyright: ignore[reportReturnType]
     s.close()
 
 
@@ -501,8 +501,8 @@ class TestReleaseGateStore:
         tid = store.create_movie_track(100, 457, "Est Movie", 2024, "theatrical", 1700000000, "Est 2024")
         store.update_movie_release_dates(tid, 1700000000, 1703888000, None, 1703888000, True, "waiting_home", True)
         track = store.get_movie_track(tid)
-        assert track["digital_estimated"] == 1
-        assert track["home_date_is_inferred"] == 1
+        assert track["digital_estimated"] == 1  # pyright: ignore[reportOptionalSubscript]
+        assert track["home_date_is_inferred"] == 1  # pyright: ignore[reportOptionalSubscript]
 
     def test_home_date_is_inferred_column_exists(self, store: Store) -> None:
         cols = {
@@ -693,7 +693,7 @@ class TestMovieScheduleCallbacks:
             return fn(*args, **kwargs)
 
         monkeypatch.setattr("patchy_bot.handlers.schedule.asyncio.to_thread", passthrough)
-        fake_app._ctx.tvmeta.get_movie_release_status.return_value = MovieReleaseDates(
+        fake_app._ctx.tvmeta.get_movie_release_status.return_value = MovieReleaseDates(  # pyright: ignore[reportAttributeAccessIssue]
             tmdb_id=42,
             theatrical_ts=1_690_000_000,
             digital_ts=1_700_000_000,
@@ -1004,7 +1004,7 @@ class TestTitleOnlyTracking:
         tid1 = store.create_movie_track(100, None, "Film A", None, "title_only", 0, "Film A", False)
         store.update_movie_release_dates(tid1, None, None, None, None, False, "title_only", False)
         # Non-title-only track should not appear
-        tid2 = store.create_movie_track(100, 999, "Film B", 2024, "theatrical", now_ts() - 86400, "Film B 2024")
+        store.create_movie_track(100, 999, "Film B", 2024, "theatrical", now_ts() - 86400, "Film B 2024")
         tracks = store.get_title_only_tracks()
         assert len(tracks) == 1
         assert tracks[0]["title"] == "Film A"
@@ -1083,8 +1083,8 @@ class TestTitleOnlyCallbacks:
             await on_cb_movie_schedule(fake_app, data=f"msch:dl_confirm:{tid}", q=query, user_id=USER_ID)
 
         # Verify qbt.add_url was called
-        fake_app.qbt.add_url.assert_called_once()
-        call_args = fake_app.qbt.add_url.call_args
+        fake_app.qbt.add_url.assert_called_once()  # pyright: ignore[reportAttributeAccessIssue]
+        call_args = fake_app.qbt.add_url.call_args  # pyright: ignore[reportAttributeAccessIssue]
         assert "deadbeef" * 5 in str(call_args)
         # Track should be in downloading state with pending cleared
         track = fake_app.store.get_movie_track(tid)

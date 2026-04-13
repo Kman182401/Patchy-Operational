@@ -35,6 +35,22 @@ def main() -> None:
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     cfg = Config.from_env()
+
+    if cfg.spam_path:
+        try:
+            os.makedirs(cfg.spam_path, exist_ok=True)
+            if not os.access(cfg.spam_path, os.W_OK):
+                LOG.error(
+                    "spam_path %r exists but is not writable — malware file deletion may fail",
+                    cfg.spam_path,
+                )
+            else:
+                LOG.info("spam_path validated: %s", cfg.spam_path)
+        except OSError as exc:
+            LOG.error("spam_path %r could not be created: %s", cfg.spam_path, exc)
+    else:
+        LOG.warning("spam_path is not configured — malware file cleanup may fail")
+
     bot = BotApp(cfg)
     bot.store.cleanup()
     bot.rate_limiter.prune_stale()

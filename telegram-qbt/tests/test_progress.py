@@ -16,6 +16,7 @@ from patchy_bot.handlers.download import (
     state_label,
     track_download_progress,
 )
+from tests.helpers import FakeOrganizeResult
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -294,9 +295,6 @@ class TestSafeTrackerEdit:
 # ---------------------------------------------------------------------------
 # track_download_progress — async tracker tests
 # ---------------------------------------------------------------------------
-
-
-from tests.helpers import FakeOrganizeResult
 
 
 class TestTrackDownloadProgress:

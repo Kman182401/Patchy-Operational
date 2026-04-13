@@ -474,6 +474,7 @@ async def _drive_season_individual(
                 min_size=None,
                 max_size=None,
                 min_quality=ctx.cfg.default_min_quality,
+                store=ctx.store,
             )
             filtered = search_handler.deduplicate_results(filtered)
         except Exception as exc:

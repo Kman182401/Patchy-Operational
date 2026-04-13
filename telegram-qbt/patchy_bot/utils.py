@@ -7,7 +7,7 @@ import json
 import os
 import re
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import requests
@@ -139,7 +139,7 @@ def quality_tier(name: str) -> int:
 def discover_openai_compatible_provider() -> tuple[str | None, str | None]:
     cfg_path = os.path.expanduser("~/.openclaw/openclaw.json")
     try:
-        with open(cfg_path, "r", encoding="utf-8") as f:
+        with open(cfg_path, encoding="utf-8") as f:
             cfg = json.load(f)
     except Exception:
         return None, None
@@ -321,7 +321,7 @@ def parse_release_ts(airstamp: str | None, airdate: str | None) -> int | None:
             pass
     if airdate:
         try:
-            dt = datetime.strptime(airdate, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(hours=23, minutes=59)
+            dt = datetime.strptime(airdate, "%Y-%m-%d").replace(tzinfo=UTC) + timedelta(hours=23, minutes=59)
             return int(dt.timestamp())
         except Exception:
             pass
@@ -331,7 +331,7 @@ def parse_release_ts(airstamp: str | None, airdate: str | None) -> int | None:
 def format_local_ts(ts: int | None) -> str:
     if ts is None:
         return "TBD"
-    return datetime.fromtimestamp(int(ts), tz=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M %Z")
+    return datetime.fromtimestamp(int(ts), tz=UTC).astimezone().strftime("%Y-%m-%d %H:%M %Z")
 
 
 def _relative_time(ts: int | None, *, from_ts: int | None = None) -> str:

@@ -507,14 +507,14 @@ def test_chat_needs_qbt_snapshot_without_keyword() -> None:
 def test_patchy_system_prompt_contains_name() -> None:
     """System prompt includes the configured bot name."""
     ctx = SimpleNamespace(cfg=SimpleNamespace(patchy_chat_name="Patchy"))
-    prompt = patchy_system_prompt(ctx)
+    prompt = patchy_system_prompt(ctx)  # pyright: ignore[reportArgumentType]
     assert "Patchy" in prompt
 
 
 def test_patchy_system_prompt_not_empty() -> None:
     """System prompt is a non-empty string."""
     ctx = SimpleNamespace(cfg=SimpleNamespace(patchy_chat_name="TestBot"))
-    prompt = patchy_system_prompt(ctx)
+    prompt = patchy_system_prompt(ctx)  # pyright: ignore[reportArgumentType]
     assert isinstance(prompt, str)
     assert len(prompt) > 0
 
@@ -522,7 +522,7 @@ def test_patchy_system_prompt_not_empty() -> None:
 def test_patchy_system_prompt_read_only_mandate() -> None:
     """System prompt enforces read-only behavior."""
     ctx = SimpleNamespace(cfg=SimpleNamespace(patchy_chat_name="Patchy"))
-    prompt = patchy_system_prompt(ctx)
+    prompt = patchy_system_prompt(ctx)  # pyright: ignore[reportArgumentType]
     assert "READ-ONLY" in prompt.upper() or "read-only" in prompt.lower()
 
 
@@ -601,7 +601,7 @@ def test_health_report_returns_html_string() -> None:
     from patchy_bot.handlers.commands import health_report
 
     ctx = _make_health_ctx()
-    text, ok = health_report(ctx)
+    text, ok = health_report(ctx)  # pyright: ignore[reportArgumentType]
     assert "<b>" in text
     assert isinstance(text, str)
 
@@ -611,7 +611,7 @@ def test_health_report_checks_storage() -> None:
     from patchy_bot.handlers.commands import health_report
 
     ctx = _make_health_ctx()
-    text, _ok = health_report(ctx)
+    text, _ok = health_report(ctx)  # pyright: ignore[reportArgumentType]
     assert "routing/storage" in text.lower()
 
 
@@ -620,7 +620,7 @@ def test_health_report_overall_ok_when_healthy() -> None:
     from patchy_bot.handlers.commands import health_report
 
     ctx = _make_health_ctx()
-    _text, ok = health_report(ctx)
+    _text, ok = health_report(ctx)  # pyright: ignore[reportArgumentType]
     assert ok is True
 
 
@@ -663,7 +663,7 @@ def test_speed_report_returns_string() -> None:
     from patchy_bot.handlers.commands import speed_report
 
     ctx = _make_speed_ctx()
-    text = speed_report(ctx)
+    text = speed_report(ctx)  # pyright: ignore[reportArgumentType]
     assert isinstance(text, str)
     assert len(text) > 0
 
@@ -673,7 +673,7 @@ def test_speed_report_contains_speed_values() -> None:
     from patchy_bot.handlers.commands import speed_report
 
     ctx = _make_speed_ctx()
-    text = speed_report(ctx)
+    text = speed_report(ctx)  # pyright: ignore[reportArgumentType]
     assert "Download" in text
     assert "Upload" in text
 
@@ -691,7 +691,7 @@ def test_on_error_logs_exception(caplog: Any) -> None:
 
     context = SimpleNamespace(error=RuntimeError("test boom"))
     with caplog.at_level(logging.WARNING):
-        asyncio.get_event_loop().run_until_complete(on_error(None, context))
+        asyncio.get_event_loop().run_until_complete(on_error(None, context))  # pyright: ignore[reportArgumentType]
     # The function should not raise; it may or may not log depending on error type.
     # The key check: it did not crash.
 
@@ -797,6 +797,7 @@ def test_remove_retry_backoff_s_escalates() -> None:
 def test_build_search_parser_rejects_removed_flags() -> None:
     """--min-quality and --limit were removed; parser must reject them."""
     import pytest
+
     from patchy_bot.handlers.search import build_search_parser
 
     parser = build_search_parser()

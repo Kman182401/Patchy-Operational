@@ -10,11 +10,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import patchy_bot.handlers.download as _dl_mod
 from patchy_bot.handlers._shared import (
     check_free_space,
     normalize_media_choice,
 )
-import patchy_bot.handlers.download as _dl_mod
 from patchy_bot.handlers.download import (
     DoAddResult,
     completion_poller_job,
@@ -764,6 +764,7 @@ class TestOnCbStopHashValidation:
         await on_cb_stop(ctx, data=f"stop:{valid_hash}", q=mock_callback_query, user_id=12345)
         mock_callback_query.message.edit_text.assert_awaited_once()
         call_args = mock_callback_query.message.edit_text.await_args
+        assert call_args is not None
         assert "Stop Failed" in call_args.args[0]
 
     @pytest.mark.asyncio
@@ -1666,3 +1667,291 @@ class TestReadTorrentNfo:
         (media_dir / "info.nfo").write_text("")
         raw_files = [{"name": "info.nfo", "size": 0}]
         assert _read_torrent_nfo(raw_files, str(media_dir)) is None
+
+
+# ---------------------------------------------------------------------------
+# Session 4 Task 11: _BoundedHashSet LRU semantics
+# ---------------------------------------------------------------------------
+
+
+class TestBoundedHashSet:
+    """LRU-bounded set used by the completion poller to dedupe recently-seen hashes."""
+
+    def test_add_and_contains(self) -> None:
+        """Items are found after add()."""
+        from patchy_bot.handlers.download import _BoundedHashSet
+
+        s = _BoundedHashSet(maxsize=10)
+        s.add("abc")
+        assert "abc" in s
+        assert "def" not in s
+
+    def test_eviction_at_max(self) -> None:
+        """When maxsize reached, oldest item is evicted on next add."""
+        from patchy_bot.handlers.download import _BoundedHashSet
+
+        s = _BoundedHashSet(maxsize=3)
+        s.add("a")
+        s.add("b")
+        s.add("c")
+        s.add("d")
+        assert "a" not in s
+        assert "b" in s
+        assert "c" in s
+        assert "d" in s
+        assert len(s) == 3
+
+    def test_lru_refresh_on_readd(self) -> None:
+        """Re-adding an existing key moves it to the end (LRU refresh)."""
+        from patchy_bot.handlers.download import _BoundedHashSet
+
+        s = _BoundedHashSet(maxsize=3)
+        s.add("a")
+        s.add("b")
+        s.add("c")
+        # Touch "a" — it should now be the newest
+        s.add("a")
+        s.add("d")
+        # "b" was the oldest and should be evicted, not "a"
+        assert "a" in s
+        assert "b" not in s
+        assert "c" in s
+        assert "d" in s
+
+    def test_discard_removes_item(self) -> None:
+        """discard() removes an existing item."""
+        from patchy_bot.handlers.download import _BoundedHashSet
+
+        s = _BoundedHashSet(maxsize=5)
+        s.add("x")
+        s.add("y")
+        s.discard("x")
+        assert "x" not in s
+        assert "y" in s
+        # discarding a missing key is a no-op
+        s.discard("missing")
+        assert len(s) == 1
+
+    def test_clear_empties_set(self) -> None:
+        """clear() empties the entire set."""
+        from patchy_bot.handlers.download import _BoundedHashSet
+
+        s = _BoundedHashSet(maxsize=5)
+        for k in ("a", "b", "c"):
+            s.add(k)
+        assert len(s) == 3
+        s.clear()
+        assert len(s) == 0
+        assert "a" not in s
+
+    def test_len_reflects_size(self) -> None:
+        """__len__ reports current size, capped at maxsize."""
+        from patchy_bot.handlers.download import _BoundedHashSet
+
+        s = _BoundedHashSet(maxsize=2)
+        assert len(s) == 0
+        s.add("a")
+        assert len(s) == 1
+        s.add("b")
+        assert len(s) == 2
+        s.add("c")  # triggers eviction
+        assert len(s) == 2
+
+    def test_default_max_is_2000(self) -> None:
+        """Module-level _POLLER_SEEN_MAX is 2000."""
+        from patchy_bot.handlers.download import _POLLER_SEEN_MAX, _BoundedHashSet
+
+        assert _POLLER_SEEN_MAX == 2000
+        s = _BoundedHashSet()
+        # Fill past the cap and confirm it holds to 2000.
+        for i in range(2500):
+            s.add(f"h{i:04d}")
+        assert len(s) == 2000
+        # Oldest entries evicted
+        assert "h0000" not in s
+        assert "h2499" in s
+
+
+# ---------------------------------------------------------------------------
+# Session 4 Task 11: ClamAV circuit breaker
+# ---------------------------------------------------------------------------
+
+
+class TestClamavCircuitBreaker:
+    """Tests for the ClamAV circuit breaker in _apply_completion_security_gate."""
+
+    @pytest.fixture(autouse=True)
+    def reset_breaker(self):
+        """Reset breaker state (counter + trip timestamp) before and after each test."""
+        _dl_mod._clamav_consecutive_errors = 0
+        _dl_mod._clamav_breaker_tripped_at = 0.0
+        yield
+        _dl_mod._clamav_consecutive_errors = 0
+        _dl_mod._clamav_breaker_tripped_at = 0.0
+
+    @pytest.fixture
+    def gate_ctx(self, mock_ctx):
+        """Minimal ctx shaped for _apply_completion_security_gate."""
+        mock_ctx.qbt.pause_torrents = MagicMock(return_value=None)
+        mock_ctx.qbt.delete_torrent = MagicMock(return_value=None)
+        mock_ctx.store.log_malware_block = MagicMock(return_value=None)
+        mock_ctx.store.log_health_event = MagicMock(return_value=None)
+        if not hasattr(mock_ctx.cfg, "malware_scan_timeout_s"):
+            mock_ctx.cfg.malware_scan_timeout_s = 60
+        return mock_ctx
+
+    @pytest.mark.asyncio
+    async def test_breaker_trips_after_threshold(self, gate_ctx) -> None:
+        """3 consecutive errors → next call short-circuits and allows without scanning."""
+        from patchy_bot.handlers.download import _apply_completion_security_gate
+
+        with patch.object(_dl_mod, "_run_clamav_scan", return_value=("error", ["boom"])):
+            for _ in range(3):
+                await _apply_completion_security_gate(
+                    gate_ctx,
+                    user_id=1,
+                    torrent_hash="h" * 40,
+                    name="Movie.mkv",
+                    media_path="/tmp/foo",
+                )
+        assert _dl_mod._clamav_consecutive_errors == 3
+
+        # Next call must NOT invoke _run_clamav_scan — the breaker is open.
+        def _should_not_be_called(*_a, **_k):
+            raise AssertionError("_run_clamav_scan called after breaker opened")
+
+        with patch.object(_dl_mod, "_run_clamav_scan", side_effect=_should_not_be_called):
+            result = await _apply_completion_security_gate(
+                gate_ctx,
+                user_id=1,
+                torrent_hash="h" * 40,
+                name="Movie.mkv",
+                media_path="/tmp/foo",
+            )
+        assert result.allowed is True
+        assert result.notice_text is None
+
+    @pytest.mark.asyncio
+    async def test_breaker_resets_on_clean(self, gate_ctx) -> None:
+        """After an error, a clean scan resets the counter to 0."""
+        from patchy_bot.handlers.download import _apply_completion_security_gate
+
+        with patch.object(_dl_mod, "_run_clamav_scan", return_value=("error", ["oops"])):
+            await _apply_completion_security_gate(
+                gate_ctx,
+                user_id=1,
+                torrent_hash="h" * 40,
+                name="Movie.mkv",
+                media_path="/tmp/foo",
+            )
+        assert _dl_mod._clamav_consecutive_errors == 1
+
+        with patch.object(_dl_mod, "_run_clamav_scan", return_value=("clean", [])):
+            await _apply_completion_security_gate(
+                gate_ctx,
+                user_id=1,
+                torrent_hash="h" * 40,
+                name="Movie.mkv",
+                media_path="/tmp/foo",
+            )
+        assert _dl_mod._clamav_consecutive_errors == 0
+
+    @pytest.mark.asyncio
+    async def test_breaker_resets_on_infected(self, gate_ctx, tmp_path) -> None:
+        """infected status resets the counter (scan worked, just detected something)."""
+        from patchy_bot.handlers.download import _apply_completion_security_gate
+
+        with patch.object(_dl_mod, "_run_clamav_scan", return_value=("error", ["oops"])):
+            await _apply_completion_security_gate(
+                gate_ctx,
+                user_id=1,
+                torrent_hash="h" * 40,
+                name="Movie.mkv",
+                media_path="/tmp/foo",
+            )
+            await _apply_completion_security_gate(
+                gate_ctx,
+                user_id=1,
+                torrent_hash="h" * 40,
+                name="Movie.mkv",
+                media_path="/tmp/foo",
+            )
+        assert _dl_mod._clamav_consecutive_errors == 2
+
+        media_dir = tmp_path / "Movies" / "bad"
+        media_dir.mkdir(parents=True)
+        with patch.object(_dl_mod, "_run_clamav_scan", return_value=("infected", ["FOUND"])):
+            await _apply_completion_security_gate(
+                gate_ctx,
+                user_id=1,
+                torrent_hash="h" * 40,
+                name="bad",
+                media_path=str(media_dir),
+            )
+        assert _dl_mod._clamav_consecutive_errors == 0
+
+    @pytest.mark.asyncio
+    async def test_breaker_resets_on_unavailable(self, gate_ctx) -> None:
+        """unavailable status resets the counter (not a scan failure)."""
+        from patchy_bot.handlers.download import _apply_completion_security_gate
+
+        with patch.object(_dl_mod, "_run_clamav_scan", return_value=("error", ["oops"])):
+            await _apply_completion_security_gate(
+                gate_ctx,
+                user_id=1,
+                torrent_hash="h" * 40,
+                name="Movie.mkv",
+                media_path="/tmp/foo",
+            )
+            await _apply_completion_security_gate(
+                gate_ctx,
+                user_id=1,
+                torrent_hash="h" * 40,
+                name="Movie.mkv",
+                media_path="/tmp/foo",
+            )
+        assert _dl_mod._clamav_consecutive_errors == 2
+
+        with patch.object(_dl_mod, "_run_clamav_scan", return_value=("unavailable", ["no db"])):
+            await _apply_completion_security_gate(
+                gate_ctx,
+                user_id=1,
+                torrent_hash="h" * 40,
+                name="Movie.mkv",
+                media_path="/tmp/foo",
+            )
+        assert _dl_mod._clamav_consecutive_errors == 0
+
+    @pytest.mark.asyncio
+    async def test_breaker_does_not_trip_on_two_errors(self, gate_ctx) -> None:
+        """Threshold is >=3; 2 errors should NOT trip the breaker."""
+        from patchy_bot.handlers.download import _apply_completion_security_gate
+
+        with patch.object(_dl_mod, "_run_clamav_scan", return_value=("error", ["oops"])):
+            for _ in range(2):
+                await _apply_completion_security_gate(
+                    gate_ctx,
+                    user_id=1,
+                    torrent_hash="h" * 40,
+                    name="Movie.mkv",
+                    media_path="/tmp/foo",
+                )
+        assert _dl_mod._clamav_consecutive_errors == 2
+
+        # Breaker still closed — next call must still invoke the scanner.
+        calls: list[int] = []
+
+        def _record(*_a, **_k):
+            calls.append(1)
+            return ("error", ["still broken"])
+
+        with patch.object(_dl_mod, "_run_clamav_scan", side_effect=_record):
+            await _apply_completion_security_gate(
+                gate_ctx,
+                user_id=1,
+                torrent_hash="h" * 40,
+                name="Movie.mkv",
+                media_path="/tmp/foo",
+            )
+        assert calls == [1]
+        assert _dl_mod._clamav_consecutive_errors == 3

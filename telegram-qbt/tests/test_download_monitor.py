@@ -78,8 +78,8 @@ def test_batch_stop_keyboard_uses_namespaced_callback_data() -> None:
     assert [[button.text for button in row] for row in keyboard] == [["🏠 Home", "🛑 Stop All Downloads"]]
     callback_data = keyboard[0][1].callback_data
     assert callback_data is not None
-    assert callback_data.startswith("stop:all:")
-    assert len(callback_data.encode("utf-8")) <= 64
+    assert callback_data.startswith("stop:all:")  # pyright: ignore[reportAttributeAccessIssue]
+    assert len(callback_data.encode("utf-8")) <= 64  # pyright: ignore[reportAttributeAccessIssue]
     assert callback_data == "stop:all:hash-a,hash-b,hash-c"
 
 
@@ -145,13 +145,13 @@ async def test_batch_monitor_loop_edits_single_message_and_cleans_up() -> None:
         },
     )
 
-    start_batch_monitor(ctx, 7, 12345)
+    start_batch_monitor(ctx, 7, 12345)  # pyright: ignore[reportArgumentType]
     await asyncio.sleep(0.03)
 
     assert len(bot.sent_messages) == 1
     msg = bot.sent_messages[0]
     assert "Alpha S01E01 1080p" in msg.text
-    assert "stop:all:hash-a" == msg.reply_markup.inline_keyboard[0][1].callback_data
+    assert "stop:all:hash-a" == msg.reply_markup.inline_keyboard[0][1].callback_data  # pyright: ignore[reportOptionalMemberAccess]
 
     qbt_state["progress"] = 0.20
     qbt_state["eta"] = 90

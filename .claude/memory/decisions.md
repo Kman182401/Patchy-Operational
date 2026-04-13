@@ -1,7 +1,8 @@
-# Patchy Bot — Decisions Log
+# Patchy Bot — Decisions Log (ARCHIVED 2026-04-08)
 
-Append an entry whenever a design or architectural decision is made.
-Newest entries at the top.
+> **FROZEN ARCHIVE — do not append.** New decisions go in the live auto-memory
+> store at `~/.claude/projects/-home-karson-Patchy-Bot/memory/` as `project_*`
+> entries. See this directory's `MEMORY.md` for the archive rationale.
 
 ## Entry Format
 ```
