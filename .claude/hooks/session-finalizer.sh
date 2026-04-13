@@ -56,6 +56,10 @@ ${BASH_CMD_LIST:-  (none recorded)}
       /^---$/ && !done { print; print entry; done=1; next }
       { print }
     ' "$SESSIONS_FILE" > "$TEMP" 2>/dev/null && mv "$TEMP" "$SESSIONS_FILE"
+
+    # Cap sessions.md: keep only the most recent 50 ## entries (prevents unbounded growth)
+    TEMP2=$(mktemp)
+    awk 'BEGIN{c=0} /^## / {c++} c<=50 {print}' "$SESSIONS_FILE" > "$TEMP2" 2>/dev/null && mv "$TEMP2" "$SESSIONS_FILE"
   fi
 
   # Rotate buffer

@@ -1,0 +1,29 @@
+{
+  "items": [
+    {
+      "type": "file",
+      "path": "How-to-Use-This-Vault.md",
+      "title": "How to Use This Vault"
+    },
+    {
+      "type": "file",
+      "path": "Working-Context.md",
+      "title": "Working Context"
+    },
+    {
+      "type": "file",
+      "path": "00-Home/Dashboard.md",
+      "title": "Dashboard"
+    },
+    {
+      "type": "folder",
+      "path": "Inbox",
+      "title": "Inbox"
+    },
+    {
+      "type": "folder",
+      "path": "02-Work",
+      "title": "Work"
+    }
+  ]
+}

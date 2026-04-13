@@ -29,7 +29,7 @@
   },
   "respectGitignore": true,
   "alwaysThinkingEnabled": true,
-  "model": "claude-opus-4-6",
+  "model": "opus[1m]",
   "enabledPlugins": {
     "pyright-lsp@claude-plugins-official": true,
     "semgrep@claude-plugins-official": false,

@@ -1,6 +1,8 @@
 {
   "enabledCssSnippets": [
     "patchy-theme",
-    "callout-code"
-  ]
+    "callout-code",
+    "mobile-ios"
+  ],
+  "baseFontSize": 17
 }

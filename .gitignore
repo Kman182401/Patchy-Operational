@@ -62,4 +62,28 @@ node_modules/
 
 # Task files
 # tasks.json
-# tasks/ 
+# tasks/
+
+# === Obsidian vault (Patchy Ops) ===
+# Device-specific workspace state (changes constantly, causes noise)
+Patchy Ops/.obsidian/workspace.json
+Patchy Ops/.obsidian/workspace-mobile.json
+
+# Sync conflict artifacts
+Patchy Ops/.obsidian/.obsidian-sync-*
+Patchy Ops/.obsidian/sync-conflicts/
+Patchy Ops/.trash/
+
+# Plugin runtime data (device-specific, can be large)
+Patchy Ops/.obsidian/plugins/*/data.json
+
+# Cache
+Patchy Ops/.obsidian/cache
+
+# KEEP TRACKED (useful for vault reproducibility):
+# - app.json, appearance.json, core-plugins.json, core-plugins-migration.json
+# - hotkeys.json, templates.json, daily-notes.json, bookmarks.json
+# - community-plugins.json
+
+# Stale duplicate vault — leave untracked
+Patchy/

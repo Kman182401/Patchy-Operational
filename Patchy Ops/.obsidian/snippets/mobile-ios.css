@@ -1,0 +1,57 @@
+/* iOS / mobile-specific tweaks for Patchy Ops vault
+   Obsidian adds `.is-mobile` to <body> on phones and tablets. */
+
+.is-mobile body {
+  --font-text-size: 17px;
+  --line-height-normal: 1.65;
+}
+
+/* Larger, easier-to-tap checkboxes */
+.is-mobile .markdown-source-view .task-list-item-checkbox,
+.is-mobile .markdown-preview-view .task-list-item-checkbox {
+  width: 1.25em;
+  height: 1.25em;
+  margin-right: 0.5em;
+  transform: translateY(0.15em);
+}
+
+/* More breathing room between list items — easier to scan and tap */
+.is-mobile .markdown-rendered li + li,
+.is-mobile .cm-line {
+  margin-top: 0.15em;
+}
+
+/* Headings feel cramped on small screens — add breathing room */
+.is-mobile .markdown-rendered h1 { font-size: 1.7em; margin-top: 1.2em; margin-bottom: 0.4em; }
+.is-mobile .markdown-rendered h2 { font-size: 1.35em; margin-top: 1.1em; margin-bottom: 0.35em; }
+.is-mobile .markdown-rendered h3 { font-size: 1.15em; margin-top: 1em;   margin-bottom: 0.3em; }
+
+/* Softer horizontal rules on narrow screens */
+.is-mobile .markdown-rendered hr {
+  margin: 1.5em 0;
+  border: none;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+/* Give the editor content enough bottom padding so the mobile toolbar
+   never sits on top of the last line you're typing. */
+.is-mobile .markdown-source-view.mod-cm6 .cm-contentContainer {
+  padding-bottom: 40vh;
+}
+
+/* Wider tap target for internal links */
+.is-mobile a.internal-link {
+  padding: 0.1em 0.15em;
+}
+
+/* Blockquotes — a touch more left padding so callouts read clearly */
+.is-mobile .markdown-rendered blockquote {
+  padding-left: 1.2em;
+  margin-left: 0.2em;
+}
+
+/* Code blocks — stop tiny monospace on iOS */
+.is-mobile .markdown-rendered pre code,
+.is-mobile .markdown-rendered code {
+  font-size: 0.9em;
+}
