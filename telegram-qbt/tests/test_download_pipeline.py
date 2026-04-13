@@ -1575,3 +1575,94 @@ class TestMwblockCallback:
         await on_cb_mwblock(mock_ctx, data="mwblock:keep:not_a_hash", q=mock_callback_query, user_id=12345)
 
         mock_callback_query.answer.assert_called_with("Invalid hash", show_alert=True)
+
+
+# ---------------------------------------------------------------------------
+# _read_torrent_nfo — path safety + size bound + containment
+# ---------------------------------------------------------------------------
+
+
+import os as _os  # noqa: E402
+
+from patchy_bot.handlers.download import _read_torrent_nfo  # noqa: E402
+
+
+class TestReadTorrentNfo:
+    def test_reads_nfo_content(self, tmp_path) -> None:
+        media_dir = tmp_path / "media"
+        media_dir.mkdir()
+        nfo = media_dir / "info.nfo"
+        content = "Release notes here"
+        nfo.write_text(content)
+        raw_files = [{"name": "info.nfo", "size": len(content)}]
+        result = _read_torrent_nfo(raw_files, str(media_dir))
+        assert result is not None
+        assert "Release notes here" in result
+
+    def test_large_nfo_skipped(self, tmp_path) -> None:
+        media_dir = tmp_path / "media"
+        media_dir.mkdir()
+        nfo = media_dir / "huge.nfo"
+        content = "x" * 100_000  # > 50KB
+        nfo.write_text(content)
+        raw_files = [{"name": "huge.nfo", "size": len(content)}]
+        result = _read_torrent_nfo(raw_files, str(media_dir))
+        assert result is None
+
+    def test_missing_nfo_returns_none(self, tmp_path) -> None:
+        media_dir = tmp_path / "media"
+        media_dir.mkdir()
+        raw_files = [{"name": "info.nfo", "size": 100}]  # file doesn't exist on disk
+        result = _read_torrent_nfo(raw_files, str(media_dir))
+        assert result is None
+
+    def test_encoding_errors_replaced(self, tmp_path) -> None:
+        media_dir = tmp_path / "media"
+        media_dir.mkdir()
+        nfo = media_dir / "bad.nfo"
+        nfo.write_bytes(b"hello \xff\xfe world")
+        raw_files = [{"name": "bad.nfo", "size": len(b"hello \xff\xfe world")}]
+        result = _read_torrent_nfo(raw_files, str(media_dir))
+        # errors="replace" means read does not raise — we get a string back
+        assert result is not None
+        assert "hello" in result
+
+    def test_path_traversal_blocked(self, tmp_path) -> None:
+        """A raw_files entry with .. in the name must not escape media_path."""
+        media_dir = tmp_path / "media"
+        media_dir.mkdir()
+        outside = tmp_path / "secret.nfo"
+        outside.write_text("secret data")
+        raw_files = [{"name": "../secret.nfo", "size": 100}]
+        result = _read_torrent_nfo(raw_files, str(media_dir))
+        assert result is None
+
+    def test_symlink_nfo_blocked(self, tmp_path) -> None:
+        """A symlink .nfo inside media_path whose target is outside is rejected."""
+        media_dir = tmp_path / "media"
+        media_dir.mkdir()
+        secret = tmp_path / "secret.nfo"
+        secret.write_text("disable antivirus now")
+        link = media_dir / "info.nfo"
+        _os.symlink(str(secret), str(link))
+        raw_files = [{"name": "info.nfo", "size": 100}]
+        result = _read_torrent_nfo(raw_files, str(media_dir))
+        assert result is None
+
+    def test_empty_inputs(self, tmp_path) -> None:
+        assert _read_torrent_nfo([], str(tmp_path)) is None
+        assert _read_torrent_nfo([{"name": "info.nfo", "size": 100}], "") is None
+
+    def test_non_nfo_ignored(self, tmp_path) -> None:
+        media_dir = tmp_path / "media"
+        media_dir.mkdir()
+        (media_dir / "readme.txt").write_text("not an nfo")
+        raw_files = [{"name": "readme.txt", "size": 20}]
+        assert _read_torrent_nfo(raw_files, str(media_dir)) is None
+
+    def test_zero_size_nfo_skipped(self, tmp_path) -> None:
+        media_dir = tmp_path / "media"
+        media_dir.mkdir()
+        (media_dir / "info.nfo").write_text("")
+        raw_files = [{"name": "info.nfo", "size": 0}]
+        assert _read_torrent_nfo(raw_files, str(media_dir)) is None

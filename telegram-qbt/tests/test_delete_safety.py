@@ -468,3 +468,77 @@ class TestEdgeCases:
             }
         )
         assert result["disk_status"] == "deleted"
+
+
+# ---------------------------------------------------------------------------
+# _validate_safe_path unit tests (direct tests of the path guard used by
+# the infected-delete branch of _apply_completion_security_gate)
+# ---------------------------------------------------------------------------
+
+
+from patchy_bot.handlers.download import _validate_safe_path  # noqa: E402
+
+
+class TestValidateSafePath:
+    def test_path_within_allowed_root(self, tmp_path: Any) -> None:
+        root = tmp_path / "root"
+        root.mkdir()
+        target = root / "foo"
+        target.mkdir()
+        assert _validate_safe_path(str(target), [str(root)]) is True
+
+    def test_path_outside_allowed_root(self, tmp_path: Any) -> None:
+        root = tmp_path / "root"
+        root.mkdir()
+        other = tmp_path / "other"
+        other.mkdir()
+        assert _validate_safe_path(str(other), [str(root)]) is False
+
+    def test_traversal_attempt(self, tmp_path: Any) -> None:
+        root = tmp_path / "root"
+        root.mkdir()
+        escape = tmp_path / "secret"
+        escape.mkdir()
+        traversal = str(root / ".." / "secret")
+        assert _validate_safe_path(traversal, [str(root)]) is False
+
+    def test_symlink_escape(self, tmp_path: Any) -> None:
+        root = tmp_path / "root"
+        root.mkdir()
+        secret = tmp_path / "secret"
+        secret.mkdir()
+        link = root / "escape"
+        os.symlink(str(secret), str(link))
+        # Symlink resolves outside — must be rejected
+        assert _validate_safe_path(str(link), [str(root)]) is False
+
+    def test_multiple_allowed_roots(self, tmp_path: Any) -> None:
+        r1 = tmp_path / "r1"
+        r2 = tmp_path / "r2"
+        r1.mkdir()
+        r2.mkdir()
+        target = r2 / "foo"
+        target.mkdir()
+        assert _validate_safe_path(str(target), [str(r1), str(r2)]) is True
+
+    def test_nonexistent_path_but_parent_inside_root(self, tmp_path: Any) -> None:
+        """pathlib.Path.resolve() does not require existence — nonexistent paths
+        can still be validated against a root as long as the resolved path is
+        inside it."""
+        root = tmp_path / "root"
+        root.mkdir()
+        ghost = str(root / "never_existed")
+        assert _validate_safe_path(ghost, [str(root)]) is True
+
+    def test_empty_root_skipped(self, tmp_path: Any) -> None:
+        root = tmp_path / "root"
+        root.mkdir()
+        target = root / "foo"
+        target.mkdir()
+        # Empty-string roots are skipped; a valid root still passes.
+        assert _validate_safe_path(str(target), ["", str(root)]) is True
+
+    def test_all_empty_roots_reject(self, tmp_path: Any) -> None:
+        target = tmp_path / "foo"
+        target.mkdir()
+        assert _validate_safe_path(str(target), ["", ""]) is False
