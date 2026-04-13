@@ -80,6 +80,52 @@ def _torrent_file_sizes(files: list[dict[str, Any]]) -> list[int]:
     return out
 
 
+_NFO_MAX_BYTES = 50_000
+
+
+def _read_torrent_nfo(raw_files: list[dict[str, Any]], media_path: str) -> str | None:
+    """Read the first .nfo file under *media_path* for malware NFO scanning.
+
+    Returns None if no NFO file is present, the file is too large, the path is
+    outside *media_path* (symlink or traversal), or any I/O error occurs.
+    Never follows symlinks outside *media_path*.
+    """
+    if not media_path or not raw_files:
+        return None
+    from pathlib import Path
+
+    try:
+        base = Path(media_path).resolve()
+    except (OSError, RuntimeError):
+        return None
+    for row in raw_files:
+        name = str(row.get("name") or row.get("path") or "").strip()
+        if not name or not name.lower().endswith(".nfo"):
+            continue
+        try:
+            size = int(row.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        if size <= 0 or size > _NFO_MAX_BYTES:
+            continue
+        candidate = Path(media_path) / name
+        try:
+            resolved = candidate.resolve()
+        except (OSError, RuntimeError):
+            continue
+        try:
+            if not resolved.is_relative_to(base):
+                continue
+        except (AttributeError, ValueError):
+            continue
+        try:
+            with open(resolved, encoding="utf-8", errors="replace") as fh:
+                return fh.read(_NFO_MAX_BYTES)
+        except OSError:
+            continue
+    return None
+
+
 def _validate_safe_path(target: str, allowed_roots: list[str]) -> bool:
     """Return True iff *target* resolves inside one of *allowed_roots*.
 
@@ -186,12 +232,12 @@ async def _concurrent_file_scan(
         )
     except Exception:
         pass
-    reasons_text = "\n".join(f"\u2022 {_h(r)}" for r in malware_scan.reasons)
+    top_signals = sorted(malware_scan.signals, key=lambda s: s.points, reverse=True)[:5]
+    signal_lines = "\n".join(f"• <code>{_h(s.signal_id)}</code> (+{s.points}) {_h(s.detail)}" for s in top_signals)
     warn_text = (
-        "\u26a0\ufe0f <b>Security Hold</b>\n\n"
+        f"🚫 <b>Blocked</b> (Score: {malware_scan.score}/100)\n"
         f"<code>{_h(result.name)}</code>\n\n"
-        f"Suspicious content detected during download "
-        f"(risk score {malware_scan.score}/100):\n{reasons_text}\n\n"
+        f"<b>Signals:</b>\n{signal_lines}\n\n"
         "Torrent is <b>paused</b>. Choose an action:"
     )
     warn_kb = InlineKeyboardMarkup(
@@ -1519,9 +1565,18 @@ async def completion_poller_job(ctx: HandlerContext, context: ContextTypes.DEFAU
         except Exception:
             file_names = []
             file_sizes_list = []
+            raw_files = []
         if file_names:
             cat_lower = category.lower()
             mt = "episode" if cat_lower in ("tv", "shows", "tv shows") else "movie"
+            # Read NFO content (if any, ≤50KB) for danger-pattern scan.
+            nfo_text = _read_torrent_nfo(raw_files, media_path)
+            # Fetch tracker URLs for suspicious-tracker scan.
+            try:
+                tracker_rows = await asyncio.to_thread(ctx.qbt.get_torrent_trackers, torrent_hash)
+                tracker_urls = [str(t.get("url") or "") for t in (tracker_rows or [])]
+            except Exception:
+                tracker_urls = None
             completion_scan = scan_download(
                 name=name,
                 size_bytes=size,
@@ -1529,6 +1584,8 @@ async def completion_poller_job(ctx: HandlerContext, context: ContextTypes.DEFAU
                 media_type=mt,
                 files=file_names,
                 file_sizes=file_sizes_list,
+                nfo_text=nfo_text,
+                tracker_urls=tracker_urls,
             )
             if completion_scan.is_blocked:
                 try:
@@ -1541,11 +1598,14 @@ async def completion_poller_job(ctx: HandlerContext, context: ContextTypes.DEFAU
                     )
                 except Exception:
                     pass
-                reason_lines = "\n".join(f"• {_h(r)}" for r in completion_scan.reasons[:8])
+                top_signals = sorted(completion_scan.signals, key=lambda s: s.points, reverse=True)[:5]
+                signal_lines = "\n".join(
+                    f"• <code>{_h(s.signal_id)}</code> (+{s.points}) {_h(s.detail)}" for s in top_signals
+                )
                 notice = (
-                    f"⚠️ <b>Download Blocked</b>\n<code>{_h(name)}</code>\n\n"
-                    f"File-list heuristics flagged suspicious content "
-                    f"(risk score {completion_scan.score}/100).\n\n{reason_lines}"
+                    f"🚫 <b>Blocked</b> (Score: {completion_scan.score}/100)\n"
+                    f"<code>{_h(name)}</code>\n\n"
+                    f"<b>Signals:</b>\n{signal_lines}"
                 )
                 await asyncio.to_thread(ctx.store.mark_completion_notified, torrent_hash, name)
                 for uid in ctx.cfg.allowed_user_ids:
@@ -2329,10 +2389,10 @@ async def do_add_full(
                 )
             except Exception:
                 pass
-            reasons_text = "\n".join(f"• {r}" for r in malware_scan_result.reasons)
+            top_signals = sorted(malware_scan_result.signals, key=lambda s: s.points, reverse=True)[:5]
+            signal_lines = "\n".join(f"• {s.signal_id} (+{s.points}) {s.detail}" for s in top_signals)
             raise RuntimeError(
-                f"Download blocked — suspicious content detected "
-                f"(risk score {malware_scan_result.score}/100):\n{reasons_text}"
+                f"Blocked (Score: {malware_scan_result.score}/100)\n{result.name}\n\nSignals:\n{signal_lines}"
             )
 
     queued = False

@@ -2489,6 +2489,7 @@ class BotApp:
             return
 
         defaults = await asyncio.to_thread(self.store.get_defaults, user_id, self.cfg)
+        release_dates_for_scan = await self._fetch_movie_release_dates_for_scan(int(track.get("tmdb_id") or 0))
         filtered = self._apply_filters(
             raw_rows,
             media_type="movie",
@@ -2496,6 +2497,7 @@ class BotApp:
             min_size=None,
             max_size=None,
             min_quality=1080,
+            release_dates=release_dates_for_scan,
         )
         filtered = search_handler.deduplicate_results(filtered)
 
@@ -3399,6 +3401,7 @@ class BotApp:
         max_size: int | None,
         min_quality: int,
         media_type: str = "movie",
+        release_dates: dict[str, int] | None = None,
     ) -> list[dict[str, Any]]:
         """Delegation stub -- logic lives in handlers/search.py."""
         return search_handler.apply_filters(
@@ -3408,6 +3411,7 @@ class BotApp:
             max_size=max_size,
             min_quality=min_quality,
             media_type=media_type,
+            release_dates=release_dates,
         )
 
     @staticmethod
@@ -3452,6 +3456,28 @@ class BotApp:
         )
 
     # ---------- Theatrical release detection ----------
+
+    async def _fetch_movie_release_dates_for_scan(
+        self,
+        tmdb_id: int,
+    ) -> dict[str, int] | None:
+        """Fetch TMDB release_dates dict for malware pre-release scanning.
+
+        Returns ``{"theatrical": ts, "digital": ts, "physical": ts}`` (any subset)
+        or ``None`` on any failure / missing TMDB key. Wrapped in a 2-second
+        timeout so a hung TMDB call never blocks search.
+        """
+        if not tmdb_id or not self.cfg.tmdb_api_key:
+            return None
+        try:
+            dates: dict[str, int] = await asyncio.wait_for(
+                asyncio.to_thread(self.tvmeta.get_movie_release_dates, tmdb_id, self.cfg.tmdb_region),
+                timeout=2.0,
+            )
+        except Exception as exc:  # noqa: BLE001 — broad catch by design (incl. asyncio.TimeoutError)
+            LOG.warning("release_dates for tmdb_id=%s fetch failed: %s", tmdb_id, exc)
+            return None
+        return dates or None
 
     async def _detect_movie_release_status(
         self,
@@ -3600,6 +3626,7 @@ class BotApp:
         # --- Theatrical detection (movies only) ---
         # WAITING_HOME / HOME_AVAILABLE intentionally allow search — WEB-DL/screener
         # rips often appear before official digital release date.
+        scan_release_dates: dict[str, int] | None = None
         if media_hint == "movies":
             from .clients.tv_metadata import MovieReleaseStatus
 
@@ -3646,6 +3673,11 @@ class BotApp:
                     )
                 except Exception:
                     pass  # non-critical — search continues regardless
+
+            # Cache per-session release dates so the malware pre-release check can
+            # flag fake BluRay/WEB-DL tags before the actual release.
+            if det_tmdb_id:
+                scan_release_dates = await self._fetch_movie_release_dates_for_scan(int(det_tmdb_id))
         # --- End theatrical detection ---
 
         try:
@@ -3670,6 +3702,7 @@ class BotApp:
                 max_size=max_size,
                 min_quality=min_quality,
                 media_type=_mt,
+                release_dates=scan_release_dates if _mt == "movie" else None,
             )
             filtered = self._deduplicate_results(filtered)
             ranked = self._sort_rows(filtered, key=sort_key or "seeds", order=order or "desc")

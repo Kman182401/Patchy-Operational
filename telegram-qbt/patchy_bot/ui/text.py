@@ -4,7 +4,26 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..malware import ScanResult
 from ..utils import _h, _relative_time, now_ts
+
+
+def format_risk_badge(scan: ScanResult | None) -> str:
+    """Return a one-line HTML risk badge for a malware ``ScanResult``.
+
+    Returns an empty string for clean results (tier == "clean") or when ``scan``
+    is None. Caller is responsible for HTML-escape safety — dynamic strings are
+    already passed through ``_h()``.
+    """
+    if scan is None or scan.tier == "clean":
+        return ""
+    icon = "⚠️" if scan.tier == "caution" else "🚫"
+    badge = f"{icon} <b>Risk:</b> {scan.score}/100"
+    if scan.signals:
+        top = max(scan.signals, key=lambda s: s.points)
+        badge += f" — {_h(top.detail)}"
+    return badge
+
 
 # ---------------------------------------------------------------------------
 # Tracked-list shared helpers (TV shows + Movies)

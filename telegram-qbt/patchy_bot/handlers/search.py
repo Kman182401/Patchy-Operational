@@ -34,6 +34,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from ..malware import scan_search_result
 from ..quality import score_torrent
+from ..ui.text import format_risk_badge
 from ..utils import _h, human_size, quality_tier
 from .download import is_direct_torrent_link
 
@@ -90,6 +91,7 @@ def apply_filters(
     max_size: int | None,
     min_quality: int,
     media_type: str = "movie",
+    release_dates: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
     """Filter search result rows by seeds, size, quality, and source availability."""
     out: list[dict[str, Any]] = []
@@ -155,12 +157,16 @@ def apply_filters(
             continue
 
         # Malware / fake-content heuristic filter (3-tier: clean / caution / blocked)
+        leechers_val = int(r.get("nbLeechers") or r.get("leechers") or -1)
         malware_scan = scan_search_result(
             name=name,
             size_bytes=size,
             quality_tier=quality_tier(name),
             media_type=media_type,
             uploader=uploader,
+            release_dates=release_dates,
+            seeds=seeds,
+            leechers=leechers_val,
         )
         tier = getattr(malware_scan, "tier", None)
         if tier == "blocked" or (tier is None and malware_scan.is_blocked):
@@ -586,6 +592,32 @@ def render_page(
         lines.append(
             f"   {trash_tag}🌱 <b>{seeds}</b> seeds | 📡 {_h(source_type) if source_type else 'Unknown'} | 🎞 <code>{_h(short_qlbl)}</code> | 📦 <code>{size}</code> | 🌐 <i>{_h(site)}</i>"
         )
+        # Risk badge — prefer the cached scan attached by apply_filters (which had
+        # access to release_dates/TMDB context). Fall back to a fresh scan only when
+        # the marker is missing (e.g., DB-persisted rows after page navigation, where
+        # the transient ScanResult object is stripped during JSON round-trip).
+        try:
+            _badge_scan = row.get("_malware_scan")
+            if _badge_scan is None:
+                _media_type = "episode" if media_hint == "tv" else "movie"
+                _row_size = int(row.get("size") or 0)
+                _row_seeds = int(row.get("seeds") or 0)
+                _row_leech = int(row.get("leechers") or 0)
+                _row_uploader = str(row.get("uploader") or "").strip() or None
+                _badge_scan = scan_search_result(
+                    name=name,
+                    size_bytes=_row_size,
+                    quality_tier=quality_tier(name),
+                    media_type=_media_type,
+                    uploader=_row_uploader,
+                    seeds=_row_seeds,
+                    leechers=_row_leech,
+                )
+            _badge = format_risk_badge(_badge_scan)
+            if _badge:
+                lines.append(f"   {_badge}")
+        except Exception:
+            pass  # badge is non-critical
         lines.append("")
 
     # Show trash-source legend if any result on this page has the ⚠️ flag

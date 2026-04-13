@@ -261,7 +261,7 @@ class TestDoAddTimeouts:
 
         monkeypatch.setattr("patchy_bot.handlers.download.resolve_hash_by_name", _fake_resolve)
 
-        with pytest.raises(RuntimeError, match="suspicious content detected"):
+        with pytest.raises(RuntimeError, match="Blocked"):
             await do_add_full(mock_ctx, 12345, search_id, 1, "movies")
 
         mock_ctx.qbt.delete_torrent.assert_called_once_with("a" * 40, delete_files=True)
@@ -1428,7 +1428,7 @@ class TestDoAddBackground:
         # Should send NEW message with security warning (not edit interim)
         bot_mock.send_message.assert_called_once()
         call_text = bot_mock.send_message.call_args[1]["text"]
-        assert "Security Hold" in call_text
+        assert "Blocked" in call_text
 
     @pytest.mark.asyncio
     async def test_clean_scan_starts_queue(self, mock_ctx, monkeypatch):
