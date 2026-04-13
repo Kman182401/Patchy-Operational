@@ -1,6 +1,10 @@
 ---
 name: test-agent
 description: "Use for writing tests, running pytest, debugging test failures, improving coverage, or working with test infrastructure. Best fit when the task mentions tests, testing, coverage, assertions, mocking, lint/type verification, or pytest."
+model: opus
+effort: medium
+tools: Read, Write, Edit, Bash, Grep, Glob
+memory: project
 color: yellow
 ---
 

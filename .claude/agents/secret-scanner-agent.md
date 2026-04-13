@@ -1,8 +1,9 @@
 ---
 name: secret-scanner-agent
 description: "MUST be used for secrets scanning, credential detection, API key leaks, hardcoded passwords, token exposure, .env safety, trufflehog, ggshield, or any task involving detecting exposed secrets in source code or git history."
-tools: Bash, Read
 model: opus
+effort: high
+tools: Read, Bash, Grep, Glob
 memory: project
 color: red
 ---

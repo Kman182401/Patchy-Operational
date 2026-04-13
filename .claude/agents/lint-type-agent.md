@@ -1,8 +1,9 @@
 ---
 name: lint-type-agent
 description: "MUST be used for linting, type checking, code quality analysis, Ruff, mypy, style violations, unreachable code, type mismatches, or any static quality gate before merging or deploying code changes."
-tools: Bash, Read
 model: opus
+effort: high
+tools: Read, Bash, Grep, Glob
 memory: project
 color: yellow
 ---

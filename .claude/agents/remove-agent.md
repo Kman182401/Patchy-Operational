@@ -1,6 +1,10 @@
 ---
 name: remove-agent
 description: "Use for the media removal/deletion system, Plex cleanup after deletion, remove-runner behavior, path-safety validation, browse-library UI, or the `remove_jobs` table. Best fit when the task mentions removing, deleting, cleanup, trash, path safety, or browsing the media library."
+model: opus
+effort: high
+tools: Read, Write, Edit, Bash, Grep, Glob
+memory: project
 color: red
 ---
 

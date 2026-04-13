@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import secrets
 import shlex
 from typing import TYPE_CHECKING, Any
@@ -849,6 +850,99 @@ async def cmd_speed(bot: Any, update: Update, context: ContextTypes.DEFAULT_TYPE
             await msg.reply_text(report, parse_mode=_PM)
         except Exception as e:
             await msg.reply_text(f"Speed check failed: {_h(str(e))}", parse_mode=_PM)
+
+
+_STAGE_LABELS: dict[str, str] = {
+    "search": "🔍 Search",
+    "pre_add": "📋 Pre-add",
+    "download": "📥 Download",
+}
+_TIER_LABELS: dict[str, str] = {
+    "blocked": "🚫 Blocked",
+    "caution": "⚠️ Caution",
+    "clean": "✅ Clean",
+    "unknown": "• Unknown",
+}
+
+
+def _parse_malware_stats_range(args: list[str]) -> tuple[int | None, str]:
+    """Parse '7d', '30d', '90d' or empty → (since_ts, label)."""
+    if not args:
+        return None, "all time"
+    raw = args[0].strip().lower()
+    match = re.match(r"^(\d+)d$", raw)
+    if match:
+        days = max(1, min(3650, int(match.group(1))))
+        return now_ts() - days * 86400, f"last {days} days"
+    return None, "all time"
+
+
+async def cmd_malware_stats(bot: Any, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /malware_stats — show malware scan statistics.
+
+    Optional trailing arg: ``7d``/``30d``/``90d`` to filter by time window.
+    """
+    if not bot.is_allowed(update):
+        await bot.deny(update)
+        return
+    msg = update.effective_message
+    if msg is None:
+        return
+    since_ts, label = _parse_malware_stats_range(context.args or [])
+    try:
+        stats = await asyncio.to_thread(bot._ctx.store.get_malware_stats, since_ts=since_ts)
+    except Exception:
+        LOG.warning("Malware stats query failed", exc_info=True)
+        await msg.reply_text("Malware stats query failed.", parse_mode=_PM)
+        return
+
+    total = int(stats.get("total_blocks") or 0)
+    if total == 0:
+        await msg.reply_text(
+            f"📊 <b>Malware Scan Statistics</b> ({_h(label)})\n\nNo malware blocks recorded.",
+            parse_mode=_PM,
+        )
+        return
+
+    lines: list[str] = [f"📊 <b>Malware Scan Statistics</b> ({_h(label)})\n"]
+    lines.append(f"Total blocks: <b>{total}</b>")
+
+    by_stage = stats.get("by_stage") or {}
+    if by_stage:
+        lines.append("\n<b>By stage:</b>")
+        for key in ("search", "pre_add", "download"):
+            if key in by_stage:
+                lines.append(f"  {_STAGE_LABELS[key]}: {int(by_stage[key])}")
+        for key, count in sorted(by_stage.items()):
+            if key not in _STAGE_LABELS:
+                lines.append(f"  • {_h(str(key))}: {int(count)}")
+
+    by_tier = stats.get("by_tier") or {}
+    if by_tier:
+        lines.append("\n<b>By risk tier:</b>")
+        for key in ("blocked", "caution", "clean", "unknown"):
+            if key in by_tier:
+                lines.append(f"  {_TIER_LABELS[key]}: {int(by_tier[key])}")
+
+    top_signals = stats.get("top_signals") or []
+    if top_signals:
+        lines.append("\n<b>Top signals:</b>")
+        for i, (sid, count) in enumerate(top_signals[:5], start=1):
+            lines.append(f"  {i}. <code>{_h(str(sid))}</code> — {int(count)} hits")
+
+    recent = stats.get("recent") or []
+    if recent:
+        lines.append("\n<b>Recent blocks:</b>")
+        for row in recent[:5]:
+            name = str(row.get("torrent_name") or "")
+            if len(name) > 40:
+                name = name[:37] + "..."
+            score = row.get("risk_score")
+            stage = str(row.get("stage") or "")
+            score_txt = f"score: {int(score)}" if score is not None else "score: n/a"
+            lines.append(f"  • {_h(name)} ({score_txt}, {_h(stage)})")
+
+    await msg.reply_text("\n".join(lines), parse_mode=_PM)
 
 
 async def cmd_unlock(bot: Any, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

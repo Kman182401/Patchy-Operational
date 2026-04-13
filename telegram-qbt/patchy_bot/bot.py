@@ -186,6 +186,7 @@ class BotApp:
     async def _post_init(self, app: Application) -> None:
         commands = [
             BotCommand("start", "Open command center"),
+            BotCommand("malware_stats", "Show malware scan statistics"),
         ]
         try:
             await app.bot.delete_my_commands()
@@ -2527,6 +2528,7 @@ class BotApp:
                     _block_hash = torrent_hash or str(row.get("hash") or row.get("fileHash") or row.get("name") or "")
                     _block_name = str(row.get("name") or "")
                     _block_signals = download_handler._serialize_signals(malware_scan)
+                    _block_user_id = int(track.get("user_id") or 0) or None
                     await asyncio.to_thread(
                         lambda: self.store.log_malware_block(
                             _block_hash,
@@ -2536,6 +2538,7 @@ class BotApp:
                             risk_score=malware_scan.score,
                             tier=malware_scan.tier,
                             signals=_block_signals,
+                            user_id=_block_user_id,
                         )
                     )
                 except Exception:
@@ -4730,6 +4733,9 @@ class BotApp:
     async def cmd_speed(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await commands_handler.cmd_speed(self, update, context)
 
+    async def cmd_malware_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await commands_handler.cmd_malware_stats(self, update, context)
+
     async def cmd_unlock(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await commands_handler.cmd_unlock(self, update, context)
 
@@ -5542,6 +5548,7 @@ class BotApp:
         app.add_handler(CommandHandler("profile", self.cmd_profile))
         app.add_handler(CommandHandler("active", self.cmd_active))
         app.add_handler(CommandHandler("plugins", self.cmd_plugins))
+        app.add_handler(CommandHandler("malware_stats", self.cmd_malware_stats))
         app.add_handler(CommandHandler("unlock", self.cmd_unlock))
         app.add_handler(CommandHandler("logout", self.cmd_logout))
 

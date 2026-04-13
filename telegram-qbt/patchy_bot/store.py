@@ -244,7 +244,8 @@ class Store:
                     torrent_name TEXT NOT NULL,
                     stage        TEXT NOT NULL CHECK(stage IN ('search', 'download')),
                     reasons      TEXT NOT NULL,
-                    blocked_at   INTEGER NOT NULL
+                    blocked_at   INTEGER NOT NULL,
+                    user_id      INTEGER
                 );
                 CREATE INDEX IF NOT EXISTS idx_malware_hash ON malware_scan_log(torrent_hash);
                 CREATE INDEX IF NOT EXISTS idx_malware_blocked_at ON malware_scan_log(blocked_at);
@@ -394,6 +395,10 @@ class Store:
             conn.execute("ALTER TABLE malware_scan_log ADD COLUMN tier TEXT")
         if "signals_json" not in malware_cols:
             conn.execute("ALTER TABLE malware_scan_log ADD COLUMN signals_json TEXT")
+        if "user_id" not in malware_cols:
+            conn.execute("ALTER TABLE malware_scan_log ADD COLUMN user_id INTEGER")
+        # Unconditional idempotent index for per-user malware lookups.
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_malware_user ON malware_scan_log(user_id)")
         # Detect whether the CHECK constraint already includes 'pre_add'; if not, rebuild the table.
         malware_sql_row = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='malware_scan_log'"
@@ -420,19 +425,21 @@ class Store:
                         blocked_at   INTEGER NOT NULL,
                         risk_score   INTEGER,
                         tier         TEXT,
-                        signals_json TEXT
+                        signals_json TEXT,
+                        user_id      INTEGER
                     )"""
                 )
                 conn.execute(
                     "INSERT INTO malware_scan_log_new"
-                    "(id, torrent_hash, torrent_name, stage, reasons, blocked_at, risk_score, tier, signals_json) "
-                    "SELECT id, torrent_hash, torrent_name, stage, reasons, blocked_at, risk_score, tier, signals_json "
+                    "(id, torrent_hash, torrent_name, stage, reasons, blocked_at, risk_score, tier, signals_json, user_id) "
+                    "SELECT id, torrent_hash, torrent_name, stage, reasons, blocked_at, risk_score, tier, signals_json, user_id "
                     "FROM malware_scan_log"
                 )
                 conn.execute("DROP TABLE malware_scan_log")
                 conn.execute("ALTER TABLE malware_scan_log_new RENAME TO malware_scan_log")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_malware_hash ON malware_scan_log(torrent_hash)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_malware_blocked_at ON malware_scan_log(blocked_at)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_malware_user ON malware_scan_log(user_id)")
                 conn.execute("COMMIT")
             except Exception:
                 conn.execute("ROLLBACK")
@@ -589,6 +596,7 @@ class Store:
         risk_score: int | None = None,
         tier: str | None = None,
         signals: list[dict] | None = None,
+        user_id: int | None = None,
     ) -> None:
         """Log a blocked torrent to the malware scan log."""
         signals_json = json.dumps(signals) if signals else None
@@ -598,8 +606,8 @@ class Store:
             conn = self._conn
             conn.execute(
                 "INSERT INTO malware_scan_log"
-                "(torrent_hash, torrent_name, stage, reasons, blocked_at, risk_score, tier, signals_json) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                "(torrent_hash, torrent_name, stage, reasons, blocked_at, risk_score, tier, signals_json, user_id) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     torrent_hash,
                     torrent_name,
@@ -609,9 +617,132 @@ class Store:
                     risk_score,
                     tier,
                     signals_json,
+                    user_id,
                 ),
             )
             conn.commit()
+
+    def get_malware_stats(
+        self,
+        *,
+        since_ts: int | None = None,
+        stage: str | None = None,
+    ) -> dict[str, Any]:
+        """Aggregate malware scan statistics.
+
+        Returns keys: total_blocks (int), by_stage (dict[str,int]),
+        by_tier (dict[str,int], NULL tier bucketed as 'unknown'),
+        top_signals (list[tuple[str,int]] max 10, sorted desc),
+        recent (list[dict] max 10, ordered by blocked_at DESC).
+        """
+        base_clauses: list[str] = []
+        base_params: list[Any] = []
+        if since_ts is not None:
+            base_clauses.append("blocked_at >= ?")
+            base_params.append(int(since_ts))
+        if stage is not None:
+            base_clauses.append("stage = ?")
+            base_params.append(stage)
+        base_where = (" WHERE " + " AND ".join(base_clauses)) if base_clauses else ""
+
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
+
+            total_row = conn.execute(
+                f"SELECT COUNT(*) FROM malware_scan_log{base_where}",
+                tuple(base_params),
+            ).fetchone()
+            total_blocks = int(total_row[0]) if total_row else 0
+
+            by_stage: dict[str, int] = {}
+            for row in conn.execute(
+                f"SELECT stage, COUNT(*) FROM malware_scan_log{base_where} GROUP BY stage",
+                tuple(base_params),
+            ).fetchall():
+                by_stage[str(row[0])] = int(row[1])
+
+            by_tier: dict[str, int] = {}
+            for row in conn.execute(
+                f"SELECT tier, COUNT(*) FROM malware_scan_log{base_where} GROUP BY tier",
+                tuple(base_params),
+            ).fetchall():
+                key = row[0] if row[0] is not None else "unknown"
+                by_tier[str(key)] = int(row[1])
+
+            # top_signals — signals_json IS NOT NULL must be merged with base filters.
+            # Hard cap at 5000 most-recent rows so an all-time query on a large
+            # backlog cannot hold self._lock long enough to starve writers via
+            # an unbounded JSON walk. Aggregates are approximate past the cap.
+            signals_clauses = list(base_clauses)
+            signals_clauses.append("signals_json IS NOT NULL")
+            signals_where = " WHERE " + " AND ".join(signals_clauses)
+            signal_counts: dict[str, int] = {}
+            for row in conn.execute(
+                f"SELECT signals_json FROM malware_scan_log{signals_where} ORDER BY blocked_at DESC LIMIT 5000",
+                tuple(base_params),
+            ).fetchall():
+                raw = row[0]
+                try:
+                    parsed = json.loads(raw)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    continue
+                if not isinstance(parsed, list):
+                    continue
+                for sig in parsed:
+                    if not isinstance(sig, dict):
+                        continue
+                    sid = sig.get("signal_id")
+                    if sid is None:
+                        continue
+                    key = str(sid)
+                    signal_counts[key] = signal_counts.get(key, 0) + 1
+            top_signals: list[tuple[str, int]] = sorted(signal_counts.items(), key=lambda kv: kv[1], reverse=True)[:10]
+
+            recent: list[dict[str, Any]] = [
+                dict(row)
+                for row in conn.execute(
+                    f"SELECT * FROM malware_scan_log{base_where} ORDER BY blocked_at DESC LIMIT 10",
+                    tuple(base_params),
+                ).fetchall()
+            ]
+
+        return {
+            "total_blocks": total_blocks,
+            "by_stage": by_stage,
+            "by_tier": by_tier,
+            "top_signals": top_signals,
+            "recent": recent,
+        }
+
+    def get_malware_block_count(self, *, since_ts: int | None = None) -> int:
+        """Quick count of malware blocks since a timestamp (or all-time)."""
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
+            if since_ts is None:
+                row = conn.execute("SELECT COUNT(*) FROM malware_scan_log").fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM malware_scan_log WHERE blocked_at >= ?",
+                    (int(since_ts),),
+                ).fetchone()
+        return int(row[0]) if row else 0
+
+    def get_user_malware_blocks(self, user_id: int, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Return recent malware_scan_log rows for a specific user_id."""
+        limit = max(1, int(limit))
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Store is closed")
+            conn = self._conn
+            rows = conn.execute(
+                "SELECT * FROM malware_scan_log WHERE user_id = ? ORDER BY blocked_at DESC LIMIT ?",
+                (int(user_id), limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def cleanup_old_health_events(self, retention_days: int = 30) -> int:
         """Delete health events older than retention_days. Return count deleted.

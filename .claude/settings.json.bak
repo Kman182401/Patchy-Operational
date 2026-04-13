@@ -18,13 +18,7 @@
     "deny": [
       "Read(./.env)",
       "Read(./.env.*)",
-      "Read(./**/.env)",
-      "Read(./**/.env.*)",
-      "Read(/home/karson/Patchy_Bot/.env)",
-      "Read(/home/karson/Patchy_Bot/**/.env)",
-      "Read(/home/karson/Patchy_Bot/**/.env.*)",
-      "Read(./secrets/**)",
-      "Read(/home/karson/Patchy_Bot/secrets/**)"
+      "Read(./secrets/**)"
     ]
   },
   "respectGitignore": true,
@@ -38,6 +32,17 @@
     "chrome-devtools-mcp@claude-plugins-official": false
   },
   "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/karson/Patchy_Bot/.claude/hooks/session-start-context.sh"
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Bash",

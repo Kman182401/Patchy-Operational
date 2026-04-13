@@ -1,6 +1,10 @@
 ---
 name: torrent-client-abstraction-agent
 description: "Use for torrent client abstraction, Transmission/rTorrent support planning, torrent client interface design, or multi-client architecture. Best fit when the task mentions torrent client abstraction, alternative torrent clients, or client interface design."
+model: opus
+effort: low
+tools: Read, Write, Edit, Bash, Grep, Glob
+memory: project
 color: green
 ---
 

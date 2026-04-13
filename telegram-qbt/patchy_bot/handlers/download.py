@@ -117,6 +117,13 @@ _DAILY_CLEANUP_INTERVAL = 86400
 _last_daily_cleanup_ts: int = 0
 _daily_cleanup_lock: asyncio.Lock = asyncio.Lock()
 
+# Weekly malware-digest runner. Initialized to bot start time so the first
+# digest fires ~7 days AFTER the bot comes up rather than immediately on the
+# first poller tick.
+_DIGEST_INTERVAL = 7 * 86400
+_last_digest_ts: int = int(time.time())
+_digest_lock: asyncio.Lock = asyncio.Lock()
+
 
 @dataclass(frozen=True, slots=True)
 class CompletionSecurityResult:
@@ -306,6 +313,7 @@ async def _concurrent_file_scan(
             risk_score=malware_scan.score,
             tier=malware_scan.tier,
             signals=_serialize_signals(malware_scan),
+            user_id=user_id,
         )
     except Exception:
         pass
@@ -611,12 +619,18 @@ async def _apply_completion_security_gate(
         )
 
     try:
+        _log_hash = torrent_hash
+        _log_name = name
+        _log_reasons = reasons
+        _log_user_id = user_id
         await asyncio.to_thread(
-            ctx.store.log_malware_block,
-            torrent_hash,
-            name,
-            "download",
-            reasons,
+            lambda: ctx.store.log_malware_block(
+                _log_hash,
+                _log_name,
+                "download",
+                _log_reasons,
+                user_id=_log_user_id,
+            )
         )
     except Exception:
         LOG.debug("Failed to log malware block", exc_info=True)
@@ -1726,11 +1740,64 @@ async def _maybe_run_daily_cleanups(ctx: HandlerContext) -> None:
         LOG.debug("Daily cleanup failed", exc_info=True)
 
 
+async def _maybe_send_malware_digest(ctx: HandlerContext) -> None:
+    """Send weekly malware digest to allowed users when blocks occurred.
+
+    Scheduling mutation is serialized under ``_digest_lock``; Telegram sends
+    happen outside the lock so a slow network call cannot wedge the next tick.
+    Silently no-ops when there are zero blocks in the window — empty digests
+    are noise. Runs alongside ``_maybe_run_daily_cleanups`` from the
+    completion poller tick.
+    """
+    global _last_digest_ts
+    async with _digest_lock:
+        now = int(time.time())
+        if now - _last_digest_ts < _DIGEST_INTERVAL:
+            return
+        _last_digest_ts = now
+
+    since = now - _DIGEST_INTERVAL
+    try:
+        stats = await asyncio.to_thread(ctx.store.get_malware_stats, since_ts=since)
+    except Exception:
+        LOG.debug("Weekly digest: failed to get stats", exc_info=True)
+        return
+
+    total = int(stats.get("total_blocks") or 0)
+    if total == 0:
+        return
+
+    lines: list[str] = ["📊 <b>Weekly Malware Digest</b>\n"]
+    lines.append(f"Blocked: <b>{total}</b> torrents this week")
+
+    by_stage = stats.get("by_stage") or {}
+    if by_stage:
+        parts = [f"{_h(str(s))}: {int(c)}" for s, c in sorted(by_stage.items())]
+        lines.append(f"By stage: {', '.join(parts)}")
+
+    top_signals = stats.get("top_signals") or []
+    if top_signals:
+        lines.append("\n<b>Top signals:</b>")
+        for sid, count in top_signals[:3]:
+            lines.append(f"  • <code>{_h(str(sid))}</code> — {int(count)}")
+
+    msg = "\n".join(lines)
+    app = ctx.app
+    if app is None:
+        return
+    for uid in ctx.cfg.allowed_user_ids or []:
+        try:
+            await app.bot.send_message(chat_id=uid, text=msg, parse_mode="HTML")
+        except Exception:
+            LOG.debug("Weekly digest: failed to send to user %s", uid, exc_info=True)
+
+
 async def completion_poller_job(ctx: HandlerContext, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Periodic job that checks ALL torrents for completions missed by the live monitor."""
     if not ctx.app:
         return
     await _maybe_run_daily_cleanups(ctx)
+    await _maybe_send_malware_digest(ctx)
     try:
         torrents = await asyncio.to_thread(ctx.qbt.list_torrents, filter_name="completed", limit=200)
     except Exception:
@@ -1805,15 +1872,23 @@ async def completion_poller_job(ctx: HandlerContext, context: ContextTypes.DEFAU
                 except Exception:
                     LOG.warning("Failed to delete blocked torrent at completion: %s", torrent_hash, exc_info=True)
                 try:
+                    _cp_hash = torrent_hash
+                    _cp_name = name
+                    _cp_reasons = completion_scan.reasons
+                    _cp_score = completion_scan.score
+                    _cp_tier = completion_scan.tier
+                    _cp_signals = _serialize_signals(completion_scan)
                     await asyncio.to_thread(
-                        ctx.store.log_malware_block,
-                        torrent_hash,
-                        name,
-                        "download",
-                        completion_scan.reasons,
-                        risk_score=completion_scan.score,
-                        tier=completion_scan.tier,
-                        signals=_serialize_signals(completion_scan),
+                        lambda: ctx.store.log_malware_block(
+                            _cp_hash,
+                            _cp_name,
+                            "download",
+                            _cp_reasons,
+                            risk_score=_cp_score,
+                            tier=_cp_tier,
+                            signals=_cp_signals,
+                            user_id=0,
+                        )
                     )
                 except Exception:
                     pass
@@ -2324,6 +2399,7 @@ async def do_add(
                 risk_score=malware_scan.score,
                 tier=malware_scan.tier,
                 signals=_serialize_signals(malware_scan),
+                user_id=user_id,
             )
         except Exception:
             pass  # logging failure must not block the user response
@@ -2630,6 +2706,7 @@ async def do_add_full(
                     risk_score=malware_scan_result.score,
                     tier=malware_scan_result.tier,
                     signals=_serialize_signals(malware_scan_result),
+                    user_id=user_id,
                 )
             except Exception:
                 pass

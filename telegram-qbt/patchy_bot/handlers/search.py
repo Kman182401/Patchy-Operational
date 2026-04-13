@@ -194,6 +194,7 @@ def apply_filters(
                         risk_score=malware_scan.score,
                         tier=malware_scan.tier,
                         signals=_serialize_signals(malware_scan),
+                        user_id=None,
                     )
                     _search_block_budget -= 1
                 except Exception:

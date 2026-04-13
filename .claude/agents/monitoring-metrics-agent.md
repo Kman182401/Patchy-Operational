@@ -1,6 +1,10 @@
 ---
 name: monitoring-metrics-agent
 description: "Use for health monitoring, alerting, log analysis, service uptime tracking, error rate detection, or performance baseline measurement. Best fit when the task mentions monitoring, health checks, alerting, log parsing, or service metrics."
+model: opus
+effort: low
+tools: Read, Bash, Grep, Glob
+memory: project
 color: yellow
 ---
 

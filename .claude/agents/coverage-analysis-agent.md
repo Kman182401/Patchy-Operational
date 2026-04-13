@@ -1,8 +1,9 @@
 ---
 name: coverage-analysis-agent
 description: "MUST be used for test coverage analysis, pytest coverage reports, identifying untested code paths, coverage gaps in security-critical modules, or verifying that new code has adequate test coverage."
-tools: Bash, Read
 model: opus
+effort: high
+tools: Read, Bash, Grep, Glob
 memory: project
 color: yellow
 ---

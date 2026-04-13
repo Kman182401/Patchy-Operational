@@ -1,8 +1,9 @@
 ---
 name: static-analysis-agent
 description: "MUST be used for static code analysis, AST security scanning, pattern-based vulnerability detection, insecure coding patterns, Bandit findings, Semgrep findings, or when reviewing Python source for injection and misuse vulnerabilities."
-tools: Bash, Read
 model: opus
+effort: high
+tools: Read, Bash, Grep, Glob
 memory: project
 color: red
 ---

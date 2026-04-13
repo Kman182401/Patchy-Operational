@@ -1,8 +1,9 @@
 ---
 name: security-scan-orchestrator
 description: "MUST be used for full security scans, running all security tools, comprehensive vulnerability assessment, security scan pipeline, pre-release security checks, or when told to 'run all security checks', 'full security scan', or 'security audit the codebase'."
-tools: Bash, Read
 model: opus
+effort: high
+tools: Read, Bash, Grep, Glob
 memory: project
 color: red
 ---

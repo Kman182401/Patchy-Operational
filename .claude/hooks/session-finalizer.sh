@@ -48,12 +48,15 @@ ${BASH_CMD_LIST:-  (none recorded)}
 ---
 "
 
-  # Prepend entry after the header block (after the first --- line)
-  TEMP=$(mktemp)
-  awk -v entry="$ENTRY" '
-    /^---$/ && !done { print; print entry; done=1; next }
-    { print }
-  ' "$SESSIONS_FILE" > "$TEMP" 2>/dev/null && mv "$TEMP" "$SESSIONS_FILE"
+  # Prepend entry after header — only if sessions.md still exists.
+  # (File was retired 2026-04-13; auto-memory is canonical now.)
+  if [ -f "$SESSIONS_FILE" ]; then
+    TEMP=$(mktemp)
+    awk -v entry="$ENTRY" '
+      /^---$/ && !done { print; print entry; done=1; next }
+      { print }
+    ' "$SESSIONS_FILE" > "$TEMP" 2>/dev/null && mv "$TEMP" "$SESSIONS_FILE"
+  fi
 
   # Rotate buffer
   ARCHIVE="${BUFFER%.jsonl}-${DATE_STAMP}.jsonl"

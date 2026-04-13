@@ -240,3 +240,238 @@ class TestMalwareScanLogEnhanced:
         assert roundtripped[0]["signal_id"] == "kw.cam"
         assert roundtripped[2]["points"] == 15
         s.close()
+
+
+# ---------------------------------------------------------------------------
+# Session 5: malware stats aggregation queries
+# ---------------------------------------------------------------------------
+
+
+class TestMalwareStats:
+    """Session 5: get_malware_stats, get_malware_block_count, get_user_malware_blocks."""
+
+    def test_get_malware_stats_empty(self) -> None:
+        """Empty store → zero totals, empty dicts/lists."""
+        s = Store(":memory:")
+        stats = s.get_malware_stats()
+        assert stats["total_blocks"] == 0
+        assert stats["by_stage"] == {}
+        assert stats["by_tier"] == {}
+        assert stats["top_signals"] == []
+        assert stats["recent"] == []
+        s.close()
+
+    def test_get_malware_stats_with_data(self) -> None:
+        """3 heterogeneous blocks → correct totals, counts, ordered recent."""
+        s = Store(":memory:")
+        sig_a = [
+            {"signal_id": "ext.executable", "points": 100, "detail": "x"},
+            {"signal_id": "fname.suspicious", "points": 25, "detail": "y"},
+        ]
+        sig_b = [{"signal_id": "kw.codec", "points": 20, "detail": "codec"}]
+        sig_c = [{"signal_id": "uploader.anon", "points": 15, "detail": "anon"}]
+        s.log_malware_block(
+            "a" * 40,
+            "First.Movie.mkv",
+            "search",
+            ["r1"],
+            risk_score=90,
+            tier="blocked",
+            signals=sig_a,
+        )
+        s.log_malware_block(
+            "b" * 40,
+            "Second.Movie.mkv",
+            "download",
+            ["r2"],
+            risk_score=55,
+            tier="caution",
+            signals=sig_b,
+        )
+        s.log_malware_block(
+            "c" * 40,
+            "Third.Movie.mkv",
+            "pre_add",
+            ["r3"],
+            risk_score=30,
+            tier="clean",
+            signals=sig_c,
+        )
+
+        stats = s.get_malware_stats()
+        assert stats["total_blocks"] == 3
+        assert stats["by_stage"] == {"search": 1, "download": 1, "pre_add": 1}
+        assert stats["by_tier"] == {"blocked": 1, "caution": 1, "clean": 1}
+
+        recent = stats["recent"]
+        assert len(recent) == 3
+        # Ordered DESC by blocked_at — since all three share now_ts(),
+        # SQLite will return them by id DESC (inserted last → first).
+        # At minimum, the set of names must match.
+        names = {row["torrent_name"] for row in recent}
+        assert names == {"First.Movie.mkv", "Second.Movie.mkv", "Third.Movie.mkv"}
+        s.close()
+
+    def test_get_malware_stats_time_filter(self) -> None:
+        """since_ts filter excludes backdated rows."""
+        s = Store(":memory:")
+        s.log_malware_block("1" * 40, "Recent", "search", ["r"])
+        s.log_malware_block("2" * 40, "Ancient", "search", ["r"])
+        now = now_ts()
+        with s._lock:
+            s._conn.execute(
+                "UPDATE malware_scan_log SET blocked_at = ? WHERE torrent_hash = ?",
+                (now - 1000 * 86400, "2" * 40),
+            )
+            s._conn.commit()
+        # Filter for anything in the last day → only "Recent".
+        stats = s.get_malware_stats(since_ts=now - 86400)
+        assert stats["total_blocks"] == 1
+        assert stats["recent"][0]["torrent_name"] == "Recent"
+        s.close()
+
+    def test_get_malware_stats_stage_filter(self) -> None:
+        """stage filter returns only exact matches."""
+        s = Store(":memory:")
+        s.log_malware_block("1" * 40, "M1", "search", ["r"])
+        s.log_malware_block("2" * 40, "M2", "pre_add", ["r"])
+        s.log_malware_block("3" * 40, "M3", "pre_add", ["r"])
+        s.log_malware_block("4" * 40, "M4", "download", ["r"])
+
+        stats = s.get_malware_stats(stage="pre_add")
+        assert stats["total_blocks"] == 2
+        assert stats["by_stage"] == {"pre_add": 2}
+        names = {row["torrent_name"] for row in stats["recent"]}
+        assert names == {"M2", "M3"}
+        s.close()
+
+    def test_top_signals_aggregation(self) -> None:
+        """Overlapping signal_ids aggregate and sort desc by count."""
+        s = Store(":memory:")
+        # ext.executable appears 3x, fname.suspicious 2x, kw.codec 1x.
+        s.log_malware_block(
+            "1" * 40,
+            "M1",
+            "search",
+            ["r"],
+            signals=[
+                {"signal_id": "ext.executable", "points": 100, "detail": "x"},
+                {"signal_id": "fname.suspicious", "points": 25, "detail": "y"},
+            ],
+        )
+        s.log_malware_block(
+            "2" * 40,
+            "M2",
+            "search",
+            ["r"],
+            signals=[
+                {"signal_id": "ext.executable", "points": 100, "detail": "x"},
+                {"signal_id": "fname.suspicious", "points": 25, "detail": "y"},
+                {"signal_id": "kw.codec", "points": 20, "detail": "z"},
+            ],
+        )
+        s.log_malware_block(
+            "3" * 40,
+            "M3",
+            "search",
+            ["r"],
+            signals=[{"signal_id": "ext.executable", "points": 100, "detail": "x"}],
+        )
+
+        stats = s.get_malware_stats()
+        top = stats["top_signals"]
+        # Must be sorted descending by count.
+        counts = [count for _, count in top]
+        assert counts == sorted(counts, reverse=True)
+        as_dict = dict(top)
+        assert as_dict["ext.executable"] == 3
+        assert as_dict["fname.suspicious"] == 2
+        assert as_dict["kw.codec"] == 1
+        # First entry must be the highest-count signal.
+        assert top[0][0] == "ext.executable"
+        assert top[0][1] == 3
+        s.close()
+
+    def test_top_signals_malformed_json_skipped(self) -> None:
+        """Malformed signals_json rows are defensively skipped; valid rows still counted."""
+        s = Store(":memory:")
+        s.log_malware_block(
+            "1" * 40,
+            "Good",
+            "search",
+            ["r"],
+            signals=[{"signal_id": "ext.executable", "points": 100, "detail": "x"}],
+        )
+        # Now insert a row with garbage signals_json via raw SQL.
+        with s._lock:
+            s._conn.execute(
+                "INSERT INTO malware_scan_log "
+                "(torrent_hash, torrent_name, stage, reasons, blocked_at, signals_json) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                ("2" * 40, "Broken", "search", json.dumps(["r"]), now_ts(), "{not valid json"),
+            )
+            # Also insert one with a non-list JSON payload (defensive path).
+            s._conn.execute(
+                "INSERT INTO malware_scan_log "
+                "(torrent_hash, torrent_name, stage, reasons, blocked_at, signals_json) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                ("3" * 40, "WrongShape", "search", json.dumps(["r"]), now_ts(), '{"not":"a list"}'),
+            )
+            s._conn.commit()
+
+        # Query must not raise.
+        stats = s.get_malware_stats()
+        assert stats["total_blocks"] == 3  # all 3 rows counted
+        top = dict(stats["top_signals"])
+        # Only the valid row's signal counts.
+        assert top == {"ext.executable": 1}
+        s.close()
+
+    def test_top_signals_null_tier_bucketed_unknown(self) -> None:
+        """Rows with tier=NULL bucket into by_tier['unknown']."""
+        s = Store(":memory:")
+        s.log_malware_block("1" * 40, "NoTier", "search", ["r"])  # tier defaults to None
+        s.log_malware_block(
+            "2" * 40,
+            "Tiered",
+            "search",
+            ["r"],
+            tier="blocked",
+        )
+        stats = s.get_malware_stats()
+        assert stats["by_tier"]["unknown"] == 1
+        assert stats["by_tier"]["blocked"] == 1
+        s.close()
+
+    def test_get_user_malware_blocks(self) -> None:
+        """user_id filter isolates rows to the specified user."""
+        s = Store(":memory:")
+        s.log_malware_block("1" * 40, "User1-A", "search", ["r"], user_id=1)
+        s.log_malware_block("2" * 40, "User1-B", "search", ["r"], user_id=1)
+        s.log_malware_block("3" * 40, "User2-A", "search", ["r"], user_id=2)
+        s.log_malware_block("4" * 40, "NoUser", "search", ["r"])  # user_id=None
+
+        user1_rows = s.get_user_malware_blocks(1)
+        assert len(user1_rows) == 2
+        assert {r["torrent_name"] for r in user1_rows} == {"User1-A", "User1-B"}
+
+        user2_rows = s.get_user_malware_blocks(2)
+        assert len(user2_rows) == 1
+        assert user2_rows[0]["torrent_name"] == "User2-A"
+
+        # No rows for an unknown user.
+        assert s.get_user_malware_blocks(999) == []
+        s.close()
+
+    def test_get_malware_block_count(self) -> None:
+        """Count respects since_ts filter; future cutoff returns 0."""
+        s = Store(":memory:")
+        s.log_malware_block("1" * 40, "M1", "search", ["r"])
+        s.log_malware_block("2" * 40, "M2", "download", ["r"])
+        s.log_malware_block("3" * 40, "M3", "pre_add", ["r"])
+        assert s.get_malware_block_count() == 3
+        # since_ts in the future → nothing matches.
+        assert s.get_malware_block_count(since_ts=now_ts() + 10_000) == 0
+        # since_ts in the past → all match.
+        assert s.get_malware_block_count(since_ts=now_ts() - 10_000) == 3
+        s.close()

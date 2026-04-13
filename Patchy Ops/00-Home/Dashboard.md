@@ -4,7 +4,7 @@ tags:
 aliases:
   - Patchy Dashboard
 created: 2026-04-11
-updated: 2026-04-11
+updated: 2026-04-13
 ---
 
 # Dashboard
@@ -14,6 +14,18 @@ updated: 2026-04-11
 Welcome to the Patchy Bot vault. Patchy is a Telegram-based assistant that searches for movies and TV shows, hands them off to qBittorrent for downloading, scans the results for malware, and organizes the finished files into a Plex media library.
 
 This dashboard is your starting point — it shows what work is open right now, what was finished recently, and how all the pieces of the system fit together.
+
+## Current Focus
+
+**Malware Engine v2 — Session 5 shipped (2026-04-13).** Per-user attribution, `/malware_stats` slash command, structured `SignalID` reason codes, weekly digest runner, ClamAV operations docs, and a new architecture reference page at [[Malware Engine v2]]. Future idea parked at [[telegram-malware-config]].
+
+## Recent Completions
+
+- **2026-04-13** — Malware Engine v2 Session 5 (per-user attribution, `/malware_stats`, `SignalID` constants, weekly digest, ClamAV docs, vault architecture page).
+- **2026-04-11** — Obsidian vault rewritten into the `00-Home/` … `05-Changelog/` layout.
+- **2026-04-10** — Episode filtering fix, next-ep callback fix, inspection timeout bump, candidate cycling fix.
+- **2026-04-08** — Movie release scheduling system (`msch:` callbacks, `movie_tracks` table).
+- **2026-04-07** — Batch of 17 fixes across qBT, poller, organizer, malware gate, and schedule UI.
 
 ## Open Work
 

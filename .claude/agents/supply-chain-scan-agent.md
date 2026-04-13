@@ -1,8 +1,9 @@
 ---
 name: supply-chain-scan-agent
 description: "MUST be used for filesystem vulnerability scanning, OS-level CVEs, Trivy scans, Grype scans, supply chain risk scoring, SBOM generation, or infrastructure-level security assessment of the project filesystem."
-tools: Bash, Read
 model: opus
+effort: high
+tools: Read, Bash, Grep, Glob
 memory: project
 color: red
 ---

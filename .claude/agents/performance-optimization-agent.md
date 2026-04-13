@@ -1,6 +1,10 @@
 ---
 name: performance-optimization-agent
 description: "Use for SQLite connection optimization, query analysis, runner profiling, caching strategy, memory analysis, or performance baseline measurement. Best fit when the task mentions performance, optimization, connection pooling, caching, or profiling."
+model: opus
+effort: medium
+tools: Read, Bash, Grep, Glob
+memory: project
 color: blue
 ---
 

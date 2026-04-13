@@ -185,6 +185,13 @@
   },
   "active": "d0538726ebfd62f7",
   "lastOpenFiles": [
+    "00-Home/Dashboard.md.tmp.4059269.1776060821297",
+    "05-Changelog/2026-04-completed.md.tmp.4059269.1776060811673",
+    "04-Ideas/Ideas Index.md.tmp.4059269.1776060794178",
+    "04-Ideas/telegram-malware-config.md",
+    "04-Ideas/telegram-malware-config.md.tmp.4059269.1776060784654",
+    "01-System/Malware Engine v2.md",
+    "01-System/Malware Engine v2.md.tmp.4059269.1776060769237",
     "02-Work/Upgrades/duplicate-cleanup-scheduling.md",
     "02-Work/Upgrades/duplicate-cleanup-scheduling.md.tmp.4059269.1776059773339",
     "Notes, Ideas, etc..md",
@@ -195,10 +202,6 @@
     "03-Reference/Preferences.md.tmp.4059269.1775962352984",
     "03-Reference/Ops Runbook.md.tmp.4059269.1775962336099",
     "03-Reference/Ops Runbook.md.tmp.4059269.1775962328931",
-    "03-Reference/Coding Conventions.md.tmp.4059269.1775962320241",
-    "03-Reference/Coding Conventions.md.tmp.4059269.1775962314216",
-    "03-Reference/Coding Conventions.md.tmp.4059269.1775962306647",
-    "03-Reference/Coding Conventions.md.tmp.4059269.1775962299842",
     "04-Ideas/Ideas Index.md",
     "03-Reference/Preferences.md",
     "00-Home/Dashboard.md",
@@ -217,9 +220,6 @@
     "02-Work/Upgrades/plex-watchlist-auto-download.md",
     "02-Work/Upgrades/alert-notifications-clear-button.md",
     "02-Work/Todos/vpn-interface-safety-docs.md",
-    "02-Work/Todos/download-malware-scan-visibility.md",
-    "02-Work/Todos/bot-phase2-decomposition.md",
-    "02-Work/Work Board.md",
-    "01-System/System Overview.md"
+    "02-Work/Todos/download-malware-scan-visibility.md"
   ]
 }

@@ -1,7 +1,11 @@
 ---
+name: audit-performance-agent
+description: "Post-changes performance and resource-use review. Flags blocking calls in async context, N+1 queries, unclosed sessions, verbose abstractions, and async-lock-across-await bugs in Patchy Bot."
 model: opus
-permissionMode: plan
-maxTurns: 10
+effort: high
+tools: Read, Bash, Grep, Glob
+memory: project
+color: yellow
 ---
 
 # Audit: Performance & Resource Agent

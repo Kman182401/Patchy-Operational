@@ -1,6 +1,10 @@
 ---
 name: vault-manager
 description: "Use for Obsidian vault operations: reading/creating/updating task notes, logging completions to changelog, updating architecture docs, adding learned preferences, or refreshing the Dashboard. Best fit when the task mentions vault, dashboard, preferences, changelog, or task notes."
+model: opus
+effort: low
+tools: Read, Write, Bash, Grep, Glob
+memory: project
 color: purple
 ---
 

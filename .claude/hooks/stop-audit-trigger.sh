@@ -2,7 +2,8 @@
 # Stop hook: auto-trigger post-changes-audit with right-sized mode
 # Counts uncommitted changed lines to determine quick/standard/deep
 
-cd ~/Patchy_Bot/telegram-qbt || exit 0
+PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$PROJECT_ROOT/telegram-qbt" || exit 0
 
 # Count lines changed (staged + unstaged) in patchy_bot/ only
 CHANGED_LINES=$(git diff --numstat -- patchy_bot/ 2>/dev/null | awk '{s+=$1+$2} END {print s+0}')

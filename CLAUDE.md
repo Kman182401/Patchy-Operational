@@ -45,6 +45,34 @@
 - Keep instructions that are workflow-specific, command-specific, or operationally detailed out of this file.
 - Preserve path safety and media-type validation when moving or deleting files.
 
+## Compaction Instructions
+
+When compacting context, ALWAYS preserve:
+- The full list of files modified in this session (paths + what changed)
+- The current task description and acceptance criteria
+- Any test commands that need to run and their last pass/fail status
+- Active subagent delegations and their status
+- Callback namespace(s) being worked on (e.g., `msch:`, `sch:`, `dl:`)
+- Any error messages or stack traces currently being debugged
+- The movie/TV parity rule if either search path was touched
+- Which handler files were modified (for restart decision)
+
+When compacting context, DROP:
+- Verbose file-read outputs from exploration (can be re-read from disk)
+- Full test suite output (keep only summary: pass/fail counts and failing test names)
+- Large grep/glob results (keep only the relevant matches)
+- Completed subtask details (keep only "done" status)
+- Earlier iterations of code that was subsequently rewritten
+
+## Web Research Policy
+
+- Before implementing any non-trivial feature, use WebSearch to check for current 2026 best practices for the relevant libraries (python-telegram-bot, SQLite, asyncio, qbittorrent-api, plexapi).
+- Use the `context7` MCP plugin for library API documentation before writing code that uses unfamiliar or recently-updated library functions.
+- When encountering an error during implementation, WebSearch the exact error message + library name + version before attempting a manual fix.
+- When debugging stalled downloads, VPN issues, or Plex sync problems, WebSearch for known issues with the specific tool versions in use.
+- Do NOT research for: renaming, formatting, simple one-line fixes, or changes where the implementation is already specified in the plan.
+- Combine WebSearch findings with existing project patterns in `.claude/memory/patterns.md` — project patterns take precedence over generic advice when they conflict.
+
 ## Memory Systems
 
 Patchy_Bot has one live memory store and one frozen archive.

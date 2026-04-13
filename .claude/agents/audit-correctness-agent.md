@@ -1,9 +1,11 @@
 ---
+name: audit-correctness-agent
+description: "Post-changes correctness, completeness, and efficiency review. Reads the git diff of Patchy Bot code and flags logic errors, missing edge cases, over-engineering, and code-quality issues by severity."
 model: opus
-permissionMode: plan
-maxTurns: 15
-skills:
-  - diff-review
+effort: high
+tools: Read, Bash, Grep, Glob
+memory: project
+color: yellow
 ---
 
 # Audit: Correctness & Efficiency Agent

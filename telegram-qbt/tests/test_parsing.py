@@ -4595,3 +4595,146 @@ def test_parse_episode_number_rejects_nonsense() -> None:
     from patchy_bot.handlers.search import parse_episode_number
 
     assert parse_episode_number("hello") is None
+
+
+# ── /malware_stats command (Session 5) ──────────────────────────────────────
+
+
+class TestMalwareStatsCommand:
+    """Tests for cmd_malware_stats handler + _parse_malware_stats_range helper."""
+
+    def _build_bot_update_context(
+        self,
+        stats_return: dict,
+        *,
+        allowed: bool = True,
+        args: list[str] | None = None,
+    ):
+        """Assemble (bot, update, context) mocks with captured reply_text."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        store = MagicMock()
+        store.get_malware_stats = MagicMock(return_value=stats_return)
+        ctx_obj = SimpleNamespace(store=store)
+
+        bot = MagicMock()
+        bot.is_allowed = MagicMock(return_value=allowed)
+        bot.deny = AsyncMock()
+        bot._ctx = ctx_obj
+
+        reply_text = AsyncMock()
+        msg = MagicMock()
+        msg.reply_text = reply_text
+        update = MagicMock()
+        update.effective_message = msg
+
+        context = SimpleNamespace(args=args or [])
+        return bot, update, context, reply_text, store
+
+    def test_malware_stats_happy_path(self) -> None:
+        from patchy_bot.handlers.commands import cmd_malware_stats
+
+        stats = {
+            "total_blocks": 3,
+            "by_stage": {"search": 2, "download": 1},
+            "by_tier": {"blocked": 1, "caution": 2},
+            "top_signals": [("ext.executable", 3), ("fname.suspicious", 2)],
+            "recent": [
+                {
+                    "torrent_name": "X" * 60,  # must be truncated
+                    "risk_score": 95,
+                    "stage": "search",
+                },
+                {
+                    "torrent_name": "Normal.Movie.mkv",
+                    "risk_score": 50,
+                    "stage": "download",
+                },
+            ],
+        }
+        bot, update, context, reply_text, _store = self._build_bot_update_context(stats)
+        asyncio.run(cmd_malware_stats(bot, update, context))  # type: ignore[arg-type]
+
+        reply_text.assert_called_once()
+        text = reply_text.call_args[0][0]
+        assert "📊 <b>Malware Scan Statistics</b>" in text
+        assert "Total blocks: <b>3</b>" in text
+        # Truncated name ends with "..." and is present in at least one recent line.
+        assert "..." in text
+        # One of the recent names (Normal.Movie.mkv) is rendered verbatim.
+        assert "Normal.Movie.mkv" in text
+
+    def test_malware_stats_no_data(self) -> None:
+        from patchy_bot.handlers.commands import cmd_malware_stats
+
+        stats = {
+            "total_blocks": 0,
+            "by_stage": {},
+            "by_tier": {},
+            "top_signals": [],
+            "recent": [],
+        }
+        bot, update, context, reply_text, _store = self._build_bot_update_context(stats)
+        asyncio.run(cmd_malware_stats(bot, update, context))  # type: ignore[arg-type]
+
+        reply_text.assert_called_once()
+        text = reply_text.call_args[0][0]
+        assert "No malware blocks recorded." in text
+
+    def test_malware_stats_time_range_7d(self) -> None:
+        from patchy_bot.handlers.commands import cmd_malware_stats
+
+        stats = {
+            "total_blocks": 0,
+            "by_stage": {},
+            "by_tier": {},
+            "top_signals": [],
+            "recent": [],
+        }
+        bot, update, context, _reply_text, store = self._build_bot_update_context(stats, args=["7d"])
+        before = now_ts()
+        asyncio.run(cmd_malware_stats(bot, update, context))  # type: ignore[arg-type]
+        after = now_ts()
+
+        store.get_malware_stats.assert_called_once()
+        kwargs = store.get_malware_stats.call_args.kwargs
+        assert "since_ts" in kwargs
+        since_ts = kwargs["since_ts"]
+        assert since_ts is not None
+        # "7 days ago, give or take a few seconds" — allow generous bounds.
+        assert since_ts >= before - 8 * 86400
+        assert since_ts <= after - 6 * 86400
+
+    def test_malware_stats_auth_denied(self) -> None:
+        from patchy_bot.handlers.commands import cmd_malware_stats
+
+        stats = {"total_blocks": 0, "by_stage": {}, "by_tier": {}, "top_signals": [], "recent": []}
+        bot, update, context, reply_text, store = self._build_bot_update_context(stats, allowed=False)
+        asyncio.run(cmd_malware_stats(bot, update, context))  # type: ignore[arg-type]
+
+        bot.deny.assert_awaited_once()
+        store.get_malware_stats.assert_not_called()
+        reply_text.assert_not_called()
+
+    def test_malware_stats_parse_range_helper(self) -> None:
+        from patchy_bot.handlers.commands import _parse_malware_stats_range
+
+        # Empty args → all time.
+        since, label = _parse_malware_stats_range([])
+        assert since is None
+        assert label == "all time"
+
+        # 7d → non-None since_ts, label "last 7 days".
+        since, label = _parse_malware_stats_range(["7d"])
+        assert since is not None
+        assert label == "last 7 days"
+
+        # 30d → non-None since_ts, label "last 30 days".
+        since, label = _parse_malware_stats_range(["30d"])
+        assert since is not None
+        assert label == "last 30 days"
+
+        # Garbage → all time fallback.
+        since, label = _parse_malware_stats_range(["garbage"])
+        assert since is None
+        assert label == "all time"

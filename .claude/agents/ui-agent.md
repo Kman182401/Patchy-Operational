@@ -1,6 +1,10 @@
 ---
 name: ui-agent
 description: "Use for Telegram UI rendering, inline keyboards, message formatting, callback routing structure, command center behavior, flow UI state machines, navigation patterns, or button layouts. Best fit when the task mentions buttons, keyboards, Telegram UX, message rendering, navigation, or user-visible flow behavior."
+model: opus
+effort: medium
+tools: Read, Write, Edit, Bash, Grep, Glob
+memory: project
 color: cyan
 ---
 

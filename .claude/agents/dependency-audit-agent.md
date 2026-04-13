@@ -1,8 +1,9 @@
 ---
 name: dependency-audit-agent
 description: "MUST be used for dependency vulnerability scanning, CVE checks, supply chain security, requirements auditing, pip-audit, Safety CLI, known vulnerable packages, or when any dependency-related security concern is raised."
-tools: Bash, Read
 model: opus
+effort: high
+tools: Read, Bash, Grep, Glob
 memory: project
 color: red
 ---

@@ -1,0 +1,45 @@
+# Virtual environment (225MB)
+telegram-qbt/.venv/
+
+# Git internals (42MB)
+.git/
+
+# Python bytecode and caches (153 __pycache__ dirs found)
+__pycache__/
+*.pyc
+*.pyo
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+*.egg-info/
+
+# Database files (runtime state, not source code)
+*.db
+*.sqlite*
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# Playwright artifacts
+.playwright-mcp/
+
+# Obsidian plugin internals (large, not useful for code context)
+Patchy Ops/.obsidian/plugins/
+
+# Transient event buffers
+.claude/memory/.event-buffer*.jsonl
+
+# Backup files created during this optimization
+*.bak
+*.bak.*
+
+# Temp files
+.DS_Store
+*.tmp
+
+# Task Master remnants
+.taskmaster/

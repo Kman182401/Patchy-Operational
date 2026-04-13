@@ -1,7 +1,10 @@
 ---
 name: security-agent
 description: "Use for authentication, authorization, rate limiting, password handling, brute-force protection, input validation, path safety, secrets management, or security review. Best fit when the task mentions security, auth, passwords, rate limits, validation, or vulnerability review."
-tools: Read, Grep, Glob, Bash
+model: opus
+effort: high
+tools: Read, Bash, Grep, Glob
+memory: project
 color: red
 ---
 

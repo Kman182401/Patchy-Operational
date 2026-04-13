@@ -7,7 +7,7 @@ Apply the repo-root project rules in [`../CLAUDE.md`](/home/karson/Patchy_Bot/CL
 **Patchy Bot** — Telegram bot managing qBittorrent downloads and Plex media library organization.
 
 - **Stack:** Python 3.12+, python-telegram-bot (polling mode), SQLite WAL, asyncio
-- **Entry:** `patchy_bot/__main__.py` → `bot.py` (~4,752 lines)
+- **Entry:** `patchy_bot/__main__.py` → `bot.py` (~5,543 lines)
 - **Service:** `telegram-qbt-bot.service` (systemd, `python -m patchy_bot`)
 - **Shim:** `qbt_telegram_bot.py` is a backward-compat import shim — do not edit for runtime changes
 
@@ -19,7 +19,7 @@ Apply the repo-root project rules in [`../CLAUDE.md`](/home/karson/Patchy_Bot/CL
 - **Routing:** `CallbackDispatcher` in `dispatch.py` — 2 exact + 12 prefix registrations
 - **State:** `HandlerContext` dataclass in `types.py` — injected into all handlers
 - **Persistence:** `store.py` — 14 tables, 56+ CRUD methods, WAL mode, busy_timeout=5000
-- **18 slash commands**, 760 tests across 23 test files
+- **18 slash commands**, ~1,099 tests across 31 test files
 
 ## Coding Conventions
 
@@ -164,11 +164,15 @@ Invoke manually: `/post-changes-audit [quick|standard|deep]`
 | `security-scan-orchestrator` | Full security scan pipeline |
 | `supply-chain-scan-agent` | OS-level CVEs, Trivy, SBOM |
 | `release-manager-agent` | Versioning, changelogs, deployment |
-| `taskmaster-sync-agent` | Task Master reconciliation |
 | `media-library-abstraction-agent` | Jellyfin/Emby abstraction planning |
 | `torrent-client-abstraction-agent` | Transmission/rTorrent abstraction planning |
 
-**Model routing:** Audit/review agents use Opus. Implementation agents use Sonnet (project default). Do not hardcode `model` in Agent tool calls — let `settings.json` control it unless the agent definition specifies otherwise.
+**Effort routing:** All subagents default to Opus. Effort level is the primary optimization variable:
+- `high` effort: Security agents, audit agents, `remove-agent` (irreversible or high-stakes operations)
+- `medium` effort: Domain implementation agents (schedule, search-download, database, UI, plex, etc.)
+- `low` effort: Utility agents (vault-manager, release-manager), design-phase abstraction-planning agents
+
+Do not hardcode `model` in Agent tool calls — let the agent frontmatter control it.
 
 **Runtime availability caveat:** `audit-correctness-agent` and `audit-performance-agent` are defined in `.claude/agents/` but the Claude Code runtime does not currently expose them (likely due to non-standard frontmatter — `permissionMode: plan` instead of the standard `tools:` key). Until the registration is fixed, fall back to `reviewer` for correctness audits and `performance-optimization-agent` for performance audits. The post-changes-audit workflow must substitute these until the frontmatter is corrected.
 

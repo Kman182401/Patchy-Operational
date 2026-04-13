@@ -1,6 +1,10 @@
 ---
 name: search-download-agent
 description: "Use for torrent searching, add/download flow, qBittorrent integration, progress tracking, the completion poller, or pending-monitor behavior. Best fit when the task mentions search, download, torrents, qBittorrent, progress bars, magnets, or transfer speed."
+model: opus
+effort: medium
+tools: Read, Write, Edit, Bash, Grep, Glob
+memory: project
 color: green
 ---
 

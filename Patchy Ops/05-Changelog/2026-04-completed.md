@@ -4,7 +4,7 @@ tags:
 aliases:
   - April 2026 Changelog
 created: 2026-04-11
-updated: 2026-04-11
+updated: 2026-04-13
 ---
 
 # April 2026 Changelog
@@ -13,6 +13,7 @@ updated: 2026-04-11
 
 April was a month of hardening. Key highlights:
 
+- **Malware Engine v2 — Session 5** — per-user attribution, a `/malware_stats` slash command, structured `SignalID` reason codes, a weekly malware digest runner, and a fresh architecture page in the vault.
 - **TV scheduling fix** — shows that aired multiple episodes on the same day were only picking up the first one. That's fixed.
 - **Batch cleanup on the 7th** — seventeen smaller bugs knocked out in one sweep, covering everything from VPN reconnect handling to file-move race conditions to the smoothing math that drives the live progress display.
 - **Malware scan gate** — the download pipeline now catches suspicious files before they reach your library.
@@ -21,6 +22,20 @@ April was a month of hardening. Key highlights:
 - **Obsidian vault** — created and seeded (the vault you're reading right now).
 
 > [!code]- Claude Code Reference
+>
+> ## 2026-04-13
+>
+> **Malware Engine v2 — Session 5**
+>
+> - `/malware_stats` slash command — aggregated scan stats from `malware_scan_log`, available to allowed users.
+> - Structured `SignalID` constants in `malware.py` — eliminates string drift between the scanner and consumers of reason codes.
+> - `malware_scan_log.user_id` column — per-user attribution for blocked downloads.
+> - Weekly malware digest runner (`_maybe_send_malware_digest` in `handlers/download.py`) — sends a summary to all allowed users when the period saw any blocks.
+> - ClamAV operations docs added at `docs/clamav-operations.md` (freshclam guide).
+> - Vault: new architecture reference page `01-System/Malware Engine v2.md` documenting the scoring system, all 23+ detection signals, data flow, and key design decisions.
+> - Vault: parked future idea `04-Ideas/telegram-malware-config.md` for adjusting scoring thresholds via Telegram.
+>
+> Files modified: `patchy_bot/malware.py`, `patchy_bot/store.py`, `patchy_bot/handlers/commands.py`, `patchy_bot/handlers/download.py`, `docs/clamav-operations.md`, plus the vault notes above.
 >
 > ## 2026-04-11
 >

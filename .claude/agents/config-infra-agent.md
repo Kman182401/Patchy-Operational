@@ -1,6 +1,10 @@
 ---
 name: config-infra-agent
 description: "Use for configuration, environment variables, startup flow, systemd service management, logging, `.env.example`, VPN settings, dependency management, or deployment configuration. Best fit when the task mentions config, env vars, startup, service, systemd, logs, or deployment."
+model: opus
+effort: medium
+tools: Read, Write, Edit, Bash, Grep, Glob
+memory: project
 color: blue
 ---
 

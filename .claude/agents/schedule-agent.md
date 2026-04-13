@@ -1,6 +1,10 @@
 ---
 name: schedule-agent
 description: "Use for TV show episode tracking, the schedule system, TVMaze/TMDB metadata, auto-download logic, schedule runner behavior, or schedule-related DB state. Best fit when the task mentions scheduling, episodes, tracking, seasons, air dates, metadata, or due-track behavior."
+model: opus
+effort: medium
+tools: Read, Write, Edit, Bash, Grep, Glob
+memory: project
 color: green
 ---
 
