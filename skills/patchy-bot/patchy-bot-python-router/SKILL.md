@@ -38,7 +38,7 @@ These rules **override** generic upstream skill advice when they conflict:
 6. **HTML escape with `_h()`.** Any dynamic value going into a Telegram HTML message must be wrapped. Generic error-handling advice that constructs user-facing strings must respect this rule.
 7. **Path safety with `PurePosixPath`.** When `python-resource-management` discusses file handles, the Patchy Bot media paths must continue to use `PurePosixPath` for traversal-safety checks (see `bugs_2026-04-07.md`).
 8. **Movie/TV parity.** Any change to a search/add path must be applied symmetrically. Generic design-pattern refactors that touch only one side are wrong by default.
-9. **Two-stage subagent review.** Per `feedback_subagent_driven_dev.md`, all real code work is dispatched to domain subagents (database-agent, schedule-agent, etc.). This router skill is consulted by *those subagents*; main thread should still delegate.
+9. **Task-agent delegation.** Code work is dispatched to the task-oriented agents (`implementer`, `explorer`, `reviewer`, `test-runner`). This router skill is consulted by those agents; the main thread should still delegate.
 
 ## How to use this skill
 

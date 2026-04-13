@@ -11,7 +11,7 @@ Your job is to decide **where** an interaction belongs and **how** to structure 
 
 This skill delegates to the following agents during execution. Always use these agents — do not implement inline what an agent can handle.
 
-- **Primary:** After architecture decisions are made, delegate implementation of keyboards, message flows, and callback routing to the `ui-agent`.
+- **Primary:** After architecture decisions are made, delegate implementation of keyboards, message flows, and callback routing to the `implementer`.
 
 ## Chat vs. Mini App: the decision rule
 

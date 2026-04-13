@@ -11,8 +11,8 @@ Restart the Telegram bot and confirm it came up healthy. Run these steps in orde
 
 This skill delegates to the following agents during execution. Always use these agents — do not implement inline what an agent can handle.
 
-- **Primary:** Delegate service restart and health verification to the `config-infra-agent` (sequential with error diagnosis).
-- **On failure:** Use `check-logs` or the `config-infra-agent` to analyze the startup failure before changing code.
+- **Primary:** Delegate service restart and health verification to the `implementer` (sequential with error diagnosis).
+- **On failure:** Use `check-logs` or the `implementer` to analyze the startup failure before changing code.
 
 ## Step 1 — Restart the service
 

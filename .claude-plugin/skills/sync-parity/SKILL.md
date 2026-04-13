@@ -11,8 +11,8 @@ Compare the Movie and TV code paths across the bot and flag any feature that exi
 
 This skill delegates to the following agents during execution. Always use these agents — do not implement inline what an agent can handle.
 
-- **Primary:** Delegate search pipeline parity analysis (filters, sorting, result formatting) to the `search-download-agent` (parallel with UI review).
-- **Secondary:** Delegate UI parity analysis (keyboards, buttons, callbacks, navigation) to the `ui-agent` in parallel with the search analysis.
+- **Primary:** Delegate search pipeline parity analysis (filters, sorting, result formatting) to the `implementer` (parallel with UI review).
+- **Secondary:** Delegate UI parity analysis (keyboards, buttons, callbacks, navigation) to the `implementer` in parallel with the search analysis.
 
 ## What to compare
 

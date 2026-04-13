@@ -15,8 +15,8 @@ Fetch open issues from the Patchy-Operational repo, route each to the correct do
 This skill delegates to the following agents during execution. Always use these agents — do not implement inline what an agent can handle.
 
 - **Primary:** Route each issue to the matching domain agent per the Agent Routing Table below (sequential — one issue at a time to avoid file conflicts).
-- **Review:** After each fix, delegate test verification to the `test-agent`.
-- **Security issues:** The `security-agent` is read-only — it produces analysis only. Delegate implementation of its recommendations to a general-purpose agent.
+- **Review:** After each fix, delegate test verification to the `test-runner`.
+- **Security issues:** The `reviewer` is read-only — it produces analysis only. Delegate implementation of its recommendations to a general-purpose agent.
 - **On failure:** If an agent's fix breaks tests, give it ONE retry with the error output before abandoning the issue.
 
 ## Usage
@@ -36,26 +36,26 @@ Map issue labels to domain agents. First matching label wins. If no label matche
 
 | Label | Agent | Notes |
 |-------|-------|-------|
-| `schedule`, `episode`, `tvmaze` | schedule-agent | Episode tracking, metadata, auto-download |
-| `security`, `auth`, `rate-limit` | security-agent | **Read-only** — produces analysis only, then a general agent implements the fix |
-| `remove`, `delete`, `cleanup` | remove-agent | Deletion flows, path safety, Plex cleanup |
-| `search`, `download`, `torrent` | search-download-agent | Torrent search, download tracking |
-| `plex`, `media`, `library` | plex-agent | Plex inventory, media organization |
-| `config`, `infra`, `service` | config-infra-agent | Config, env vars, systemd, startup |
-| `database`, `db`, `store`, `sqlite` | database-agent | Schema, migrations, CRUD methods |
-| `ui`, `ux`, `keyboard`, `button` | ui-agent | Telegram UI, keyboards, callbacks |
-| `test`, `testing`, `pytest` | test-agent | Tests, mocking, coverage |
+| `schedule`, `episode`, `tvmaze` | implementer | Episode tracking, metadata, auto-download |
+| `security`, `auth`, `rate-limit` | reviewer | **Read-only** — produces analysis only, then a general agent implements the fix |
+| `remove`, `delete`, `cleanup` | implementer | Deletion flows, path safety, Plex cleanup |
+| `search`, `download`, `torrent` | implementer | Torrent search, download tracking |
+| `plex`, `media`, `library` | implementer | Plex inventory, media organization |
+| `config`, `infra`, `service` | implementer | Config, env vars, systemd, startup |
+| `database`, `db`, `store`, `sqlite` | explorer | Schema, migrations, CRUD methods |
+| `ui`, `ux`, `keyboard`, `button` | implementer | Telegram UI, keyboards, callbacks |
+| `test`, `testing`, `pytest` | test-runner | Tests, mocking, coverage |
 
 **Keyword fallback** (scans title + body if no label matched):
-- `schedule`, `episode`, `track` → schedule-agent
-- `delete`, `remove`, `cleanup` → remove-agent
-- `search`, `download`, `torrent` → search-download-agent
-- `plex`, `media`, `library` → plex-agent
-- `config`, `env`, `service`, `systemd` → config-infra-agent
-- `database`, `db`, `store`, `migration` → database-agent
-- `button`, `keyboard`, `menu`, `callback` → ui-agent
-- `test`, `pytest`, `coverage` → test-agent
-- `security`, `auth`, `password`, `rate limit` → security-agent
+- `schedule`, `episode`, `track` → implementer
+- `delete`, `remove`, `cleanup` → implementer
+- `search`, `download`, `torrent` → implementer
+- `plex`, `media`, `library` → implementer
+- `config`, `env`, `service`, `systemd` → implementer
+- `database`, `db`, `store`, `migration` → explorer
+- `button`, `keyboard`, `menu`, `callback` → implementer
+- `test`, `pytest`, `coverage` → test-runner
+- `security`, `auth`, `password`, `rate limit` → reviewer
 - No match → use a general-purpose Agent (no subagent_type)
 
 ---
@@ -87,8 +87,8 @@ gh issue list --repo Kman182401/Patchy-Operational --state open --limit <LIMIT> 
 ```
 | #  | Title                        | Labels         | Agent Route    |
 |----|------------------------------|----------------|----------------|
-| 3  | Schedule runner crashes on…  | schedule, bug  | schedule-agent |
-| 7  | Add rate limit to /start     | security       | security-agent |
+| 3  | Schedule runner crashes on…  | schedule, bug  | implementer |
+| 7  | Add rate limit to /start     | security       | reviewer |
 ```
 
 - If `--dry-run`, display the table and stop here.
@@ -146,7 +146,7 @@ Apply the routing table from above:
 **For non-security agents:**
 
 Spawn the matched agent using the Agent tool with:
-- `subagent_type`: the matched agent name (e.g., `schedule-agent`)
+- `subagent_type`: the matched agent name (e.g., `implementer`)
 - `prompt`: Include:
   - The full issue title, body, and number
   - "Fix this issue. Make minimal, targeted changes."
@@ -155,13 +155,13 @@ Spawn the matched agent using the Agent tool with:
   - "After editing, run: `cd /home/karson/Patchy_Bot/telegram-qbt && .venv/bin/python -m pytest -q`"
   - "Report what you changed and whether tests pass."
 
-**For security-agent (read-only — no Write/Edit tools):**
+**For reviewer (read-only — no Write/Edit tools):**
 
 Two-step process:
-1. Spawn `security-agent` with:
+1. Spawn `reviewer` with:
    - "Analyze this issue and produce a detailed fix specification: which files to change, what to change, and why. Do NOT attempt to edit files."
-2. Take the security-agent's analysis and spawn a general-purpose Agent with:
-   - The security-agent's analysis as context
+2. Take the reviewer's analysis and spawn a general-purpose Agent with:
+   - The reviewer's analysis as context
    - "Implement these security fixes exactly as specified."
    - "Work in `/home/karson/Patchy_Bot/telegram-qbt/`"
    - "Do NOT commit — just edit the files."
@@ -283,10 +283,10 @@ After all phases complete, display a summary:
 
 | Issue | Title                     | Agent            | Branch                        | PR     | Status |
 |-------|---------------------------|------------------|-------------------------------|--------|--------|
-| #3    | Schedule runner crash     | schedule-agent   | fix/issue-3-schedule-crash    | #10    | PR open |
-| #7    | Add rate limit to /start  | security-agent   | fix/issue-7-rate-limit-start  | #11    | PR open |
-| #12   | Fix typo in help text     | ui-agent         | —                             | —      | Skipped (PR exists) |
-| #15   | DB migration failure      | database-agent   | fix/issue-15-db-migration     | —      | Tests failed |
+| #3    | Schedule runner crash     | implementer   | fix/issue-3-schedule-crash    | #10    | PR open |
+| #7    | Add rate limit to /start  | reviewer   | fix/issue-7-rate-limit-start  | #11    | PR open |
+| #12   | Fix typo in help text     | implementer         | —                             | —      | Skipped (PR exists) |
+| #15   | DB migration failure      | explorer   | fix/issue-15-db-migration     | —      | Tests failed |
 
 Processed: 4 | PRs opened: 2 | Skipped: 1 | Failed: 1
 ```

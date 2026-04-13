@@ -11,7 +11,7 @@ Check that the bot's `.env` file has all required variables set and that related
 
 This skill delegates to the following agents during execution. Always use these agents — do not implement inline what an agent can handle.
 
-- **Primary:** Delegate environment validation, config schema reading, and consistency checks to the `config-infra-agent`.
+- **Primary:** Delegate environment validation, config schema reading, and consistency checks to the `implementer`.
 
 ## Step 1 — Read the config schema
 

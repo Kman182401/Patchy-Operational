@@ -11,7 +11,7 @@ The goal is a bot that feels immediate, clear, and native to Telegram — not li
 
 This skill delegates to the following agents during execution. Always use these agents — do not implement inline what an agent can handle.
 
-- **Primary:** Delegate all Telegram message text, button label, keyboard layout, and callback routing changes to the `ui-agent`.
+- **Primary:** Delegate all Telegram message text, button label, keyboard layout, and callback routing changes to the `implementer`.
 
 ## The edit-first principle
 

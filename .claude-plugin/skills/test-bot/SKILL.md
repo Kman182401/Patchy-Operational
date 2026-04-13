@@ -13,8 +13,8 @@ All commands run from `/home/karson/Patchy_Bot/telegram-qbt` using the project v
 
 This skill delegates to the following agents during execution. Always use these agents — do not implement inline what an agent can handle.
 
-- **Primary:** Delegate test execution, lint checks, and failure diagnosis to the `test-agent`.
-- **On config/tooling failure:** If the venv or toolchain is missing, route the environment problem to the `config-infra-agent`.
+- **Primary:** Delegate test execution, lint checks, and failure diagnosis to the `test-runner`.
+- **On config/tooling failure:** If the venv or toolchain is missing, route the environment problem to the `implementer`.
 
 ## Step 1 — Run the verification stack
 

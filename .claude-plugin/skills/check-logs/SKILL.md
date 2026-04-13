@@ -13,7 +13,7 @@ Service name: `telegram-qbt-bot.service`
 
 This skill delegates to the following agents during execution. Always use these agents — do not implement inline what an agent can handle.
 
-- **Primary:** Delegate log retrieval and service status checks to the `config-infra-agent` (sequential with review).
+- **Primary:** Delegate log retrieval and service status checks to the `implementer` (sequential with review).
 - **On domain-specific errors:** Route the finding to the relevant project agent after extracting the key log evidence.
 
 ## Step 1 — Pull recent logs

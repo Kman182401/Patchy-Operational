@@ -13,7 +13,7 @@ Database path: `/home/karson/Patchy_Bot/telegram-qbt/state.sqlite3`
 
 This skill delegates to the following agents during execution. Always use these agents — do not implement inline what an agent can handle.
 
-- **Primary:** Delegate all database queries, anomaly detection, and schema inspection to the `database-agent`.
+- **Primary:** Delegate all database queries, anomaly detection, and schema inspection to the `explorer`.
 
 Use Python's stdlib `sqlite3` module so this skill works even when the `sqlite3` CLI is not installed.
 
