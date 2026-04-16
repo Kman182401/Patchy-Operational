@@ -1,6 +1,6 @@
 {
+  "respectGitignore": true,
   "permissions": {
-    "defaultMode": "bypassPermissions",
     "allow": [
       "Bash(git diff:*)",
       "Bash(git status:*)",
@@ -25,18 +25,10 @@
       "Read(/home/karson/Patchy_Bot/**/.env.*)",
       "Read(./secrets/**)",
       "Read(/home/karson/Patchy_Bot/secrets/**)"
-    ]
+    ],
+    "defaultMode": "bypassPermissions"
   },
-  "respectGitignore": true,
-  "alwaysThinkingEnabled": true,
   "model": "opus[1m]",
-  "enabledPlugins": {
-    "pyright-lsp@claude-plugins-official": true,
-    "semgrep@claude-plugins-official": false,
-    "context7@claude-plugins-official": true,
-    "playwright@claude-plugins-official": false,
-    "chrome-devtools-mcp@claude-plugins-official": false
-  },
   "hooks": {
     "PreToolUse": [
       {
@@ -82,5 +74,13 @@
         ]
       }
     ]
-  }
+  },
+  "enabledPlugins": {
+    "pyright-lsp@claude-plugins-official": false,
+    "semgrep@claude-plugins-official": false,
+    "context7@claude-plugins-official": true,
+    "playwright@claude-plugins-official": false,
+    "chrome-devtools-mcp@claude-plugins-official": false
+  },
+  "alwaysThinkingEnabled": true
 }
