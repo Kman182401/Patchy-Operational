@@ -87,3 +87,6 @@ Patchy Ops/.obsidian/cache
 
 # Stale duplicate vault — leave untracked
 Patchy/
+
+# Graphify knowledge graph output (derived artifact, rebuilt via git hooks)
+graphify-out/

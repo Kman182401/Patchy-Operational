@@ -4,7 +4,7 @@
 
 **Goal:** Upgrade every schedule notification in the Telegram bot to be clearer, more scannable, and less noisy — using relative timestamps, per-episode status icons, and a consolidated download flow.
 
-**Architecture:** All changes are inside `telegram-qbt/qbt_telegram_bot.py`. Two new pure helper methods (`_relative_time`, `_episode_status_icon`) are added first, then 8 existing methods are updated to use them. No new files are created.
+**Architecture:** Changes span `telegram-qbt/patchy_bot/utils.py` (new `_relative_time` helper) and `telegram-qbt/patchy_bot/bot.py` (new `_episode_status_icon` method + 8 updated methods). <!-- pre-decomposition: all changes were in single-file qbt_telegram_bot.py monolith -->
 
 **Tech Stack:** Python 3.12, python-telegram-bot, HTML parse mode (`_PM = "HTML"`), existing `format_local_ts` and `now_ts` utilities in the same file.
 
@@ -12,17 +12,18 @@
 
 ## Files to Modify
 
-- **Modify:** `telegram-qbt/qbt_telegram_bot.py`
-  - Add `_relative_time()` near line 823 (next to `format_local_ts`)
+- **Modify:** `telegram-qbt/patchy_bot/utils.py`
+  - Add `_relative_time()` (next to `format_local_ts`)
+- **Modify:** `telegram-qbt/patchy_bot/bot.py`
   - Add `_episode_status_icon()` as a method on `BotApp`
-  - Update `_schedule_episode_label()` at line 3189
-  - Update `_schedule_active_line()` at line 4764
-  - Update `_schedule_preview_text()` at line 3121
-  - Update `_schedule_track_ready_text()` at line 3166
-  - Update `_schedule_missing_text()` at line 3275
-  - Update `_schedule_notify_auto_queued()` at line 3264
-  - Update `_schedule_download_requested()` at line 3477
-  - Update skip confirmation reply at line 6764
+  - Update `_schedule_episode_label()`
+  - Update `_schedule_active_line()`
+  - Update `_schedule_preview_text()`
+  - Update `_schedule_track_ready_text()`
+  - Update `_schedule_missing_text()`
+  - Update `_schedule_notify_auto_queued()`
+  - Update `_schedule_download_requested()`
+  - Update skip confirmation reply
 
 - **Test (add to):** `telegram-qbt/tests/test_parsing.py`
 
@@ -31,14 +32,14 @@
 ## Task 1: Add `_relative_time()` module-level helper
 
 **Files:**
-- Modify: `telegram-qbt/qbt_telegram_bot.py` — add after `format_local_ts` at line 826
+- Modify: `telegram-qbt/patchy_bot/utils.py` — add after `format_local_ts`
 
 - [ ] **Step 1: Write the failing test**
 
 Add to `telegram-qbt/tests/test_parsing.py`:
 
 ```python
-from qbt_telegram_bot import _relative_time
+from patchy_bot.utils import _relative_time
 
 
 def test_relative_time_future_minutes() -> None:
@@ -78,7 +79,7 @@ cd /home/karson/Patchy_Bot/telegram-qbt && .venv/bin/python -m pytest tests/test
 
 Expected: `ImportError` or `NameError` — `_relative_time` not defined yet.
 
-- [ ] **Step 3: Add the function to `qbt_telegram_bot.py` after line 826**
+- [ ] **Step 3: Add the function to `patchy_bot/utils.py` after `format_local_ts`**
 
 Find this line (line 826–827):
 ```python
@@ -125,7 +126,7 @@ Expected: All 6 tests PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /home/karson/Patchy_Bot && git add telegram-qbt/qbt_telegram_bot.py telegram-qbt/tests/test_parsing.py && git commit -m "feat: add _relative_time() helper for human-readable schedule timestamps"
+cd /home/karson/Patchy_Bot && git add telegram-qbt/patchy_bot/utils.py telegram-qbt/tests/test_parsing.py && git commit -m "feat: add _relative_time() helper for human-readable schedule timestamps"
 ```
 
 ---
@@ -133,7 +134,7 @@ cd /home/karson/Patchy_Bot && git add telegram-qbt/qbt_telegram_bot.py telegram-
 ## Task 2: Add `_episode_status_icon()` method to `BotApp`
 
 **Files:**
-- Modify: `telegram-qbt/qbt_telegram_bot.py` — add as a method near `_schedule_episode_label` (around line 3189)
+- Modify: `telegram-qbt/patchy_bot/bot.py` — add as a method near `_schedule_episode_label`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -198,7 +199,7 @@ Find `_schedule_episode_label` at line 3189 and insert this new method directly 
 - [ ] **Step 4: Verify the bot file still parses**
 
 ```bash
-cd /home/karson/Patchy_Bot/telegram-qbt && .venv/bin/python -c "import qbt_telegram_bot; print('OK')"
+cd /home/karson/Patchy_Bot/telegram-qbt && .venv/bin/python -c "import patchy_bot.bot; print('OK')"
 ```
 
 Expected: `OK`
@@ -206,7 +207,7 @@ Expected: `OK`
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /home/karson/Patchy_Bot && git add telegram-qbt/qbt_telegram_bot.py telegram-qbt/tests/test_parsing.py && git commit -m "feat: add _episode_status_icon() helper for per-episode status glyphs"
+cd /home/karson/Patchy_Bot && git add telegram-qbt/patchy_bot/bot.py telegram-qbt/tests/test_parsing.py && git commit -m "feat: add _episode_status_icon() helper for per-episode status glyphs"
 ```
 
 ---
@@ -214,7 +215,7 @@ cd /home/karson/Patchy_Bot && git add telegram-qbt/qbt_telegram_bot.py telegram-
 ## Task 3: Upgrade `_schedule_episode_label()`
 
 **Files:**
-- Modify: `telegram-qbt/qbt_telegram_bot.py` — line 3189 (now shifted by ~10 lines after Task 2 insertion; use grep to find exact line)
+- Modify: `telegram-qbt/patchy_bot/bot.py` (use grep to find exact line after prior insertions)
 
 Current code:
 ```python
@@ -286,7 +287,7 @@ New:
 - [ ] **Step 4: Verify bot still parses**
 
 ```bash
-cd /home/karson/Patchy_Bot/telegram-qbt && .venv/bin/python -c "import qbt_telegram_bot; print('OK')"
+cd /home/karson/Patchy_Bot/telegram-qbt && .venv/bin/python -c "import patchy_bot.bot; print('OK')"
 ```
 
 Expected: `OK`
@@ -294,7 +295,7 @@ Expected: `OK`
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /home/karson/Patchy_Bot && git add telegram-qbt/qbt_telegram_bot.py telegram-qbt/tests/test_parsing.py && git commit -m "feat: upgrade _schedule_episode_label with status icons and relative timestamps"
+cd /home/karson/Patchy_Bot && git add telegram-qbt/patchy_bot/bot.py telegram-qbt/tests/test_parsing.py && git commit -m "feat: upgrade _schedule_episode_label with status icons and relative timestamps"
 ```
 
 ---
@@ -302,7 +303,7 @@ cd /home/karson/Patchy_Bot && git add telegram-qbt/qbt_telegram_bot.py telegram-
 ## Task 4: Upgrade `_schedule_active_line()`
 
 **Files:**
-- Modify: `telegram-qbt/qbt_telegram_bot.py` — line 4764 (check with grep after prior tasks)
+- Modify: `telegram-qbt/patchy_bot/bot.py` (check with grep after prior tasks)
 
 Current code:
 ```python
@@ -356,7 +357,7 @@ Find the entire method body (from `def _schedule_active_line` to the `return` li
 - [ ] **Step 2: Verify bot still parses**
 
 ```bash
-cd /home/karson/Patchy_Bot/telegram-qbt && .venv/bin/python -c "import qbt_telegram_bot; print('OK')"
+cd /home/karson/Patchy_Bot/telegram-qbt && .venv/bin/python -c "import patchy_bot.bot; print('OK')"
 ```
 
 Expected: `OK`
@@ -364,7 +365,7 @@ Expected: `OK`
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /home/karson/Patchy_Bot && git add telegram-qbt/qbt_telegram_bot.py && git commit -m "feat: upgrade _schedule_active_line with lead status icons and relative timestamps"
+cd /home/karson/Patchy_Bot && git add telegram-qbt/patchy_bot/bot.py && git commit -m "feat: upgrade _schedule_active_line with lead status icons and relative timestamps"
 ```
 
 ---
@@ -372,7 +373,7 @@ cd /home/karson/Patchy_Bot && git add telegram-qbt/qbt_telegram_bot.py && git co
 ## Task 5: Upgrade `_schedule_preview_text()`
 
 **Files:**
-- Modify: `telegram-qbt/qbt_telegram_bot.py` — line 3121
+- Modify: `telegram-qbt/patchy_bot/bot.py`
 
 Current format for inventory section:
 ```
@@ -447,7 +448,7 @@ Find the full method body starting at `def _schedule_preview_text` and replace i
 - [ ] **Step 2: Verify bot still parses**
 
 ```bash
-cd /home/karson/Patchy_Bot/telegram-qbt && .venv/bin/python -c "import qbt_telegram_bot; print('OK')"
+cd /home/karson/Patchy_Bot/telegram-qbt && .venv/bin/python -c "import patchy_bot.bot; print('OK')"
 ```
 
 Expected: `OK`
@@ -455,7 +456,7 @@ Expected: `OK`
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /home/karson/Patchy_Bot && git add telegram-qbt/qbt_telegram_bot.py && git commit -m "feat: upgrade _schedule_preview_text with status icons and relative air date"
+cd /home/karson/Patchy_Bot && git add telegram-qbt/patchy_bot/bot.py && git commit -m "feat: upgrade _schedule_preview_text with status icons and relative air date"
 ```
 
 ---
@@ -463,7 +464,7 @@ cd /home/karson/Patchy_Bot && git add telegram-qbt/qbt_telegram_bot.py && git co
 ## Task 6: Upgrade `_schedule_track_ready_text()`
 
 **Files:**
-- Modify: `telegram-qbt/qbt_telegram_bot.py` — line 3166
+- Modify: `telegram-qbt/patchy_bot/bot.py`
 
 Current: Dense lines with counts and absolute timestamps, no visual hierarchy.
 
@@ -505,7 +506,7 @@ New: Divider after header, status-icon inventory rows, relative next-episode tim
 - [ ] **Step 2: Verify bot still parses**
 
 ```bash
-cd /home/karson/Patchy_Bot/telegram-qbt && .venv/bin/python -c "import qbt_telegram_bot; print('OK')"
+cd /home/karson/Patchy_Bot/telegram-qbt && .venv/bin/python -c "import patchy_bot.bot; print('OK')"
 ```
 
 Expected: `OK`
@@ -513,7 +514,7 @@ Expected: `OK`
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /home/karson/Patchy_Bot && git add telegram-qbt/qbt_telegram_bot.py && git commit -m "feat: upgrade _schedule_track_ready_text with divider, status icons, relative time"
+cd /home/karson/Patchy_Bot && git add telegram-qbt/patchy_bot/bot.py && git commit -m "feat: upgrade _schedule_track_ready_text with divider, status icons, relative time"
 ```
 
 ---
@@ -521,7 +522,7 @@ cd /home/karson/Patchy_Bot && git add telegram-qbt/qbt_telegram_bot.py && git co
 ## Task 7: Upgrade `_schedule_missing_text()`
 
 **Files:**
-- Modify: `telegram-qbt/qbt_telegram_bot.py` — line 3275
+- Modify: `telegram-qbt/patchy_bot/bot.py`
 
 Current: All episodes hidden in expandable blockquote. Footer says "Searching hourly" but doesn't show actual next retry time.
 
@@ -564,7 +565,7 @@ New: First 2 episodes always visible (so user immediately sees what's missing), 
 - [ ] **Step 2: Verify bot still parses**
 
 ```bash
-cd /home/karson/Patchy_Bot/telegram-qbt && .venv/bin/python -c "import qbt_telegram_bot; print('OK')"
+cd /home/karson/Patchy_Bot/telegram-qbt && .venv/bin/python -c "import patchy_bot.bot; print('OK')"
 ```
 
 Expected: `OK`
@@ -572,7 +573,7 @@ Expected: `OK`
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /home/karson/Patchy_Bot && git add telegram-qbt/qbt_telegram_bot.py && git commit -m "feat: upgrade _schedule_missing_text with inline episodes and next retry time"
+cd /home/karson/Patchy_Bot && git add telegram-qbt/patchy_bot/bot.py && git commit -m "feat: upgrade _schedule_missing_text with inline episodes and next retry time"
 ```
 
 ---
@@ -580,7 +581,7 @@ cd /home/karson/Patchy_Bot && git add telegram-qbt/qbt_telegram_bot.py && git co
 ## Task 8: Upgrade `_schedule_notify_auto_queued()`
 
 **Files:**
-- Modify: `telegram-qbt/qbt_telegram_bot.py` — line 3264
+- Modify: `telegram-qbt/patchy_bot/bot.py`
 
 Current: 3-line notification. No category, no path, no live monitor attachment.
 
@@ -630,7 +631,7 @@ New: Structured card with category + path context, and auto-attaches a live prog
 - [ ] **Step 2: Verify bot still parses**
 
 ```bash
-cd /home/karson/Patchy_Bot/telegram-qbt && .venv/bin/python -c "import qbt_telegram_bot; print('OK')"
+cd /home/karson/Patchy_Bot/telegram-qbt && .venv/bin/python -c "import patchy_bot.bot; print('OK')"
 ```
 
 Expected: `OK`
@@ -638,7 +639,7 @@ Expected: `OK`
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /home/karson/Patchy_Bot && git add telegram-qbt/qbt_telegram_bot.py && git commit -m "feat: upgrade _schedule_notify_auto_queued with category/path context and live monitor"
+cd /home/karson/Patchy_Bot && git add telegram-qbt/patchy_bot/bot.py && git commit -m "feat: upgrade _schedule_notify_auto_queued with category/path context and live monitor"
 ```
 
 ---
@@ -646,7 +647,7 @@ cd /home/karson/Patchy_Bot && git add telegram-qbt/qbt_telegram_bot.py && git co
 ## Task 9: Upgrade `_schedule_download_requested()` — consolidate message flood
 
 **Files:**
-- Modify: `telegram-qbt/qbt_telegram_bot.py` — line 3477
+- Modify: `telegram-qbt/patchy_bot/bot.py`
 
 Current flow (5+ messages):
 1. "⏳ Searching qBittorrent for: S01E05, S01E06"
@@ -722,7 +723,7 @@ The key UX improvement: the "What's next?" keyboard is merged into the final res
 - [ ] **Step 2: Verify bot still parses**
 
 ```bash
-cd /home/karson/Patchy_Bot/telegram-qbt && .venv/bin/python -c "import qbt_telegram_bot; print('OK')"
+cd /home/karson/Patchy_Bot/telegram-qbt && .venv/bin/python -c "import patchy_bot.bot; print('OK')"
 ```
 
 Expected: `OK`
@@ -730,7 +731,7 @@ Expected: `OK`
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /home/karson/Patchy_Bot && git add telegram-qbt/qbt_telegram_bot.py && git commit -m "feat: consolidate _schedule_download_requested from 5 messages to 2-message flow"
+cd /home/karson/Patchy_Bot && git add telegram-qbt/patchy_bot/bot.py && git commit -m "feat: consolidate _schedule_download_requested from 5 messages to 2-message flow"
 ```
 
 ---
@@ -738,7 +739,7 @@ cd /home/karson/Patchy_Bot && git add telegram-qbt/qbt_telegram_bot.py && git co
 ## Task 10: Upgrade skip confirmation reply
 
 **Files:**
-- Modify: `telegram-qbt/qbt_telegram_bot.py` — line 6764
+- Modify: `telegram-qbt/patchy_bot/bot.py`
 
 Current:
 ```python
@@ -766,7 +767,7 @@ Replace with:
 - [ ] **Step 2: Verify bot still parses**
 
 ```bash
-cd /home/karson/Patchy_Bot/telegram-qbt && .venv/bin/python -c "import qbt_telegram_bot; print('OK')"
+cd /home/karson/Patchy_Bot/telegram-qbt && .venv/bin/python -c "import patchy_bot.bot; print('OK')"
 ```
 
 Expected: `OK`
@@ -782,7 +783,7 @@ Expected: All tests PASS.
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /home/karson/Patchy_Bot && git add telegram-qbt/qbt_telegram_bot.py && git commit -m "feat: clarify skip notification text to explain re-notification conditions"
+cd /home/karson/Patchy_Bot && git add telegram-qbt/patchy_bot/bot.py && git commit -m "feat: clarify skip notification text to explain re-notification conditions"
 ```
 
 ---

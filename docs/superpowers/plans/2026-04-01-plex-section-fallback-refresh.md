@@ -4,9 +4,9 @@
 
 **Goal:** When a `/remove` deletion can't match the deleted file to a specific Plex library section, fall back to refreshing all sections of the matching type so the Plex library is always updated after every removal.
 
-**Architecture:** Two targeted changes to `PlexInventoryClient` in `qbt_telegram_bot.py`. (1) A new `refresh_all_by_type` method that iterates all Plex sections and triggers refresh+wait+emptyTrash on each matching section type. (2) Fix `verify_remove_identity_absent` to scan all sections instead of returning an error when `section_key` is missing. One change to `_remove_attempt_plex_cleanup` in `BotApp` to call the new fallback when `section_key` is empty.
+**Architecture:** Two targeted changes to `PlexInventoryClient` in `patchy_bot/clients/plex.py`. (1) A new `refresh_all_by_type` method that iterates all Plex sections and triggers refresh+wait+emptyTrash on each matching section type. (2) Fix `verify_remove_identity_absent` to scan all sections instead of returning an error when `section_key` is missing. One change to `_remove_attempt_plex_cleanup` in `BotApp` (`patchy_bot/bot.py`) to call the new fallback when `section_key` is empty.
 
-**Tech Stack:** Python 3.12, `qbt_telegram_bot.py` (single-file monolith), pytest, `unittest.mock`
+**Tech Stack:** Python 3.12, `patchy_bot/` package <!-- pre-decomposition: was single-file `qbt_telegram_bot.py` monolith -->, pytest, `unittest.mock`
 
 ---
 
@@ -18,10 +18,11 @@ When a user deletes a file through `/remove`, the bot calls `resolve_remove_iden
 
 ## Files Modified
 
-- **Modify:** `telegram-qbt/qbt_telegram_bot.py`
-  - Add `PlexInventoryClient.refresh_all_by_type` method (~line 1330, after `purge_deleted_path`)
-  - Fix `PlexInventoryClient.verify_remove_identity_absent` (~line 1346) — replace hard error with cross-section path scan
-  - Fix `BotApp._remove_attempt_plex_cleanup` (~line 4079) — add `else` branch for missing `section_key`
+- **Modify:** `telegram-qbt/patchy_bot/clients/plex.py`
+  - Add `PlexInventoryClient.refresh_all_by_type` method (after `purge_deleted_path`)
+  - Fix `PlexInventoryClient.verify_remove_identity_absent` — replace hard error with cross-section path scan
+- **Modify:** `telegram-qbt/patchy_bot/bot.py`
+  - Fix `BotApp._remove_attempt_plex_cleanup` — add `else` branch for missing `section_key`
 - **Modify:** `telegram-qbt/tests/test_parsing.py`
   - Add 3 new tests covering each code path above
 
@@ -30,7 +31,7 @@ When a user deletes a file through `/remove`, the bot calls `resolve_remove_iden
 ## Task 1: Add `PlexInventoryClient.refresh_all_by_type`
 
 **Files:**
-- Modify: `telegram-qbt/qbt_telegram_bot.py` (~line 1330, after `purge_deleted_path`)
+- Modify: `telegram-qbt/patchy_bot/clients/plex.py` (after `purge_deleted_path`)
 - Test: `telegram-qbt/tests/test_parsing.py`
 
 ### Step 1: Write the failing test
@@ -40,7 +41,7 @@ In `tests/test_parsing.py`, add after the last PlexInventoryClient test:
 ```python
 def test_plex_refresh_all_by_type_calls_refresh_and_empty_trash_for_matching_sections(monkeypatch) -> None:
     from unittest.mock import call
-    from qbt_telegram_bot import PlexInventoryClient
+    from patchy_bot.clients.plex import PlexInventoryClient
 
     class FakeResponse:
         def __init__(self) -> None:
@@ -58,7 +59,7 @@ def test_plex_refresh_all_by_type_calls_refresh_and_empty_trash_for_matching_sec
     client = PlexInventoryClient("http://plex.local:32400", "token-123", "/srv/tv")
     fake_session = FakeSession()
     client.session = fake_session  # type: ignore[assignment]
-    monkeypatch.setattr("qbt_telegram_bot.time.sleep", lambda _: None)
+    monkeypatch.setattr("patchy_bot.clients.plex.time.sleep", lambda _: None)
 
     # Two movie sections, one show section — only movie sections should be refreshed
     section_calls = [
@@ -98,7 +99,7 @@ Expected: `FAILED` — `AttributeError: 'PlexInventoryClient' object has no attr
 
 - [ ] **Step 3: Implement `refresh_all_by_type`**
 
-In `qbt_telegram_bot.py`, insert this method directly after `purge_deleted_path` (after line ~1330):
+In `patchy_bot/clients/plex.py`, insert this method directly after `purge_deleted_path`:
 
 ```python
 def refresh_all_by_type(self, section_types: list[str]) -> list[str]:
@@ -143,7 +144,7 @@ Expected: all existing tests + 1 new = 94 passed, 0 failed
 
 ```bash
 cd /home/karson/Patchy_Bot/telegram-qbt
-git add qbt_telegram_bot.py tests/test_parsing.py
+git add patchy_bot/clients/plex.py tests/test_parsing.py
 git commit -m "feat(plex): add refresh_all_by_type fallback for unmatched section paths"
 ```
 
@@ -152,7 +153,7 @@ git commit -m "feat(plex): add refresh_all_by_type fallback for unmatched sectio
 ## Task 2: Fix `verify_remove_identity_absent` to scan all sections when `section_key` is missing
 
 **Files:**
-- Modify: `telegram-qbt/qbt_telegram_bot.py` (~line 1346)
+- Modify: `telegram-qbt/patchy_bot/clients/plex.py`
 - Test: `telegram-qbt/tests/test_parsing.py`
 
 The current code at lines 1346–1348 returns `(False, "Missing Plex section key for {title}")` immediately when `section_key` is empty. This means verification always fails when section_key wasn't resolved, causing the cleanup job to remain in `plex_pending` forever.
@@ -165,7 +166,7 @@ In `tests/test_parsing.py`, add:
 
 ```python
 def test_plex_verify_remove_identity_absent_scans_all_sections_when_no_section_key() -> None:
-    from qbt_telegram_bot import PlexInventoryClient
+    from patchy_bot.clients.plex import PlexInventoryClient
 
     client = PlexInventoryClient("http://plex.local:32400", "token-123", "/srv/tv")
 
@@ -189,7 +190,7 @@ def test_plex_verify_remove_identity_absent_scans_all_sections_when_no_section_k
 
 def test_plex_verify_remove_identity_absent_fails_when_path_still_in_any_section() -> None:
     import xml.etree.ElementTree as ET
-    from qbt_telegram_bot import PlexInventoryClient
+    from patchy_bot.clients.plex import PlexInventoryClient
 
     target = "/mnt/movies/Tires (2023)"
 
@@ -231,7 +232,7 @@ Expected: both `FAILED` — first returns `ok=False` with "Missing Plex section 
 
 - [ ] **Step 3: Implement the fix**
 
-In `qbt_telegram_bot.py`, find `verify_remove_identity_absent` (~line 1346). Replace these two lines:
+In `patchy_bot/clients/plex.py`, find `verify_remove_identity_absent`. Replace these two lines:
 
 **OLD (lines 1346–1348):**
 ```python
@@ -288,7 +289,7 @@ Expected: 96 passed, 0 failed
 
 ```bash
 cd /home/karson/Patchy_Bot/telegram-qbt
-git add qbt_telegram_bot.py tests/test_parsing.py
+git add patchy_bot/clients/plex.py tests/test_parsing.py
 git commit -m "fix(plex): scan all sections in verify_remove_identity_absent when section_key is missing"
 ```
 
@@ -297,7 +298,7 @@ git commit -m "fix(plex): scan all sections in verify_remove_identity_absent whe
 ## Task 3: Update `_remove_attempt_plex_cleanup` to use the fallback when `section_key` is empty
 
 **Files:**
-- Modify: `telegram-qbt/qbt_telegram_bot.py` (~line 4079)
+- Modify: `telegram-qbt/patchy_bot/bot.py`
 - Test: `telegram-qbt/tests/test_parsing.py`
 
 Currently when `section_key` is empty the `if section_key:` block is skipped entirely — no refresh, no emptyTrash. Add an `else` branch that calls `refresh_all_by_type` with the section type inferred from `remove_kind`.
@@ -309,7 +310,8 @@ In `tests/test_parsing.py`, add:
 ```python
 def test_remove_attempt_plex_cleanup_falls_back_to_refresh_all_when_section_key_missing(monkeypatch) -> None:
     from unittest.mock import MagicMock
-    from qbt_telegram_bot import BotApp, PlexInventoryClient
+    from patchy_bot.bot import BotApp
+    from patchy_bot.clients.plex import PlexInventoryClient
 
     refresh_calls: list[list[str]] = []
 
@@ -351,7 +353,8 @@ def test_remove_attempt_plex_cleanup_falls_back_to_refresh_all_when_section_key_
 
 def test_remove_attempt_plex_cleanup_falls_back_to_show_type_for_episode_remove_kind(monkeypatch) -> None:
     from unittest.mock import MagicMock
-    from qbt_telegram_bot import BotApp, PlexInventoryClient
+    from patchy_bot.bot import BotApp
+    from patchy_bot.clients.plex import PlexInventoryClient
 
     refresh_calls: list[list[str]] = []
 
@@ -401,7 +404,7 @@ Expected: both `FAILED` — the fallback doesn't exist yet, so `refresh_all_by_t
 
 - [ ] **Step 3: Implement the fallback in `_remove_attempt_plex_cleanup`**
 
-In `qbt_telegram_bot.py`, find `_remove_attempt_plex_cleanup` (~line 4079). Replace this block:
+In `patchy_bot/bot.py`, find `_remove_attempt_plex_cleanup`. Replace this block:
 
 **OLD:**
 ```python
@@ -444,7 +447,7 @@ Expected: 98 passed, 0 failed
 
 ```bash
 cd /home/karson/Patchy_Bot/telegram-qbt
-git add qbt_telegram_bot.py tests/test_parsing.py
+git add patchy_bot/bot.py tests/test_parsing.py
 git commit -m "fix(plex): fall back to full-type section refresh when section_key is missing on delete"
 ```
 

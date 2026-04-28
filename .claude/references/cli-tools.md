@@ -7,7 +7,6 @@ Prefer CLI tools over MCP servers — CLIs consume zero tokens when idle.
 | CLI | Purpose | Common commands |
 |-----|---------|----------------|
 | `ctx7` | Library docs lookup | `ctx7 resolve <library>`, `ctx7 search <query>` |
-| `task-master` | Task management | `task-master list`, `task-master next`, `task-master set-status` |
 | `gh` | GitHub operations | `gh issue list`, `gh pr create`, `gh pr list` |
 | `ruff` | Python linting | `ruff check --fix .`, `ruff format .` |
 | `mypy` | Type checking | `mypy patchy_bot/` |

@@ -4,5 +4,18 @@
   "description": "Development, debugging, and operations skills for the Patchy Telegram Bot — UX design, code quality, service management, database inspection, and diagnostics",
   "author": {
     "name": "Karson"
-  }
+  },
+  "homepage": "https://github.com/Kman182401/Patchy-Operational",
+  "repository": "https://github.com/Kman182401/Patchy-Operational",
+  "license": "UNLICENSED",
+  "keywords": [
+    "telegram",
+    "qbittorrent",
+    "plex",
+    "python",
+    "media-automation"
+  ],
+  "commands": [],
+  "hooks": "./hooks.json",
+  "mcpServers": {}
 }
