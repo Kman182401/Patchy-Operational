@@ -4,7 +4,7 @@ tags:
 aliases:
   - April 2026 Changelog
 created: 2026-04-11
-updated: 2026-04-13
+updated: 2026-04-28
 ---
 
 # April 2026 Changelog
@@ -24,17 +24,28 @@ April was a month of hardening. Key highlights:
 
 > [!code]- Claude Code Reference
 >
+> ## 2026-04-28
+>
+> **Skill cleanup — Phase 1 + Phase 2**
+>
+> - Deleted two unused Python skills (`python-background-jobs-skill`, `python-configuration-skill`) from `.claude/skills/` — Patchy Bot doesn't use Celery/RQ/Dramatiq or pydantic-settings, and `patchy-bot-python-router` already excluded them.
+> - Updated `patchy-bot-python-router/SKILL.md` to drop named cross-references to the deleted skills; redirected runner/config routing rows to `python-resilience` + `python-type-safety`. Skill count in router: 11 → 9.
+> - Deleted the `skills/patchy-bot/` mirror tree (byte-identical copy of `.claude/skills/` from 2026-04-13). The mirror was created by manual `cp` and forced double-edits on every change. `skills/global/` mirror remains untouched.
+> - Removed 3 stale Bash permission allowlist entries in `.claude/settings.local.json` that had captured the original `mkdir`/`cp` commands used to build the now-deleted mirror.
+>
+> Files modified: `.claude/skills/**` (deletions + router edit), `.claude/settings.local.json`, this changelog.
+>
 > ## 2026-04-13 (late)
 >
 > **Skill infrastructure + Context7 CLI migration**
 >
-> - Python skill suite installed at `.claude/skills/` (mirrored under `skills/patchy-bot/`): `skill-creator`, 11 python skills (`-error-handling`, `-resilience`, `-background-jobs`, `-resource-management`, `-observability`, `-type-safety`, `-anti-patterns`, `-design-patterns`, `-configuration`, `-code-style`, `writing-python`), `context7-skill`, and the project meta-skill `patchy-bot-python-router`.
+> - Python skill suite installed at `.claude/skills/`: `skill-creator`, 11 python skills (`-error-handling`, `-resilience`, `-background-jobs`, `-resource-management`, `-observability`, `-type-safety`, `-anti-patterns`, `-design-patterns`, `-configuration`, `-code-style`, `writing-python`), `context7-skill`, and the project meta-skill `patchy-bot-python-router`.
 > - Global skills added at `~/.claude/skills/`: `context7-skills-scout`, `find-docs`.
 > - Context7 migrated from MCP plugin to `ctx7` CLI (CLI + Skills mode). MCP plugin disabled. Pro subscription still active.
 > - `CLAUDE.md` Web Research Policy rewritten to reference the CLI workflow (`ctx7 library …` → `ctx7 docs …`).
 > - Code-simplifier cleanup on `handlers/download.py`: removed superfluous `_log_*` / `_cp_*` closure-bind locals around `log_malware_block` calls in the completion security gate and poller.
 >
-> Files modified: `.claude/skills/**`, `skills/patchy-bot/**`, `~/.claude/skills/context7-skills-scout/`, `~/.claude/skills/find-docs/`, `CLAUDE.md`, `telegram-qbt/patchy_bot/handlers/download.py`.
+> Files modified: `.claude/skills/**`, `~/.claude/skills/context7-skills-scout/`, `~/.claude/skills/find-docs/`, `CLAUDE.md`, `telegram-qbt/patchy_bot/handlers/download.py`.
 >
 > ## 2026-04-13
 >
